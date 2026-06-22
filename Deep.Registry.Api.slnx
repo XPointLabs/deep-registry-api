@@ -1,0 +1,8 @@
+﻿<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Deep.Registry.Api/Deep.Registry.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Deep.Registry.Api.Tests/Deep.Registry.Api.Tests.csproj" />
+  </Folder>
+</Solution>
