@@ -5,13 +5,95 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Rebex.Security.Cryptography;
 
 namespace Deep.Registry.Api.Tests;
 
 public sealed class RegistryApiTests
 {
     [Fact]
-    public async Task RegisterNodeWithVlessTransport_RoundTripsThroughProfileAndStakeState()
+    public async Task RelayCatalog_RequiresFreshRegisteredNodeSignature_AndRejectsReplay()
+    {
+        await using var factory = new WebApplicationFactory<Program>();
+        using var scope = factory.Services.CreateScope();
+        var registry = scope.ServiceProvider.GetRequiredService<NodeRegistry>();
+        var seed = Enumerable.Range(1, 32).Select(static value => (byte)value).ToArray();
+        var signer = new Ed25519();
+        signer.FromSeed(seed);
+        var nodeId = Convert.ToHexString(signer.GetPublicKey()).ToLowerInvariant();
+        var signedAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+        var expiresAt = signedAt.AddDays(30);
+        var capabilities = new[] { "session-rpc", "onion-v1" };
+        var contactPayload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = "deep-relay-contact-v1",
+            routerId = nodeId,
+            publicHost = "node.example",
+            publicIp = "93.184.216.34",
+            publicPort = 443,
+            x25519PublicKey = new string('1', 64),
+            rpcEndpoint = "http://93.184.216.34:22020/api/peer/onion",
+            signedAtUnixMs = signedAt.ToUnixTimeMilliseconds(),
+            expiresAtUnixMs = expiresAt.ToUnixTimeMilliseconds(),
+            routerVersion = "1.0.0",
+            isReachable = true,
+            capabilities = capabilities.Order(StringComparer.Ordinal).ToArray()
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var contactSignature = Convert.ToHexString(signer.SignMessage(contactPayload)).ToLowerInvariant();
+        var registration = registry.Register(new RegisterNodeRequest
+        {
+            NodeId = nodeId,
+            Ed25519PublicKey = nodeId,
+            OperatorAddress = "0x1111111111111111111111111111111111111111",
+            RewardsAddress = "0x1111111111111111111111111111111111111111",
+            BlsPublicKey = new BlsPublicKey { X = "0x01", Y = "0x02" },
+            TransportStatus = new TransportStatus { Enabled = true, Running = true, Mode = "running" },
+            RelayContact = new RelayContactDocument
+            {
+                RouterId = nodeId,
+                PublicHost = "node.example",
+                PublicIp = "93.184.216.34",
+                PublicPort = 443,
+                X25519PublicKey = new string('1', 64),
+                RpcEndpoint = "http://93.184.216.34:22020/api/peer/onion",
+                SignedAt = signedAt,
+                ExpiresAt = expiresAt,
+                RouterVersion = "1.0.0",
+                IsReachable = true,
+                Capabilities = capabilities,
+                SignatureAlgorithm = "ed25519",
+                Signature = contactSignature
+            }
+        });
+        Assert.True(registration.Success, registration.Error);
+
+        using var client = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/relay-contacts")).StatusCode);
+
+        var now = DateTimeOffset.UtcNow;
+        var nonce = Guid.NewGuid().ToString("N");
+        var requestPayload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = "xpoint-registry-catalog-v1",
+            method = "GET",
+            path = "/api/relay-contacts",
+            nodeId,
+            timestampUnixMs = now.ToUnixTimeMilliseconds(),
+            nonce
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var requestSignature = Convert.ToHexString(signer.SignMessage(requestPayload)).ToLowerInvariant();
+
+        using var authenticated = SignedCatalogRequest(nodeId, now, nonce, requestSignature);
+        var response = await client.SendAsync(authenticated);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Single((await response.Content.ReadFromJsonAsync<JsonElement>()).EnumerateArray());
+
+        using var replay = SignedCatalogRequest(nodeId, now, nonce, requestSignature);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(replay)).StatusCode);
+    }
+
+    [Fact]
+    public async Task RegisterNodeWithVlessTransport_PublicViewHidesTransportSecrets()
     {
         await using var factory = new WebApplicationFactory<Program>();
         using var client = factory.CreateClient();
@@ -64,10 +146,8 @@ public sealed class RegistryApiTests
         Assert.NotEqual(JsonValueKind.Null, node.GetProperty("transportHealthySince").ValueKind);
         Assert.Equal(JsonValueKind.Null, node.GetProperty("transportUnhealthySince").ValueKind);
 
-        var profile = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-1/transport-profile");
-        Assert.Equal("vless", profile.GetProperty("protocol").GetString());
-        Assert.Equal("node.example:443", profile.GetProperty("endpoint").GetString());
-        Assert.Equal("00000000-0000-4000-8000-000000000001", profile.GetProperty("bundle").GetProperty("uuid").GetString());
+        Assert.Equal(JsonValueKind.Null, node.GetProperty("transport").ValueKind);
+        Assert.Equal(JsonValueKind.Null, node.GetProperty("relayContact").ValueKind);
 
         var stakeState = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-1/stake-state");
         Assert.Equal("XPNT", stakeState.GetProperty("tokenSymbol").GetString());
@@ -102,7 +182,7 @@ public sealed class RegistryApiTests
     }
 
     [Fact]
-    public async Task UpdateTransportBundle_ReplacesOnlyTransportProfile()
+    public async Task UpdateTransportBundle_IsNotPubliclyExposed()
     {
         await using var factory = new WebApplicationFactory<Program>();
         using var client = factory.CreateClient();
@@ -126,13 +206,11 @@ public sealed class RegistryApiTests
             security = "reality"
         });
 
-        update.EnsureSuccessStatusCode();
-        var profile = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-2/transport-profile");
-        Assert.Equal("127.0.0.1:8443", profile.GetProperty("endpoint").GetString());
+        Assert.Equal(HttpStatusCode.NotFound, update.StatusCode);
     }
 
     [Fact]
-    public async Task UpdateTransportBundle_RejectsInvalidBundleAsBadRequest()
+    public async Task UpdateTransportBundle_DoesNotExposeLegacyMutationEndpoint()
     {
         await using var factory = new WebApplicationFactory<Program>();
         using var client = factory.CreateClient();
@@ -155,7 +233,7 @@ public sealed class RegistryApiTests
             uuid = "00000000-0000-4000-8000-000000000002"
         });
 
-        Assert.Equal(HttpStatusCode.BadRequest, update.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, update.StatusCode);
     }
 
     [Fact]
@@ -639,6 +717,20 @@ public sealed class RegistryApiTests
                 services.AddSingleton(projectionClient);
             });
         });
+    }
+
+    private static HttpRequestMessage SignedCatalogRequest(
+        string nodeId,
+        DateTimeOffset timestamp,
+        string nonce,
+        string signature)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/relay-contacts");
+        request.Headers.Add("X-XPoint-Node-Id", nodeId);
+        request.Headers.Add("X-XPoint-Timestamp", timestamp.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        request.Headers.Add("X-XPoint-Nonce", nonce);
+        request.Headers.Add("X-XPoint-Signature", signature);
+        return request;
     }
 
     private sealed class FakeStakingProjectionClient : IStakingProjectionClient

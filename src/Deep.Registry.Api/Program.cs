@@ -17,6 +17,7 @@ builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient
     }
 });
 builder.Services.AddSingleton<NodeRegistry>();
+builder.Services.AddSingleton<RegistryCatalogReplayGuard>();
 builder.Services.AddTransient<ProjectionConsistencyService>();
 builder.Services.AddHostedService<RegistryReconciliationWorker>();
 
@@ -38,29 +39,13 @@ api.MapPost("/nodes/register", (RegisterNodeRequest request, NodeRegistry regist
         : Results.BadRequest(new { error = result.Error });
 });
 
-api.MapPut("/nodes/{nodeId}/transport", (string nodeId, TransportBundle request, NodeRegistry registry) =>
-{
-    var result = registry.UpdateTransport(nodeId, request);
-    return result.Success
-        ? Results.Ok(result.Value)
-        : string.Equals(result.Error, "node not found", StringComparison.OrdinalIgnoreCase)
-            ? Results.NotFound(new { error = result.Error })
-            : Results.BadRequest(new { error = result.Error });
-});
-
 api.MapGet("/nodes/{nodeId}", (string nodeId, NodeRegistry registry) =>
 {
-    var node = registry.GetNode(nodeId);
+    var node = registry.GetPublicNode(nodeId);
     return node is null ? Results.NotFound(new { error = "node not found" }) : Results.Ok(node);
 });
 
 api.MapGet("/nodes/runtime", (NodeRegistry registry) => Results.Ok(registry.GetRuntimeStats()));
-
-api.MapGet("/nodes/{nodeId}/transport-profile", (string nodeId, NodeRegistry registry) =>
-{
-    var profile = registry.GetTransportProfile(nodeId);
-    return profile is null ? Results.NotFound(new { error = "node not found or transport not set" }) : Results.Ok(profile);
-});
 
 api.MapGet("/nodes/{nodeId}/stake-state", (string nodeId, NodeRegistry registry) =>
 {
@@ -86,8 +71,13 @@ api.MapGet("/rewards/{address}", async (string address, NodeRegistry registry, I
     return Results.Ok(projected ?? registry.GetRewards(address));
 });
 
-api.MapGet("/nodes", (NodeRegistry registry) => Results.Ok(registry.GetNodes()));
-api.MapGet("/relay-contacts", (NodeRegistry registry) => Results.Ok(registry.GetRelayContacts()));
+api.MapGet("/nodes", (NodeRegistry registry) => Results.Ok(registry.GetPublicNodes()));
+api.MapGet("/relay-contacts", (HttpRequest request, NodeRegistry registry, RegistryCatalogReplayGuard replayGuard) =>
+{
+    return RegistryCatalogRequestAuthenticator.Verify(request, registry, replayGuard, DateTimeOffset.UtcNow)
+        ? Results.Ok(registry.GetRelayContacts())
+        : Results.Unauthorized();
+});
 api.MapGet("/nodes/{nodeId}/projection-consistency", async (string nodeId, ProjectionConsistencyService consistency, CancellationToken cancellationToken) =>
 {
     var report = await consistency.BuildNodeReportAsync(nodeId, cancellationToken);

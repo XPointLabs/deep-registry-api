@@ -16,12 +16,12 @@ registration extension fields that are not part of the Session contracts.
 
 - `POST /api/nodes/register`
 - `PUT /api/nodes/{nodeId}/transport`
-- `GET /api/nodes/{nodeId}/transport-profile`
 - `GET /api/nodes/{nodeId}/stake-state`
 - `GET /api/nodes/{nodeId}/rewards-stake-state`
 - `GET /api/rewards/{address}`
 - `GET /api/nodes/{nodeId}`
 - `GET /api/nodes`
+- `GET /api/relay-contacts` (registered-node Ed25519 authentication required)
 - `GET /api/nodes/runtime`
 - `GET /api/nodes/reconciliation`
 - `GET /api/nodes/reconciliation/projections`

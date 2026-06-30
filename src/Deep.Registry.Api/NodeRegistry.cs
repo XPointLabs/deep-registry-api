@@ -87,6 +87,17 @@ public sealed class NodeRegistry
         return _nodes.Values.OrderBy(node => node.NodeId, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
+    public IReadOnlyCollection<RegisteredNode> GetPublicNodes()
+    {
+        return GetNodes().Select(ToPublicNode).ToArray();
+    }
+
+    public RegisteredNode? GetPublicNode(string nodeId)
+    {
+        var node = GetNode(nodeId);
+        return node is null ? null : ToPublicNode(node);
+    }
+
     public IReadOnlyCollection<RelayContactDocument> GetRelayContacts()
     {
         return _nodes.Values
@@ -527,6 +538,11 @@ public sealed class NodeRegistry
             return "relayContact.signature must be a 64-byte hex value";
         }
 
+        if (!RelayContactDocumentVerifier.Verify(contact, DateTimeOffset.UtcNow))
+        {
+            return "relayContact signature is invalid or expired";
+        }
+
         return null;
     }
 
@@ -547,6 +563,15 @@ public sealed class NodeRegistry
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray()
+        };
+    }
+
+    private static RegisteredNode ToPublicNode(RegisteredNode node)
+    {
+        return node with
+        {
+            Transport = null,
+            RelayContact = null
         };
     }
 
