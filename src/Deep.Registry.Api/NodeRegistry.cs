@@ -87,15 +87,20 @@ public sealed class NodeRegistry
         return _nodes.Values.OrderBy(node => node.NodeId, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    public IReadOnlyCollection<RegisteredNode> GetPublicNodes()
+    public IReadOnlyCollection<PublicNode> GetPublicNodes()
     {
         return GetNodes().Select(ToPublicNode).ToArray();
     }
 
-    public RegisteredNode? GetPublicNode(string nodeId)
+    public PublicNode? GetPublicNode(string nodeId)
     {
         var node = GetNode(nodeId);
         return node is null ? null : ToPublicNode(node);
+    }
+
+    public IReadOnlyCollection<RegistryControlNode> GetControlNodes()
+    {
+        return GetNodes().Select(ToControlNode).ToArray();
     }
 
     public IReadOnlyCollection<RelayContactDocument> GetRelayContacts()
@@ -566,12 +571,45 @@ public sealed class NodeRegistry
         };
     }
 
-    private static RegisteredNode ToPublicNode(RegisteredNode node)
+    private static PublicNode ToPublicNode(RegisteredNode node)
     {
-        return node with
+        return new PublicNode
         {
-            Transport = null,
-            RelayContact = null
+            NodeId = node.NodeId,
+            OperatorAddress = node.OperatorAddress,
+            RewardsAddress = node.RewardsAddress,
+            BlsPublicKey = node.BlsPublicKey,
+            Ed25519PublicKey = node.Ed25519PublicKey,
+            OperatorFeeBps = node.OperatorFeeBps,
+            StakeAtomic = node.StakeAtomic,
+            Contributors = node.Contributors,
+            TransportStatus = node.TransportStatus,
+            TransportHealthySince = node.TransportHealthySince,
+            TransportUnhealthySince = node.TransportUnhealthySince,
+            CreatedAt = node.CreatedAt,
+            UpdatedAt = node.UpdatedAt,
+            Revision = node.Revision
+        };
+    }
+
+    private static RegistryControlNode ToControlNode(RegisteredNode node)
+    {
+        return new RegistryControlNode
+        {
+            NodeId = node.NodeId,
+            OperatorAddress = node.OperatorAddress,
+            RewardsAddress = node.RewardsAddress,
+            BlsPublicKey = node.BlsPublicKey,
+            BlsSignature = node.BlsSignature,
+            Ed25519PublicKey = node.Ed25519PublicKey,
+            Ed25519Signature1 = node.Ed25519Signature1,
+            Ed25519Signature2 = node.Ed25519Signature2,
+            SigningEndpoint = node.SigningEndpoint,
+            Contributors = node.Contributors,
+            TransportStatus = node.TransportStatus,
+            TransportHealthySince = node.TransportHealthySince,
+            TransportUnhealthySince = node.TransportUnhealthySince,
+            UpdatedAt = node.UpdatedAt
         };
     }
 

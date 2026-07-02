@@ -138,16 +138,26 @@ public sealed class RegistryApiTests
         Assert.Equal(HttpStatusCode.Created, register.StatusCode);
 
         var node = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-1");
-        Assert.Equal(
-            "http://node.example:8080/api/staking/quorum/sign",
-            node.GetProperty("signingEndpoint").GetString());
+        Assert.False(node.TryGetProperty("signingEndpoint", out _));
+        Assert.False(node.TryGetProperty("transport", out _));
+        Assert.False(node.TryGetProperty("relayContact", out _));
+        Assert.False(node.TryGetProperty("blsSignature", out _));
+        Assert.False(node.TryGetProperty("ed25519Signature1", out _));
+        Assert.False(node.TryGetProperty("ed25519Signature2", out _));
         Assert.True(node.GetProperty("transportStatus").GetProperty("running").GetBoolean());
         Assert.False(node.GetProperty("transportStatus").GetProperty("mocked").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, node.GetProperty("transportHealthySince").ValueKind);
         Assert.Equal(JsonValueKind.Null, node.GetProperty("transportUnhealthySince").ValueKind);
 
-        Assert.Equal(JsonValueKind.Null, node.GetProperty("transport").ValueKind);
-        Assert.Equal(JsonValueKind.Null, node.GetProperty("relayContact").ValueKind);
+        var controlNodes = await client.GetFromJsonAsync<JsonElement>("/api/internal/nodes");
+        var controlNode = Assert.Single(
+            controlNodes.EnumerateArray(),
+            item => item.GetProperty("nodeId").GetString() == "node-test-1");
+        Assert.Equal(
+            "http://node.example:8080/api/staking/quorum/sign",
+            controlNode.GetProperty("signingEndpoint").GetString());
+        Assert.False(controlNode.TryGetProperty("transport", out _));
+        Assert.False(controlNode.TryGetProperty("relayContact", out _));
 
         var stakeState = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-1/stake-state");
         Assert.Equal("XPNT", stakeState.GetProperty("tokenSymbol").GetString());

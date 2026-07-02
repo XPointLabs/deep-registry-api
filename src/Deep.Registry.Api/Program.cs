@@ -111,6 +111,7 @@ api.MapGet("/rewards/{address}", async (string address, NodeRegistry registry, I
 });
 
 api.MapGet("/nodes", (NodeRegistry registry) => Results.Ok(registry.GetPublicNodes()));
+api.MapGet("/internal/nodes", (NodeRegistry registry) => Results.Ok(registry.GetControlNodes()));
 api.MapGet("/relay-contacts", (HttpRequest request, NodeRegistry registry, RegistryCatalogReplayGuard replayGuard) =>
 {
     return RegistryCatalogRequestAuthenticator.Verify(request, registry, replayGuard, DateTimeOffset.UtcNow)

@@ -20,7 +20,8 @@ registration extension fields that are not part of the Session contracts.
 - `GET /api/nodes/{nodeId}/rewards-stake-state`
 - `GET /api/rewards/{address}`
 - `GET /api/nodes/{nodeId}`
-- `GET /api/nodes`
+- `GET /api/nodes` (public node status; transport credentials, registration proofs, and signer endpoints are omitted)
+- `GET /api/internal/nodes` (Docker control-plane catalog; never expose through the public reverse proxy)
 - `GET /api/relay-contacts` (registered-node Ed25519 authentication required)
 - `GET /api/nodes/runtime`
 - `GET /api/nodes/reconciliation`

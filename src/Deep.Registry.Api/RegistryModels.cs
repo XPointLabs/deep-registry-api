@@ -87,6 +87,42 @@ public sealed record RegisteredNode
     public long Revision { get; init; }
 }
 
+public sealed record PublicNode
+{
+    public string NodeId { get; init; } = "";
+    public string OperatorAddress { get; init; } = "";
+    public string RewardsAddress { get; init; } = "";
+    public BlsPublicKey BlsPublicKey { get; init; } = new();
+    public string Ed25519PublicKey { get; init; } = "";
+    public int OperatorFeeBps { get; init; }
+    public long StakeAtomic { get; init; }
+    public IReadOnlyList<ContributorStake> Contributors { get; init; } = Array.Empty<ContributorStake>();
+    public TransportStatus? TransportStatus { get; init; }
+    public DateTimeOffset? TransportHealthySince { get; init; }
+    public DateTimeOffset? TransportUnhealthySince { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+    public long Revision { get; init; }
+}
+
+public sealed record RegistryControlNode
+{
+    public string NodeId { get; init; } = "";
+    public string OperatorAddress { get; init; } = "";
+    public string RewardsAddress { get; init; } = "";
+    public BlsPublicKey BlsPublicKey { get; init; } = new();
+    public string BlsSignature { get; init; } = "";
+    public string Ed25519PublicKey { get; init; } = "";
+    public string Ed25519Signature1 { get; init; } = "";
+    public string Ed25519Signature2 { get; init; } = "";
+    public string SigningEndpoint { get; init; } = "";
+    public IReadOnlyList<ContributorStake> Contributors { get; init; } = Array.Empty<ContributorStake>();
+    public TransportStatus? TransportStatus { get; init; }
+    public DateTimeOffset? TransportHealthySince { get; init; }
+    public DateTimeOffset? TransportUnhealthySince { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
 public sealed record RelayContactDocument
 {
     public string RouterId { get; init; } = "";
