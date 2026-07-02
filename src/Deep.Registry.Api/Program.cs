@@ -17,6 +17,7 @@ builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient
     }
 });
 builder.Services.AddSingleton<NodeRegistry>();
+builder.Services.AddSingleton<CallSignalStore>();
 builder.Services.AddSingleton<RegistryCatalogReplayGuard>();
 builder.Services.AddTransient<ProjectionConsistencyService>();
 builder.Services.AddHostedService<RegistryReconciliationWorker>();
@@ -30,6 +31,20 @@ app.MapGet("/", () => Results.Redirect("/index.html"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-registry-api" }));
 
 var api = app.MapGroup("/api");
+
+var calls = api.MapGroup("/calls");
+calls.MapPost("/signal", (CallSignalRequest request, CallSignalStore store) =>
+    store.Enqueue(request, DateTimeOffset.UtcNow) switch
+    {
+        CallSignalEnqueueResult.Accepted => Results.Accepted(),
+        CallSignalEnqueueResult.Unauthorized => Results.Unauthorized(),
+        CallSignalEnqueueResult.QueueFull => Results.StatusCode(StatusCodes.Status429TooManyRequests),
+        _ => Results.BadRequest(new { error = "invalid call signal" })
+    });
+calls.MapGet("/inbox/{recipient}", (string recipient, HttpRequest request, CallSignalStore store) =>
+    store.VerifyInboxRequest(recipient, request.Headers, DateTimeOffset.UtcNow)
+        ? Results.Ok(store.Drain(recipient, DateTimeOffset.UtcNow))
+        : Results.Unauthorized());
 
 api.MapPost("/nodes/register", (RegisterNodeRequest request, NodeRegistry registry) =>
 {
