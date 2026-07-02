@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 
 namespace Deep.Registry.Api;
@@ -13,6 +14,69 @@ public sealed record CallInfrastructureOptions
     public string[] IceUrls { get; init; } = [];
 
     public int CredentialLifetimeSeconds { get; init; } = 3600;
+
+    public string? PushNotifyUrl { get; init; }
+
+    public string? PushNotifyBearerTokenFile { get; init; }
+}
+
+public sealed class CallPushNotifier(
+    HttpClient httpClient,
+    IOptions<CallInfrastructureOptions> options,
+    ILogger<CallPushNotifier> logger)
+{
+    private readonly CallInfrastructureOptions options = options.Value;
+
+    public async Task NotifyOfferAsync(CallSignalRequest request, CancellationToken cancellationToken)
+    {
+        if (request.Type != CallSignalType.Offer || string.IsNullOrWhiteSpace(options.PushNotifyUrl))
+        {
+            return;
+        }
+
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var body = JsonSerializer.Serialize(new
+            {
+                pubkey = request.Recipient.Value,
+                hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{request.CallId}:{request.Signature}"))),
+                @namespace = 0,
+                timestamp = now.ToUnixTimeMilliseconds(),
+                expiration = now.AddMinutes(3).ToUnixTimeMilliseconds(),
+                data = Convert.ToBase64String(Encoding.UTF8.GetBytes(request.Payload))
+            });
+            using var message = new HttpRequestMessage(HttpMethod.Post, options.PushNotifyUrl)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            };
+            var bearerToken = ReadBearerToken();
+            if (!string.IsNullOrWhiteSpace(bearerToken))
+            {
+                message.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", bearerToken);
+            }
+
+            using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning("Call push notification was rejected with status {StatusCode}.", response.StatusCode);
+            }
+        }
+        catch (Exception exception) when (exception is HttpRequestException or IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(exception, "Call push notification delivery failed.");
+        }
+    }
+
+    private string? ReadBearerToken()
+    {
+        if (string.IsNullOrWhiteSpace(options.PushNotifyBearerTokenFile))
+        {
+            return null;
+        }
+
+        return File.ReadAllText(options.PushNotifyBearerTokenFile).Trim();
+    }
 }
 
 public sealed record CallIceServer(IReadOnlyList<string> Urls, string? Username = null, string? Credential = null);

@@ -20,6 +20,7 @@ builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient
 builder.Services.AddSingleton<NodeRegistry>();
 builder.Services.AddSingleton<CallSignalStore>();
 builder.Services.AddSingleton<CallIceCredentialIssuer>();
+builder.Services.AddHttpClient<CallPushNotifier>();
 builder.Services.AddSingleton<RegistryCatalogReplayGuard>();
 builder.Services.AddTransient<ProjectionConsistencyService>();
 builder.Services.AddHostedService<RegistryReconciliationWorker>();
@@ -35,14 +36,22 @@ app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-reg
 var api = app.MapGroup("/api");
 
 var calls = api.MapGroup("/calls");
-calls.MapPost("/signal", (CallSignalRequest request, CallSignalStore store) =>
-    store.Enqueue(request, DateTimeOffset.UtcNow) switch
+calls.MapPost("/signal", async (CallSignalRequest request, CallSignalStore store, CallPushNotifier push, CancellationToken cancellationToken) =>
+{
+    var result = store.Enqueue(request, DateTimeOffset.UtcNow);
+    if (result == CallSignalEnqueueResult.Accepted)
+    {
+        await push.NotifyOfferAsync(request, cancellationToken);
+    }
+
+    return result switch
     {
         CallSignalEnqueueResult.Accepted => Results.Accepted(),
         CallSignalEnqueueResult.Unauthorized => Results.Unauthorized(),
         CallSignalEnqueueResult.QueueFull => Results.StatusCode(StatusCodes.Status429TooManyRequests),
         _ => Results.BadRequest(new { error = "invalid call signal" })
-    });
+    };
+});
 calls.MapGet("/inbox/{recipient}", (string recipient, HttpRequest request, CallSignalStore store) =>
     store.VerifyInboxRequest(recipient, request.Headers, DateTimeOffset.UtcNow)
         ? Results.Ok(store.Drain(recipient, DateTimeOffset.UtcNow))
