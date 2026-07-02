@@ -95,6 +95,16 @@ public sealed class CallSignalStore
     }
 
     public bool VerifyInboxRequest(string recipient, IHeaderDictionary headers, DateTimeOffset now)
+        => VerifyAuthenticatedRequest(recipient, headers, now, "deep-call-inbox-v1");
+
+    public bool VerifyIceRequest(string recipient, IHeaderDictionary headers, DateTimeOffset now)
+        => VerifyAuthenticatedRequest(recipient, headers, now, "deep-call-ice-v1");
+
+    private static bool VerifyAuthenticatedRequest(
+        string recipient,
+        IHeaderDictionary headers,
+        DateTimeOffset now,
+        string purpose)
     {
         if (!IsSessionId(recipient)
             || !headers.TryGetValue("X-Deep-Ed25519", out var publicKeyRaw)
@@ -122,7 +132,7 @@ public sealed class CallSignalStore
 
             return PublicKeyAuth.VerifyDetached(
                 Convert.FromBase64String(signatureRaw.ToString()),
-                Encoding.UTF8.GetBytes($"deep-call-inbox-v1\n{recipient}\n{timestamp}"),
+                Encoding.UTF8.GetBytes($"{purpose}\n{recipient}\n{timestamp}"),
                 publicKey);
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException)

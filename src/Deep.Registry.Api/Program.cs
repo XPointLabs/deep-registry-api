@@ -50,7 +50,7 @@ calls.MapGet("/inbox/{recipient}", (string recipient, HttpRequest request, CallS
 calls.MapGet("/ice-servers/{recipient}", (string recipient, HttpRequest request, CallSignalStore store, CallIceCredentialIssuer issuer) =>
 {
     var now = DateTimeOffset.UtcNow;
-    if (!store.VerifyInboxRequest(recipient, request.Headers, now))
+    if (!store.VerifyIceRequest(recipient, request.Headers, now))
     {
         return Results.Unauthorized();
     }

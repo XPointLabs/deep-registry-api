@@ -42,6 +42,7 @@ public sealed class CallSignalStoreTests
             recipient.Keys.PrivateKey));
 
         Assert.True(store.VerifyInboxRequest(recipient.SessionId, headers, now));
+        Assert.False(store.VerifyIceRequest(recipient.SessionId, headers, now));
         Assert.Single(store.Drain(recipient.SessionId, now));
         Assert.Empty(store.Drain(recipient.SessionId, now));
     }
