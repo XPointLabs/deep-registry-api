@@ -3,6 +3,7 @@
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RegistryOptions>(builder.Configuration.GetSection("Registry"));
+builder.Services.Configure<CallInfrastructureOptions>(builder.Configuration.GetSection("Calls"));
 builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient>((services, client) =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<RegistryOptions>>().Value;
@@ -18,6 +19,7 @@ builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient
 });
 builder.Services.AddSingleton<NodeRegistry>();
 builder.Services.AddSingleton<CallSignalStore>();
+builder.Services.AddSingleton<CallIceCredentialIssuer>();
 builder.Services.AddSingleton<RegistryCatalogReplayGuard>();
 builder.Services.AddTransient<ProjectionConsistencyService>();
 builder.Services.AddHostedService<RegistryReconciliationWorker>();
@@ -45,6 +47,19 @@ calls.MapGet("/inbox/{recipient}", (string recipient, HttpRequest request, CallS
     store.VerifyInboxRequest(recipient, request.Headers, DateTimeOffset.UtcNow)
         ? Results.Ok(store.Drain(recipient, DateTimeOffset.UtcNow))
         : Results.Unauthorized());
+calls.MapGet("/ice-servers/{recipient}", (string recipient, HttpRequest request, CallSignalStore store, CallIceCredentialIssuer issuer) =>
+{
+    var now = DateTimeOffset.UtcNow;
+    if (!store.VerifyInboxRequest(recipient, request.Headers, now))
+    {
+        return Results.Unauthorized();
+    }
+
+    var configuration = issuer.Issue(recipient, now);
+    return configuration is null
+        ? Results.Problem("TURN infrastructure is not configured.", statusCode: StatusCodes.Status503ServiceUnavailable)
+        : Results.Ok(configuration);
+});
 
 api.MapPost("/nodes/register", (RegisterNodeRequest request, NodeRegistry registry) =>
 {
