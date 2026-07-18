@@ -1,0 +1,61 @@
+{
+  "schema": "deep-survival-work-package-report.v1",
+  "workPackage": "P06",
+  "title": "Dormant registry checkpoint projection",
+  "status": "green-awaiting-independent-review",
+  "humanOwner": "Mr. X",
+  "repository": "deep-registry-api",
+  "branch": "survival/w02-p06-registry-checkpoint",
+  "baseCommit": "fb7ebac6404e7a53241af08bb2f80d8a81022be8",
+  "redCommit": "70395d5903b078bd57c50db94e8744620bd01bfd",
+  "greenSourceCommit": "59a7ae1b0bfe931c02a637f0e131d42e44b369de",
+  "prerequisite": {
+    "w1w2FinalEvidence": "1c01e24e24647a46b4f37622f3934dc2cc1284ef",
+    "carrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
+    "manifestSha256": "920b24bb5bcfcc8b4f91aef56ed210127246ec9fd2d49178ed9856c8555d0b93",
+    "strictProducerArtifacts": 17,
+    "verdict": "GO-0-0-0-0"
+  },
+  "p04": {
+    "contract": "Deep.Protocol/P04-canonical-v1",
+    "sourceCommit": "b887fa088f486390be182cac4cbcb59b60ce8931",
+    "packageVersion": "0.3.0-p04.b887fa0",
+    "lockedRestore": true,
+    "vendoredExactFiles": 5
+  },
+  "tests": {
+    "focused": {
+      "passed": 23,
+      "failed": 0,
+      "skipped": 0,
+      "trxSha256": "066212da44f478564ee44323ceb380a255a665a82ac4f309163e17b24e37fb29"
+    },
+    "full": {
+      "passed": 46,
+      "failed": 0,
+      "skipped": 0,
+      "trxSha256": "f6428ab7b7628e9f38cb4bbd0baf7307361f1ade7a56a952980fe30eb2e34c0c"
+    },
+    "coverage": {
+      "lines": "1662/2001",
+      "branches": "487/783",
+      "coberturaSha256": "9889d3ec82dc2a2ad92e089b1ee289d24deb4a806a697822897ab13600ba9ea6"
+    }
+  },
+  "runtime": {
+    "defaultEnabled": false,
+    "productionVerifierPresent": false,
+    "liveSourcePresent": false,
+    "checkpointMutationEndpointPresent": false,
+    "nodeRegistryAuthority": false,
+    "dockerUsed": false,
+    "networkServiceUsed": false,
+    "keysOrCredentialsAccessed": false,
+    "pushPerformed": false
+  },
+  "independentReview": {
+    "architectureRecovery": "pending",
+    "securityPrivacy": "pending"
+  },
+  "requiredFinalStatus": "fixture-go-runtime-blocked"
+}
