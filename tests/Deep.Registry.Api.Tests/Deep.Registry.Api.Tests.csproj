@@ -23,4 +23,10 @@
     <ProjectReference Include="..\..\src\Deep.Registry.Api\Deep.Registry.Api.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\vendor\p04\membership-contract-v1.json"
+          Link="Fixtures\membership-contract-v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
