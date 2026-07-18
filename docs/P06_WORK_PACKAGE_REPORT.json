@@ -2,13 +2,15 @@
   "schema": "deep-survival-work-package-report.v1",
   "workPackage": "P06",
   "title": "Dormant registry checkpoint projection",
-  "status": "green-awaiting-independent-review",
+  "status": "corrective-green-awaiting-repeat-independent-review",
   "humanOwner": "Mr. X",
   "repository": "deep-registry-api",
   "branch": "survival/w02-p06-registry-checkpoint",
   "baseCommit": "fb7ebac6404e7a53241af08bb2f80d8a81022be8",
   "redCommit": "70395d5903b078bd57c50db94e8744620bd01bfd",
-  "greenSourceCommit": "59a7ae1b0bfe931c02a637f0e131d42e44b369de",
+  "initialGreenSourceCommit": "59a7ae1b0bfe931c02a637f0e131d42e44b369de",
+  "correctiveRedCommit": "387e85807229c353e917c975e9a3b93c0eac1660",
+  "greenSourceCommit": "79bf87b6f7e42916a94125f665d4a2c053f5d922",
   "prerequisite": {
     "w1w2FinalEvidence": "1c01e24e24647a46b4f37622f3934dc2cc1284ef",
     "carrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
@@ -25,21 +27,21 @@
   },
   "tests": {
     "focused": {
-      "passed": 23,
+      "passed": 35,
       "failed": 0,
       "skipped": 0,
-      "trxSha256": "066212da44f478564ee44323ceb380a255a665a82ac4f309163e17b24e37fb29"
+      "trxSha256": "3b9d8c7a283789b32a97a2171406bea41f71ef73628e3c628ad669a88f039227"
     },
     "full": {
-      "passed": 46,
+      "passed": 58,
       "failed": 0,
       "skipped": 0,
-      "trxSha256": "f6428ab7b7628e9f38cb4bbd0baf7307361f1ade7a56a952980fe30eb2e34c0c"
+      "trxSha256": "2dc31138942a235d8a7e0fbd5d3e4853c5765536f70a26b8dd9243569a98fa29"
     },
     "coverage": {
-      "lines": "1662/2001",
-      "branches": "487/783",
-      "coberturaSha256": "9889d3ec82dc2a2ad92e089b1ee289d24deb4a806a697822897ab13600ba9ea6"
+      "lines": "2172/2569",
+      "branches": "631/973",
+      "coberturaSha256": "a8fccb4a144ac74628b08efa3ed48be3b37718a1255dd4d30c1b13e12139b81d"
     }
   },
   "runtime": {
@@ -54,6 +56,10 @@
     "pushPerformed": false
   },
   "independentReview": {
+    "priorEvidenceCommit": "d6608812fc7a108c305a2ad7d408a9949b657102",
+    "priorArchitectureRecovery": "0/2/1/1",
+    "priorSecurityPrivacy": "0/4/6/2",
+    "repeatReviewSourceCommit": "79bf87b6f7e42916a94125f665d4a2c053f5d922",
     "architectureRecovery": "pending",
     "securityPrivacy": "pending"
   },
