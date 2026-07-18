@@ -51,10 +51,12 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
     public bool ThrowOnWrite { get; set; }
     public bool Quarantined { get; private set; }
     public int LastReadMaximumBytes { get; private set; }
+    public int ReadCount { get; private set; }
     public MemoryMonotonicAnchor Anchor { get; } = new();
 
     public byte[]? Read(int maximumBytes)
     {
+        ReadCount++;
         LastReadMaximumBytes = maximumBytes;
         if (State?.Length > maximumBytes)
         {

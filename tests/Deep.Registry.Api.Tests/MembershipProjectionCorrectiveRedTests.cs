@@ -261,4 +261,144 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Equal("corrupt-state", restarted.GetStatus().State);
         Assert.True(persistence.Quarantined);
     }
+
+    [Fact]
+    public void ForkPoisonSurvivesMainStateWriteFailureAndRestart()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        persistence.ThrowOnWrite = true;
+
+        var fork = service.ApplyBridge(
+            fixture.Bridge(contact: "https://poison.example.invalid/v1"));
+
+        Assert.Equal(MembershipProjectionCode.PersistenceFailure, fork.Code);
+        Assert.True(persistence.Anchor.Read().TerminalUnsafe);
+        persistence.ThrowOnWrite = false;
+        var restarted = fixture.CreateService(persistence);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void RealFileLeaseContentionIsTransientAndRecovers()
+    {
+        var fixture = new P04ProjectionFixture();
+        var statePath = Path.Combine(
+            Path.GetTempPath(),
+            $"p06-contention-{Guid.NewGuid():N}.json");
+        var firstPersistence = new FileMembershipProjectionPersistence(statePath);
+        var secondPersistence = new FileMembershipProjectionPersistence(statePath);
+        var anchor = new MemoryMonotonicAnchor();
+        try
+        {
+            var first = fixture.CreateService(firstPersistence, anchor);
+            fixture.SeedAuthority(first);
+            Assert.True(first.ApplyBridge(fixture.Bridge()).Success);
+            using (firstPersistence.AcquireExclusiveLease())
+            {
+                var contending = fixture.CreateService(secondPersistence, anchor);
+                Assert.Equal("continuity-busy", contending.GetStatus().State);
+                Assert.False(contending.TryGetBridge(out _));
+            }
+
+            var recovered = fixture.CreateService(secondPersistence, anchor);
+            Assert.Equal("current", recovered.GetStatus().State);
+            Assert.True(recovered.TryGetBridge(out _));
+        }
+        finally
+        {
+            foreach (var file in Directory.GetFiles(
+                         Path.GetDirectoryName(statePath)!,
+                         $"{Path.GetFileName(statePath)}*"))
+            {
+                File.Delete(file);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("bridge")]
+    [InlineData("authorityLkg")]
+    [InlineData("forkRecords")]
+    public void ParseableJsonWithNullNestedStateIsQuarantined(string property)
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        var document = JsonNode.Parse(persistence.State!)!.AsObject();
+        document[property] = null;
+        persistence.State = Encoding.UTF8.GetBytes(document.ToJsonString());
+        persistence.Anchor.RebindCurrentState(persistence.State);
+
+        var exception = Record.Exception(() => fixture.CreateService(persistence));
+
+        Assert.Null(exception);
+        Assert.True(persistence.Quarantined);
+    }
+
+    [Fact]
+    public void InvalidConfiguredStateLimitIsRejectedBeforePersistedRead()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence
+        {
+            State = new byte[32]
+        };
+        var options = fixture.Options() with
+        {
+            MaximumStateBytes = MembershipProjectionService.HardMaximumStateBytes + 1
+        };
+
+        var service = new MembershipProjectionService(
+            Microsoft.Extensions.Options.Options.Create(options),
+            fixture.Time,
+            P04MembershipArtifactVerifier.Create([fixture.Verifier]),
+            persistence,
+            MembershipProjectionMonotonicBoundary.Create([persistence.Anchor]));
+
+        Assert.Equal(0, persistence.ReadCount);
+        Assert.Equal("invalid-configuration", service.GetStatus().State);
+    }
+
+    [Fact]
+    public void TransientAnchorReadIsNonReadyThenRecovers()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        persistence.Anchor.TransientReadFailuresRemaining = 6;
+
+        Assert.Equal("monotonic-anchor-transient", service.GetStatus().State);
+        Assert.False(service.TryGetBridge(out _));
+        Assert.Equal("current", service.GetStatus().State);
+        Assert.True(service.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void CorruptRecoveryCounterDoesNotPreventReseedContinuity()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence
+        {
+            State = "{bad-json"u8.ToArray()
+        };
+        persistence.Anchor.RebindAsGeneration(1, persistence.State);
+        var service = fixture.CreateService(persistence);
+        Assert.Equal("corrupt-state", service.GetStatus().State);
+        Assert.Equal(1, service.GetStatus().Counters.CorruptStateRecoveries);
+        persistence.Anchor.Reset();
+
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        Assert.Equal("current", service.GetStatus().State);
+        Assert.Equal(1, service.GetStatus().Counters.CorruptStateRecoveries);
+    }
 }
