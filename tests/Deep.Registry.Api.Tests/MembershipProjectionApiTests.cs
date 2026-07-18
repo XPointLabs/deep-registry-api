@@ -57,8 +57,10 @@ public sealed class MembershipProjectionApiTests
             Assert.Equal(MembershipProjectionEndpoints.BridgeContentType, response.Content.Headers.ContentType?.MediaType);
             Assert.Equal(expected, responseBytes);
             Assert.NotNull(response.Headers.ETag);
-            Assert.True(response.Headers.CacheControl?.Public);
-            Assert.True(response.Headers.CacheControl?.MaxAge >= TimeSpan.Zero);
+            Assert.True(response.Headers.CacheControl?.Private);
+            Assert.True(response.Headers.CacheControl?.NoStore);
+            Assert.True(response.Headers.CacheControl?.MustRevalidate);
+            Assert.Equal(TimeSpan.Zero, response.Headers.CacheControl?.MaxAge);
 
             using var conditional = new HttpRequestMessage(
                 HttpMethod.Get,
@@ -67,6 +69,20 @@ public sealed class MembershipProjectionApiTests
             var notModified = await client.SendAsync(conditional);
             Assert.Equal(HttpStatusCode.NotModified, notModified.StatusCode);
             Assert.Empty(await notModified.Content.ReadAsByteArrayAsync());
+
+            using var wildcard = new HttpRequestMessage(HttpMethod.Get, "/api/v1/checkpoints/bridge");
+            wildcard.Headers.TryAddWithoutValidation("If-None-Match", "*");
+            Assert.Equal(
+                HttpStatusCode.NotModified,
+                (await client.SendAsync(wildcard)).StatusCode);
+
+            using var weak = new HttpRequestMessage(HttpMethod.Get, "/api/v1/checkpoints/bridge");
+            weak.Headers.TryAddWithoutValidation(
+                "If-None-Match",
+                $"\"other\", W/{response.Headers.ETag}");
+            Assert.Equal(
+                HttpStatusCode.NotModified,
+                (await client.SendAsync(weak)).StatusCode);
         }
         finally
         {
@@ -98,6 +114,8 @@ public sealed class MembershipProjectionApiTests
             Assert.DoesNotContain("statePath", status, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("nodeId", status, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("operator", status, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("membershipSequence", status, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("membershipSha256", status, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
