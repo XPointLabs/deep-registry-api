@@ -45,11 +45,24 @@ internal sealed class ManualTimeProvider(DateTimeOffset value) : TimeProvider
 
 internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersistence
 {
+    private readonly object _leaseGate = new();
+
     public byte[]? State { get; set; }
     public bool ThrowOnWrite { get; set; }
     public bool Quarantined { get; private set; }
+    public int LastReadMaximumBytes { get; private set; }
+    public MemoryMonotonicAnchor Anchor { get; } = new();
 
-    public byte[]? Read() => State?.ToArray();
+    public byte[]? Read(int maximumBytes)
+    {
+        LastReadMaximumBytes = maximumBytes;
+        if (State?.Length > maximumBytes)
+        {
+            throw new InvalidDataException("fixture state exceeds configured maximum");
+        }
+
+        return State?.ToArray();
+    }
 
     public void Write(ReadOnlySpan<byte> state)
     {
@@ -65,6 +78,67 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
     {
         Quarantined = true;
         State = null;
+    }
+
+    public IDisposable AcquireExclusiveLease()
+    {
+        Monitor.Enter(_leaseGate);
+        return new MonitorLease(_leaseGate);
+    }
+
+    private sealed class MonitorLease(object gate) : IDisposable
+    {
+        private object? _gate = gate;
+
+        public void Dispose()
+        {
+            var gate = Interlocked.Exchange(ref _gate, null);
+            if (gate is not null)
+            {
+                Monitor.Exit(gate);
+            }
+        }
+    }
+}
+
+internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnchor
+{
+    private readonly object _gate = new();
+    private MembershipProjectionAnchor _current = MembershipProjectionAnchor.Empty;
+
+    public MembershipProjectionAnchor Read()
+    {
+        lock (_gate)
+        {
+            return _current;
+        }
+    }
+
+    public bool CompareExchange(
+        MembershipProjectionAnchor expected,
+        MembershipProjectionAnchor next)
+    {
+        lock (_gate)
+        {
+            if (_current != expected)
+            {
+                return false;
+            }
+
+            _current = next;
+            return true;
+        }
+    }
+
+    public void RebindCurrentState(ReadOnlySpan<byte> state)
+    {
+        lock (_gate)
+        {
+            _current = _current with
+            {
+                StateSha256 = Convert.ToHexString(SHA256.HashData(state)).ToLowerInvariant()
+            };
+        }
     }
 }
 
@@ -143,11 +217,21 @@ internal sealed class P04ProjectionFixture
 
     public MembershipProjectionService CreateService(
         IMembershipProjectionPersistence persistence) =>
+        CreateService(
+            persistence,
+            persistence is MemoryProjectionPersistence memory
+                ? memory.Anchor
+                : new MemoryMonotonicAnchor());
+
+    public MembershipProjectionService CreateService(
+        IMembershipProjectionPersistence persistence,
+        IMembershipProjectionMonotonicAnchor anchor) =>
         new(
             Microsoft.Extensions.Options.Options.Create(Options()),
             Time,
             P04MembershipArtifactVerifier.Create([Verifier]),
-            persistence);
+            persistence,
+            MembershipProjectionMonotonicBoundary.Create([anchor]));
 
     public void SeedAuthority(MembershipProjectionService service)
     {
@@ -284,6 +368,30 @@ internal sealed class P04ProjectionFixture
                 .Select(signer => Signature(
                     signer,
                     MembershipSignatureDomain.OfflineRevocation,
+                    canonical))
+                .ToArray()
+        });
+    }
+
+    public byte[] CompetingDelegation()
+    {
+        var online = _online.ToArray();
+        online[0] = online[0] with
+        {
+            PublicKey = Range(0x21, MembershipLimits.PublicKeyLength)
+        };
+        var unsigned = Delegation with
+        {
+            OnlineSigners = online,
+            Signatures = []
+        };
+        var canonical = MembershipContractCodec.GetDelegationSigningBytes(unsigned);
+        return MembershipContractCodec.EncodeSignedDelegation(unsigned with
+        {
+            Signatures = _offline.Take(3)
+                .Select(signer => Signature(
+                    signer,
+                    MembershipSignatureDomain.OfflineDelegation,
                     canonical))
                 .ToArray()
         });

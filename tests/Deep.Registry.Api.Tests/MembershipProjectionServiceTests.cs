@@ -22,7 +22,6 @@ public sealed class MembershipProjectionServiceTests
         var status = service.GetStatus();
         Assert.True(status.Ready);
         Assert.Equal(2UL, status.BridgeSequence);
-        Assert.Equal(2UL, status.MembershipSequence);
         Assert.Equal(4, status.Counters.Accepted);
         Assert.Equal(1, status.Counters.Idempotent);
     }

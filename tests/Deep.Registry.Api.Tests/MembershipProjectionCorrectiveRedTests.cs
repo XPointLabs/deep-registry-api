@@ -86,8 +86,14 @@ public sealed class MembershipProjectionCorrectiveRedTests
 
         Assert.Equal("fork-detected", restarted.GetStatus().State);
         Assert.False(restarted.TryGetBridge(out _));
-        Assert.Contains(Convert.ToBase64String(first), Encoding.UTF8.GetString(persistence.State!));
-        Assert.Contains(Convert.ToBase64String(second), Encoding.UTF8.GetString(persistence.State!));
+        var persisted = JsonNode.Parse(persistence.State!)!.AsObject();
+        var record = persisted["forkRecords"]!.AsArray().Single()!.AsObject();
+        Assert.Equal(
+            Convert.ToBase64String(first),
+            record["firstEnvelopeBase64"]!.GetValue<string>());
+        Assert.Equal(
+            Convert.ToBase64String(second),
+            record["secondEnvelopeBase64"]!.GetValue<string>());
     }
 
     [Fact]
@@ -108,6 +114,22 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.False(restarted.GetStatus().Ready);
         Assert.Equal("monotonic-conflict", restarted.GetStatus().State);
         Assert.False(restarted.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void WholeFileRollbackWhileRunning_IsDetectedBeforeServing()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        var oldState = persistence.State!.ToArray();
+        Assert.True(service.ApplyMembership(fixture.Membership()).Success);
+        persistence.State = oldState;
+
+        Assert.False(service.TryGetBridge(out _));
+        Assert.Equal("monotonic-conflict", service.GetStatus().State);
     }
 
     [Fact]
@@ -170,5 +192,73 @@ public sealed class MembershipProjectionCorrectiveRedTests
                 File.Delete(file);
             }
         }
+    }
+
+    [Fact]
+    public void TimestampOutsideDateTimeOffsetRange_IsRejectedWithBoundedCode()
+    {
+        var fixture = new P04ProjectionFixture();
+        var service = fixture.CreateService(new MemoryProjectionPersistence());
+        fixture.SeedAuthority(service);
+
+        var result = service.ApplyBridge(
+            fixture.Bridge(validUntil: ulong.MaxValue));
+
+        Assert.Equal(MembershipProjectionCode.TimestampOutOfRange, result.Code);
+        Assert.False(result.Success);
+    }
+
+    [Fact]
+    public void AuthorityForkPersistsBothCandidatesAndCannotBeClearedByBoolean()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        Assert.True(
+            service.ApplyGenesis(fixture.GenesisBytes, fixture.GenesisSignatures).Success);
+        Assert.True(service.ApplyDelegation(fixture.DelegationBytes).Success);
+        var competing = fixture.CompetingDelegation();
+
+        Assert.Equal(
+            MembershipProjectionCode.ForkDetected,
+            service.ApplyDelegation(competing).Code);
+        var document = JsonNode.Parse(persistence.State!)!.AsObject();
+        document["forkDetected"] = false;
+        persistence.State = Encoding.UTF8.GetBytes(document.ToJsonString());
+        persistence.Anchor.RebindCurrentState(persistence.State);
+
+        var restarted = fixture.CreateService(persistence);
+        var record = JsonNode.Parse(persistence.State!)!["forkRecords"]!
+            .AsArray()
+            .Single()!
+            .AsObject();
+
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.Equal(
+            Convert.ToBase64String(fixture.DelegationBytes),
+            record["firstEnvelopeBase64"]!.GetValue<string>());
+        Assert.Equal(
+            Convert.ToBase64String(competing),
+            record["secondEnvelopeBase64"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RevocationStateWithActiveDelegation_IsQuarantined()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyRevocation(fixture.Revocation()).Success);
+        var document = JsonNode.Parse(persistence.State!)!.AsObject();
+        document["activeDelegationBase64"] =
+            Convert.ToBase64String(fixture.DelegationBytes);
+        persistence.State = Encoding.UTF8.GetBytes(document.ToJsonString());
+        persistence.Anchor.RebindCurrentState(persistence.State);
+
+        var restarted = fixture.CreateService(persistence);
+
+        Assert.Equal("corrupt-state", restarted.GetStatus().State);
+        Assert.True(persistence.Quarantined);
     }
 }

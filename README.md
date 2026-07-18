@@ -52,15 +52,40 @@ Configuration:
     "Enabled": false,
     "ContractIdentifier": "Deep.Protocol/P04-canonical-v1",
     "PackageVersion": "0.3.0-p04.b887fa0",
+    "StatePath": "artifacts/membership-projection-state.json",
+    "ExpectedNetworkIdHex": "",
+    "ExpectedGenesisSha256Hex": "",
+    "MaximumArtifactBytes": 131072,
+    "MaximumStateBytes": 524288,
+    "AllowedClockSkewSeconds": 30,
+    "ClientProtocol": 2,
     "FixtureSourceWorkerEnabled": false
   }
 }
 ```
 
 There is no checkpoint mutation, membership or inclusion-proof endpoint.
-When enabled without a verifier/current bridge, readiness and bridge fetch
-return a sanitized `503`. The only accepted local package status is
-`fixture-go-runtime-blocked`.
+When enabled without a verifier, exactly one external
+`IMembershipProjectionMonotonicAnchor`, trusted genesis pins or a current
+bridge, readiness and bridge fetch return a sanitized `503`. This repository
+intentionally ships no production monotonic-anchor or signature-verifier
+implementation, so configuration alone cannot activate the projection. The
+only accepted local package status is `fixture-go-runtime-blocked`.
+
+Checkpoint state is read with the exact configured size ceiling before
+deserialization and updated under an interprocess file lease. Each durable
+generation is bound to the external monotonic anchor; a missing file, stale
+generation, changed hash or anchor failure stops publication without
+quarantining rollback evidence. Structurally or cryptographically corrupt
+state is quarantined. Authority changes immediately stop an older bridge until
+a bridge bound to the current delegation is accepted. Valid fork candidates
+and their canonical evidence are retained, and a fork latch cannot be cleared
+by changing only the state boolean.
+
+Successful bridge responses use `private, no-store, max-age=0,
+must-revalidate` and support wildcard, list and weak `If-None-Match`
+comparison. Status exposes bridge freshness and bounded counters, but no
+membership sequence/hash or topology.
 
 State persistence behavior:
 

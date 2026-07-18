@@ -11,6 +11,7 @@ public sealed record MembershipProjectionOptions
     public string ExpectedNetworkIdHex { get; init; } = "";
     public string ExpectedGenesisSha256Hex { get; init; } = "";
     public int MaximumArtifactBytes { get; init; } = 128 * 1024;
+    public int MaximumStateBytes { get; init; } = 512 * 1024;
     public uint AllowedClockSkewSeconds { get; init; } = 30;
     public ushort ClientProtocol { get; init; } = 2;
     public bool FixtureSourceWorkerEnabled { get; init; }
@@ -22,6 +23,8 @@ public enum MembershipProjectionCode
     Idempotent,
     Disabled,
     VerifierUnavailable,
+    MonotonicAnchorUnavailable,
+    MonotonicConflict,
     StateUnavailable,
     InvalidLength,
     InvalidArtifact,
@@ -37,6 +40,7 @@ public enum MembershipProjectionCode
     Expired,
     NotYetValid,
     ClockSkew,
+    TimestampOutOfRange,
     RevokedDelegation,
     PersistenceFailure,
     CorruptState,
@@ -80,8 +84,6 @@ public sealed record MembershipProjectionStatus(
     ulong? BridgeSequence,
     string? BridgeSha256,
     DateTimeOffset? BridgeValidUntil,
-    ulong? MembershipSequence,
-    string? MembershipSha256,
     MembershipProjectionCounters Counters);
 
 public sealed record MembershipProjectionBridgeArtifact(

@@ -77,6 +77,15 @@ public sealed class P04PackagePinTests
             .Select(element => (string?)element.Attribute("pattern"))
             .ToArray();
         Assert.Equal(new[] { "Deep.Protocol", "Deep.Protocol.*" }, localPatterns);
+        var remotePatterns = config.Descendants("packageSource")
+            .Single(element => (string?)element.Attribute("key") == "nuget.org")
+            .Elements("package")
+            .Select(element => (string?)element.Attribute("pattern"))
+            .ToArray();
+        Assert.DoesNotContain("*", remotePatterns);
+        Assert.DoesNotContain(
+            remotePatterns,
+            pattern => pattern?.StartsWith("Deep.", StringComparison.Ordinal) == true);
 
         foreach (var lockPath in new[]
                  {

@@ -26,8 +26,7 @@ public static class MembershipProjectionEndpoints
             (
                 HttpRequest request,
                 HttpResponse response,
-                MembershipProjectionService service,
-                TimeProvider timeProvider) =>
+                MembershipProjectionService service) =>
             {
                 if (!service.TryGetBridge(out var artifact) || artifact is null)
                 {
@@ -40,18 +39,43 @@ public static class MembershipProjectionEndpoints
 
                 var etag = $"\"sha256-{artifact.Sha256}\"";
                 response.Headers.ETag = etag;
-                var maxAge = Math.Max(
-                        0,
-                        (long)Math.Floor(
-                            (artifact.ValidUntil - timeProvider.GetUtcNow()).TotalSeconds));
-                response.Headers.CacheControl = $"public,max-age={maxAge}";
-                if (request.Headers.IfNoneMatch.Any(value =>
-                        string.Equals(value, etag, StringComparison.Ordinal)))
+                response.Headers.CacheControl =
+                    "private,no-store,max-age=0,must-revalidate";
+                if (MatchesIfNoneMatch(request.Headers.IfNoneMatch, etag))
                 {
                     return Results.StatusCode(StatusCodes.Status304NotModified);
                 }
 
                 return Results.Bytes(artifact.Bytes, BridgeContentType);
             });
+    }
+
+    private static bool MatchesIfNoneMatch(
+        IEnumerable<string> headerValues,
+        string currentEtag)
+    {
+        foreach (var value in headerValues)
+        {
+            foreach (var candidateValue in value.Split(','))
+            {
+                var candidate = candidateValue.Trim();
+                if (candidate == "*")
+                {
+                    return true;
+                }
+
+                if (candidate.StartsWith("W/", StringComparison.OrdinalIgnoreCase))
+                {
+                    candidate = candidate[2..].TrimStart();
+                }
+
+                if (string.Equals(candidate, currentEtag, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

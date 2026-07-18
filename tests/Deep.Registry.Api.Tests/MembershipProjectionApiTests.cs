@@ -147,6 +147,8 @@ public sealed class MembershipProjectionApiTests
                 services.RemoveAll<TimeProvider>();
                 services.AddSingleton<TimeProvider>(fixture.Time);
                 services.AddSingleton<IMembershipSignatureVerifier>(fixture.Verifier);
+                services.AddSingleton<IMembershipProjectionMonotonicAnchor>(
+                    new MemoryMonotonicAnchor());
             });
         });
 

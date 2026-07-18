@@ -23,6 +23,10 @@ The local P06 slice:
 - ships no verifier implementation or test key in the application assembly;
 - persists exact accepted envelopes with same-directory flush/replace before
   publishing memory;
+- requires exactly one external monotonic generation/hash anchor and ships no
+  production implementation;
+- serializes transitions with an interprocess file lease and rejects a whole
+  file rollback before serving;
 - quarantines corrupt state and fails readiness;
 - keeps independent authority, bridge and membership LKG chains;
 - exposes only the exact signed public bridge envelope;
@@ -48,17 +52,26 @@ owner must confirm it before runtime activation.
 ## Persistence and fork behavior
 
 Every transition verifies against the expected predecessor while holding a
-single process gate. Durable state is flushed and atomically replaced before
-the in-memory reference changes. A failed write leaves both the prior durable
-and in-memory LKG unchanged.
+single-process gate and an interprocess file lease. Durable state is flushed
+and atomically replaced before an external generation/hash anchor is advanced
+with compare/exchange and before the in-memory reference changes. An anchor
+mismatch, missing file behind a non-empty anchor, stale generation, changed
+file hash or anchor I/O failure permanently stops publication for that service
+instance. Rollback evidence is not quarantined as corruption.
 
 An identical artifact is idempotent. A different valid same-sequence successor
-is preserved as a fork condition; it does not replace the accepted LKG and
-publication/readiness stop. P06 never selects a winning fork.
+sets an in-memory unsafe latch before persistence. Both signed candidates,
+their canonical statements and hashes are preserved as fork evidence; they do
+not replace the accepted LKG and publication/readiness stop. Persisted evidence
+is reverified at startup, so clearing only `forkDetected` cannot recover.
+P06 never selects a winning fork.
 
-Persisted bytes are decoded, re-encoded and cryptographically reverified at
-startup. Corrupt or mismatched state is quarantined. Expired state is retained
-as stale evidence but is not served.
+Each content envelope retains the exact delegation and authority LKG under
+which it was accepted. This permits historical verification after a later
+revocation while readiness immediately stops serving the old bridge. Persisted
+bytes are size-bounded before allocation/deserialization and cryptographically
+reverified at startup. Structurally or cryptographically corrupt state is
+quarantined. Expired state is retained as stale evidence but is not served.
 
 ## Public disclosure
 
@@ -67,9 +80,11 @@ byte-for-byte with:
 
 `application/vnd.deep.p04.signed-bridge.v1+octet-stream`.
 
-The status surface exposes bounded state codes, hashes, sequences and counters
-only. It does not expose contacts, contact history, signer/node IDs,
-operator/reward addresses, source URLs, paths or exceptions.
+The status surface exposes bounded state codes, bridge hash/sequence/freshness
+and counters only. It does not expose membership hash/sequence, contacts,
+contact history, signer/node IDs, operator/reward addresses, source URLs,
+paths or exceptions. Bridge responses are private and non-storable with
+zero max-age and ETag revalidation.
 
 The membership commitment is verified only for local state-machine evidence.
 There is no membership or inclusion-proof endpoint. P04 currently defines an
@@ -81,6 +96,8 @@ inclusion-proof codec but no normative member-leaf schema or Merkle verifier.
 - There is no approved signature algorithm/profile or production verifier.
 - There is no production genesis pin, ceremony bundle or live delegation.
 - There is no approved P04B/P04C artifact source.
+- There is no production external monotonic-anchor implementation or recovery
+  ceremony.
 - Domain LKG interpretation and membership disclosure require approval.
 - Cross-language crypto vectors, integrated P04B–P07 evidence, external
   security review and recovery drills are absent.

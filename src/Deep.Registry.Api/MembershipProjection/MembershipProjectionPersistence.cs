@@ -4,9 +4,10 @@ namespace Deep.Registry.Api;
 
 public interface IMembershipProjectionPersistence
 {
-    byte[]? Read();
+    byte[]? Read(int maximumBytes);
     void Write(ReadOnlySpan<byte> state);
     void Quarantine();
+    IDisposable AcquireExclusiveLease();
 }
 
 public sealed class FileMembershipProjectionPersistence : IMembershipProjectionPersistence
@@ -18,7 +19,29 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
         _statePath = statePath;
     }
 
-    public byte[]? Read() => File.Exists(_statePath) ? File.ReadAllBytes(_statePath) : null;
+    public byte[]? Read(int maximumBytes)
+    {
+        if (!File.Exists(_statePath))
+        {
+            return null;
+        }
+
+        using var stream = new FileStream(
+            _statePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 16 * 1024,
+            FileOptions.SequentialScan);
+        if (stream.Length > maximumBytes)
+        {
+            throw new InvalidDataException("Persisted membership state exceeds its hard limit.");
+        }
+
+        var bytes = new byte[checked((int)stream.Length)];
+        stream.ReadExactly(bytes);
+        return bytes;
+    }
 
     public void Write(ReadOnlySpan<byte> state)
     {
@@ -72,6 +95,23 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
             $"{_statePath}.corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.bak";
         File.Move(_statePath, quarantinePath, true);
     }
+
+    public IDisposable AcquireExclusiveLease()
+    {
+        var directory = Path.GetDirectoryName(_statePath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        return new FileStream(
+            $"{_statePath}.lock",
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 1,
+            FileOptions.WriteThrough);
+    }
 }
 
 internal sealed record PersistedMembershipProjection
@@ -92,6 +132,8 @@ internal sealed record PersistedMembershipProjection
     public PersistedContentDomain Bridge { get; init; } = new();
     public PersistedContentDomain Membership { get; init; } = new();
     public bool ForkDetected { get; init; }
+    public long Generation { get; init; }
+    public IReadOnlyList<PersistedForkRecord> ForkRecords { get; init; } = [];
 }
 
 internal sealed record PersistedSignature
@@ -115,6 +157,21 @@ internal sealed record PersistedContentDomain
     public PersistedLastKnownGood PredecessorLkg { get; init; } = new();
     public string EnvelopeBase64 { get; init; } = "";
     public long ValidUntilUnixSeconds { get; init; }
+    public PersistedLastKnownGood AcceptedAuthorityLkg { get; init; } = new();
+    public string AcceptedDelegationBase64 { get; init; } = "";
+}
+
+internal sealed record PersistedForkRecord
+{
+    public string Domain { get; init; } = "";
+    public ulong Sequence { get; init; }
+    public string PreviousHashHex { get; init; } = "";
+    public string FirstEnvelopeBase64 { get; init; } = "";
+    public string SecondEnvelopeBase64 { get; init; } = "";
+    public string FirstCanonicalStatementBase64 { get; init; } = "";
+    public string SecondCanonicalStatementBase64 { get; init; } = "";
+    public string FirstHashHex { get; init; } = "";
+    public string SecondHashHex { get; init; } = "";
 }
 
 internal static class MembershipProjectionJson
