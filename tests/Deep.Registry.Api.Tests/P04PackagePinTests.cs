@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 
 namespace Deep.Registry.Api.Tests;
@@ -59,6 +60,46 @@ public sealed class P04PackagePinTests
             Assert.Equal(
                 "b887fa088f486390be182cac4cbcb59b60ce8931",
                 metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
+        }
+    }
+
+    [Fact]
+    public void NuGetConfigurationAndLocks_PinP04ToRepositoryVendor()
+    {
+        var root = RepositoryRoot();
+        var config = XDocument.Load(Path.Combine(root, "NuGet.Config"));
+        var localSource = config.Descendants("add")
+            .Single(element => (string?)element.Attribute("key") == "p04-vendor");
+        Assert.Equal("vendor/p04", (string?)localSource.Attribute("value"));
+        var localPatterns = config.Descendants("packageSource")
+            .Single(element => (string?)element.Attribute("key") == "p04-vendor")
+            .Elements("package")
+            .Select(element => (string?)element.Attribute("pattern"))
+            .ToArray();
+        Assert.Equal(new[] { "Deep.Protocol", "Deep.Protocol.*" }, localPatterns);
+
+        foreach (var lockPath in new[]
+                 {
+                     Path.Combine(root, "src", "Deep.Registry.Api", "packages.lock.json"),
+                     Path.Combine(root, "tests", "Deep.Registry.Api.Tests", "packages.lock.json")
+                 })
+        {
+            var dependencies = JsonNode.Parse(File.ReadAllText(lockPath))!
+                ["dependencies"]!["net10.0"]!;
+            var protocol = dependencies["Deep.Protocol"]!;
+            Assert.Equal("0.3.0-p04.b887fa0", protocol["resolved"]!.GetValue<string>());
+            if (protocol["type"]!.GetValue<string>() == "Direct")
+            {
+                Assert.Equal(
+                    "[0.3.0-p04.b887fa0, 0.3.0-p04.b887fa0]",
+                    protocol["requested"]!.GetValue<string>());
+            }
+            Assert.Equal(
+                "0.3.0-p04.b887fa0",
+                dependencies["Deep.Protocol.Abstractions"]!["resolved"]!.GetValue<string>());
+            Assert.Equal(
+                "0.3.0-p04.b887fa0",
+                dependencies["Deep.Protocol.Protobuf"]!["resolved"]!.GetValue<string>());
         }
     }
 

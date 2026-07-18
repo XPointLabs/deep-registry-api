@@ -26,8 +26,41 @@ registration extension fields that are not part of the Session contracts.
 - `GET /api/nodes/runtime`
 - `GET /api/nodes/reconciliation`
 - `GET /api/nodes/reconciliation/projections`
+- `GET /api/v1/checkpoints/status`
+- `GET /api/v1/checkpoints/bridge` (dormant P04 signed bytes; returns `503`
+  unless the fixture projection is explicitly enabled and current)
+- `GET /health/ready`
 
 The static admin demo is served at `/`.
+
+## Dormant P04 checkpoint projection
+
+P06 is a default-disabled fixture projection. It is separate from
+`NodeRegistry`; registered nodes, staking state and relay self-signatures are
+never treated as P04 membership authority.
+
+The application assembly contains no P04 signature implementation. Local tests
+inject a deterministic verifier from the test assembly. Production activation
+is blocked until the signature profile, trusted genesis, authority/mirror
+ownership, live artifact source and external review are approved.
+
+Configuration:
+
+```json
+{
+  "MembershipProjection": {
+    "Enabled": false,
+    "ContractIdentifier": "Deep.Protocol/P04-canonical-v1",
+    "PackageVersion": "0.3.0-p04.b887fa0",
+    "FixtureSourceWorkerEnabled": false
+  }
+}
+```
+
+There is no checkpoint mutation, membership or inclusion-proof endpoint.
+When enabled without a verifier/current bridge, readiness and bridge fetch
+return a sanitized `503`. The only accepted local package status is
+`fixture-go-runtime-blocked`.
 
 State persistence behavior:
 
