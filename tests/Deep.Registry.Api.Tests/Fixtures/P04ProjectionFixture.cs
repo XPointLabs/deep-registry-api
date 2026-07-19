@@ -169,11 +169,17 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
     public int TransientCompareExchangeFailuresRemaining { get; set; }
     public int CommitThenThrowCompareExchangeFailuresRemaining { get; set; }
     public int UnexpectedCompareExchangeFailuresRemaining { get; set; }
+    public Exception? ReadException { get; set; }
 
     public MembershipProjectionAnchor Read()
     {
         lock (_gate)
         {
+            if (ReadException is not null)
+            {
+                throw ReadException;
+            }
+
             if (TransientReadFailuresRemaining > 0)
             {
                 TransientReadFailuresRemaining--;

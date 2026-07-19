@@ -795,6 +795,26 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Same(cancellation, thrown);
     }
 
+    [Fact]
+    public void WrappedAnchorFatalCrossesRetryAndPublicReducer()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        var fatal = new OutOfMemoryException("wrapped anchor fatal canary");
+        var wrapper = new MembershipProjectionAnchorTransientException(
+            "typed transient wrapper canary",
+            fatal);
+        persistence.Anchor.ReadException = wrapper;
+
+        var thrown = Assert.Throws<MembershipProjectionAnchorTransientException>(
+            () => service.ApplyBridge(fixture.Bridge()));
+
+        Assert.Same(wrapper, thrown);
+        Assert.Same(fatal, thrown.InnerException);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
