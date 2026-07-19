@@ -2,7 +2,7 @@
   "schema": "deep-survival-work-package-report.v1",
   "workPackage": "P06",
   "title": "Dormant registry checkpoint projection",
-  "status": "corrective-green-4-awaiting-final-repeat-independent-review",
+  "status": "corrective-green-5-awaiting-final-repeat-independent-review",
   "humanOwner": "Mr. X",
   "repository": "deep-registry-api",
   "branch": "survival/w02-p06-registry-checkpoint",
@@ -16,7 +16,9 @@
   "corrective3RedCommit": "fb26a0d4132e934241cae1620242c06a43a86f0e",
   "corrective3GreenSourceCommit": "a801106f9201ea382ac0568a8a1eba943731970d",
   "corrective4RedCommit": "23d03267c6aa6d80127a7d38b7f3619a93b53195",
-  "greenSourceCommit": "17d2b0aece401023f536394f736d0cc01abe23b6",
+  "corrective4GreenSourceCommit": "17d2b0aece401023f536394f736d0cc01abe23b6",
+  "corrective5RedCommit": "3090fed35722a6100212955879b78c8dd169b33d",
+  "greenSourceCommit": "b2014e3757dad5566479f935a89a2c2133b7c0b2",
   "prerequisite": {
     "w1w2FinalEvidence": "1c01e24e24647a46b4f37622f3934dc2cc1284ef",
     "carrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
@@ -33,21 +35,21 @@
   },
   "tests": {
     "focused": {
-      "passed": 52,
+      "passed": 54,
       "failed": 0,
       "skipped": 0,
-      "trxSha256": "1493a01f89d5078222fe1047d69fa3a9d5fb7a9f8f5b306f83b52c825b2c3711"
+      "trxSha256": "f526ea1070d87fd32fd61bb85900692601f552d51ee1a9891f70bc36f05d388e"
     },
     "full": {
-      "passed": 75,
+      "passed": 77,
       "failed": 0,
       "skipped": 0,
-      "trxSha256": "e09466da00dfc35252af1246c0be0b83d43672ec1c198b0961c659b5a7d3cd41"
+      "trxSha256": "3b12b5449ab70117c06dd43f715d3ccda5a771c4edc2280adc34a5cbf0ff6e3e"
     },
     "coverage": {
-      "lines": "2403/2967",
-      "branches": "754/1195",
-      "coberturaSha256": "356e19829f64b816daf4b7d4c334f28dba5540e96e1ff6b6e69f2d3d17509d17"
+      "lines": "2473/2995",
+      "branches": "777/1207",
+      "coberturaSha256": "1b1c9f8002538a9aaa505b3bd927b206451e6f68f41564069d89e315c565aa2b"
     }
   },
   "runtime": {
@@ -83,6 +85,9 @@
     "corrective3SecurityPrivacyAgent": "/root/p06_final_security_review",
     "corrective3SecurityPrivacy": "NO-GO-0/1/0/0",
     "corrective4SourceCommit": "17d2b0aece401023f536394f736d0cc01abe23b6",
+    "corrective4ArchitectureRecoveryAgent": null,
+    "corrective4ArchitectureRecovery": "NO-GO-0/1/0/0",
+    "corrective5SourceCommit": "b2014e3757dad5566479f935a89a2c2133b7c0b2",
     "architectureRecovery": "pending",
     "securityPrivacy": "pending"
   },

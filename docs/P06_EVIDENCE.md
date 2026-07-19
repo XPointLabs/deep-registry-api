@@ -1,6 +1,6 @@
 # P06 dormant fixture evidence
 
-Status: corrective green #4 awaiting final repeat independent review.
+Status: corrective green #5 awaiting final repeat independent review.
 
 Human owner: Mr. X.
 
@@ -25,7 +25,11 @@ Human owner: Mr. X.
 - corrective #4 red:
   `23d03267c6aa6d80127a7d38b7f3619a93b53195`;
 - corrective #4 green source:
-  `17d2b0aece401023f536394f736d0cc01abe23b6`.
+  `17d2b0aece401023f536394f736d0cc01abe23b6`;
+- corrective #5 red:
+  `3090fed35722a6100212955879b78c8dd169b33d`;
+- corrective #5 green source:
+  `b2014e3757dad5566479f935a89a2c2133b7c0b2`.
 
 ## Prerequisite evidence
 
@@ -74,20 +78,20 @@ Release.
 | P04 hash gate | PASS, 5/5 exact files |
 | locked restore | PASS |
 | Release build | PASS, 0 warnings, 0 errors |
-| focused P06/package tests | PASS, 52/52, 0 skipped |
-| full registry suite | PASS, 75/75, 0 skipped |
+| focused P06/package tests | PASS, 54/54, 0 skipped |
+| full registry suite | PASS, 77/77, 0 skipped |
 | format verification | PASS |
-| line coverage | 2,403/2,967, 80.99% |
-| branch coverage | 754/1,195, 63.09% |
+| line coverage | 2,473/2,995, 82.57% |
+| branch coverage | 777/1,207, 64.37% |
 
 Machine-readable result SHA-256:
 
 - focused TRX:
-  `1493a01f89d5078222fe1047d69fa3a9d5fb7a9f8f5b306f83b52c825b2c3711`;
+  `f526ea1070d87fd32fd61bb85900692601f552d51ee1a9891f70bc36f05d388e`;
 - full TRX:
-  `e09466da00dfc35252af1246c0be0b83d43672ec1c198b0961c659b5a7d3cd41`;
+  `3b12b5449ab70117c06dd43f715d3ccda5a771c4edc2280adc34a5cbf0ff6e3e`;
 - Cobertura:
-  `356e19829f64b816daf4b7d4c334f28dba5540e96e1ff6b6e69f2d3d17509d17`.
+  `1b1c9f8002538a9aaa505b3bd927b206451e6f68f41564069d89e315c565aa2b`.
 
 ## Prior review findings and disposition
 
@@ -191,6 +195,27 @@ prepared state. The regression fixture combines a valid terminal journal with
 a prepared file of `MaximumStateBytes + 1` and proves constructor success,
 `Ready=false`, `State=fork-detected` and no bridge publication.
 
+## Corrective #5 disposition
+
+The architecture rerun on corrective #4 returned NO-GO with
+P0/P1/P2/P3 = 0/1/0/0. The reviewer task path was not retained in the handoff,
+so this evidence does not invent one. Its finding was that fork poison could
+remain non-durable across a crash when the detailed terminal journal exceeded
+its size limit or its pre-commit failed with an I/O or access-control error.
+Source `b2014e3757dad5566479f935a89a2c2133b7c0b2` addresses that finding:
+
+- terminal state is a compact bounded marker containing only schema, evidence
+  digest, domain and sequence; complete fork evidence is stored separately;
+- failure to write the local marker no longer suppresses the independent
+  external terminal compare/exchange;
+- a durable local marker preserves fail-closed restart when the external
+  anchor is transient, while a durable external poison preserves it when the
+  local marker write fails;
+- full fork evidence remains a bounded best-effort diagnostic artifact and is
+  not confused with the minimal crash-durability boundary;
+- regression fixtures cover both oversized detailed evidence and terminal
+  journal pre-commit I/O failure.
+
 ## Acceptance evidence
 
 - feature defaults to disabled;
@@ -202,12 +227,15 @@ a prepared file of `MaximumStateBytes + 1` and proves constructor success,
 - authority, bridge and membership LKG chains are separate;
 - persistence completes before memory publication;
 - an external monotonic generation/hash anchor is mandatory for enabled mode;
-- fork terminal-unsafe poison is durable in that anchor before main state
-  persistence;
-- independent local terminal evidence preserves fail-closed restart when
-  external poison CAS is unavailable or ambiguous;
-- terminal evidence suppresses lower-priority main/prepared reads, including
+- fork terminal-unsafe poison is durably committed to at least one of two
+  independent sinks before main-state persistence continues: the bounded local
+  marker or the external monotonic anchor;
+- the local marker and external anchor are attempted independently, so failure
+  of one does not suppress the other;
+- the compact terminal marker suppresses lower-priority main/prepared reads,
+  including
   oversized or malformed prepared state;
+- complete fork evidence is separately bounded and best effort;
 - the repository ships no production anchor implementation;
 - exact configured size ceilings are enforced before persisted-state
   deserialization;
