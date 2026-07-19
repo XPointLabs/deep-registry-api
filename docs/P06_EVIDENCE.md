@@ -1,6 +1,6 @@
 # P06 dormant fixture evidence
 
-Status: corrective green #3 awaiting final repeat independent review.
+Status: corrective green #4 awaiting final repeat independent review.
 
 Human owner: Mr. X.
 
@@ -21,7 +21,11 @@ Human owner: Mr. X.
 - corrective #3 red:
   `fb26a0d4132e934241cae1620242c06a43a86f0e`;
 - corrective #3 green source:
-  `a801106f9201ea382ac0568a8a1eba943731970d`.
+  `a801106f9201ea382ac0568a8a1eba943731970d`;
+- corrective #4 red:
+  `23d03267c6aa6d80127a7d38b7f3619a93b53195`;
+- corrective #4 green source:
+  `17d2b0aece401023f536394f736d0cc01abe23b6`.
 
 ## Prerequisite evidence
 
@@ -56,6 +60,9 @@ abstractions and protobuf versions. The nupkg metadata pins source
 Locked restore completed with public network access unavailable through the
 test process proxy. Dependencies resolved from the repository vendor source
 and existing local package cache.
+The corrective #4 rerun set `NuGetAudit=false` because the deliberate
+network-deny proxy cannot reach the advisory endpoint; exact vendor hashes,
+source mapping and both lock files remained independently enforced.
 
 ## Verification
 
@@ -67,20 +74,20 @@ Release.
 | P04 hash gate | PASS, 5/5 exact files |
 | locked restore | PASS |
 | Release build | PASS, 0 warnings, 0 errors |
-| focused P06/package tests | PASS, 51/51, 0 skipped |
-| full registry suite | PASS, 74/74, 0 skipped |
+| focused P06/package tests | PASS, 52/52, 0 skipped |
+| full registry suite | PASS, 75/75, 0 skipped |
 | format verification | PASS |
-| line coverage | 2,405/2,969, 81.00% |
+| line coverage | 2,403/2,967, 80.99% |
 | branch coverage | 754/1,195, 63.09% |
 
 Machine-readable result SHA-256:
 
 - focused TRX:
-  `39dade77d42f7a44371fafe345d93909d50f6f5a1e451f1478081dc14435551a`;
+  `1493a01f89d5078222fe1047d69fa3a9d5fb7a9f8f5b306f83b52c825b2c3711`;
 - full TRX:
-  `4ec2777362244252150b31f5db94a214a877c5e9ba977363a578d7eae247f9f6`;
+  `e09466da00dfc35252af1246c0be0b83d43672ec1c198b0961c659b5a7d3cd41`;
 - Cobertura:
-  `5872d6f21fffb3d551fb42f09cc7d47795f6bc627de05411e9c21edf87b9472e`.
+  `356e19829f64b816daf4b7d4c334f28dba5540e96e1ff6b6e69f2d3d17509d17`.
 
 ## Prior review findings and disposition
 
@@ -168,6 +175,22 @@ addressed by source `a801106f9201ea382ac0568a8a1eba943731970d`:
 - stateful `Apply` invokes deferred lease/anchor/prepared recovery directly and
   succeeds idempotently without a preceding status/read probe.
 
+## Corrective #4 disposition
+
+The final security pass on evidence
+`fff9773d79701ebd62e54ba3bff1007d81d3c13f` and source
+`a801106f9201ea382ac0568a8a1eba943731970d` had two read-only verdicts:
+`/root/p06_final_arch_review` returned GO with P0/P1/P2/P3 = 0/0/0/0, while
+`/root/p06_final_security_review` returned NO-GO with 0/1/0/0. Its independent
+rerun recorded MembershipProjection 48/48, full Registry 74/74, format and
+diff-check PASS, and a clean worktree. Source
+`17d2b0aece401023f536394f736d0cc01abe23b6` addresses the sole remaining
+security finding by giving a present valid terminal journal strict startup
+precedence: after latching `fork-detected`, `LoadState` returns without reading
+prepared state. The regression fixture combines a valid terminal journal with
+a prepared file of `MaximumStateBytes + 1` and proves constructor success,
+`Ready=false`, `State=fork-detected` and no bridge publication.
+
 ## Acceptance evidence
 
 - feature defaults to disabled;
@@ -183,6 +206,8 @@ addressed by source `a801106f9201ea382ac0568a8a1eba943731970d`:
   persistence;
 - independent local terminal evidence preserves fail-closed restart when
   external poison CAS is unavailable or ambiguous;
+- terminal evidence suppresses lower-priority main/prepared reads, including
+  oversized or malformed prepared state;
 - the repository ships no production anchor implementation;
 - exact configured size ceilings are enforced before persisted-state
   deserialization;
