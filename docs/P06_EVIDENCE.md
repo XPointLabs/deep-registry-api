@@ -1,6 +1,6 @@
 # P06 dormant fixture evidence
 
-Status: corrective green #8 awaiting final repeat independent review.
+Status: `fixture-go-runtime-blocked`.
 
 Human owner: Mr. X.
 
@@ -267,6 +267,21 @@ fatal inner exception. Source
 classification to typed anchor catches and the persistence boundary. A
 wrapper regression proves a fatal inner exception crosses retry and public
 reducers instead of being reported as a recoverable transient.
+
+## Final independent review
+
+Both read-only reviews inspected exact source
+`66a94c8f89f6b3009752e2099163a4d251cf9bec` and evidence
+`b67824ae2e93ae715ecd786981714471dd27a0e4`.
+
+- architecture/recovery: GO, P0/P1/P2/P3 = 0/0/0/0;
+- security/privacy: GO, P0/P1/P2/P3 = 0/0/0/0.
+
+Each reviewer independently repeated the locked restore, Release build,
+focused 60/60 and full 86/86 tests, format verification and exact evidence
+hash checks. This approves only the dormant fixture slice. Production runtime
+remains blocked by the absent production P04 verifier, monotonic-anchor
+implementation, live signed source/genesis and production key ceremony.
 
 ## Acceptance evidence
 

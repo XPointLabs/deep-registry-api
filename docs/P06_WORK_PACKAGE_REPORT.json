@@ -2,7 +2,7 @@
   "schema": "deep-survival-work-package-report.v1",
   "workPackage": "P06",
   "title": "Dormant registry checkpoint projection",
-  "status": "corrective-green-8-awaiting-final-repeat-independent-review",
+  "status": "fixture-go-runtime-blocked",
   "humanOwner": "Mr. X",
   "repository": "deep-registry-api",
   "branch": "survival/w02-p06-registry-checkpoint",
@@ -102,8 +102,12 @@
     "corrective6SourceCommit": "fa7bb411e7a45ecd654302b5772c2a89f6aa6a6d",
     "corrective7SourceCommit": "ec55bfbc6241a02d18a6b7118c2b389e5e7ab3ce",
     "corrective8SourceCommit": "66a94c8f89f6b3009752e2099163a4d251cf9bec",
-    "architectureRecovery": "pending",
-    "securityPrivacy": "pending"
+    "finalReviewedSourceCommit": "66a94c8f89f6b3009752e2099163a4d251cf9bec",
+    "finalReviewedEvidenceCommit": "b67824ae2e93ae715ecd786981714471dd27a0e4",
+    "architectureRecoveryAgent": "/root/p06_c5_arch_review",
+    "architectureRecovery": "GO-0/0/0/0",
+    "securityPrivacyAgent": "/root/p10b_protocol_security_review",
+    "securityPrivacy": "GO-0/0/0/0"
   },
   "requiredFinalStatus": "fixture-go-runtime-blocked"
 }
