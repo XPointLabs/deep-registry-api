@@ -714,6 +714,68 @@ public sealed class MembershipProjectionCorrectiveRedTests
             StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void TerminalSinkCancellationIsNotReducedToInvalidArtifact()
+    {
+        var fixture = new P04ProjectionFixture();
+        var cancellation = new OperationCanceledException(
+            "terminal cancellation canary");
+        var persistence = new MemoryProjectionPersistence
+        {
+            TerminalJournalWriteException = cancellation
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        var thrown = Assert.Throws<OperationCanceledException>(
+            () => service.ApplyBridge(
+                fixture.Bridge(contact: "https://cancelled-terminal.example.invalid/v1")));
+
+        Assert.Same(cancellation, thrown);
+    }
+
+    [Fact]
+    public void WrappedTerminalSinkCancellationIsNotReducedToInvalidArtifact()
+    {
+        var fixture = new P04ProjectionFixture();
+        var cancellation = new OperationCanceledException(
+            "wrapped terminal cancellation canary");
+        var persistence = new MemoryProjectionPersistence
+        {
+            TerminalJournalWriteException = new AggregateException(cancellation)
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        var thrown = Assert.Throws<AggregateException>(
+            () => service.ApplyBridge(
+                fixture.Bridge(contact: "https://wrapped-cancel.example.invalid/v1")));
+
+        Assert.Same(cancellation, Assert.Single(thrown.InnerExceptions));
+    }
+
+    [Fact]
+    public void TerminalSinkFatalFailureIsNotReducedToInvalidArtifact()
+    {
+        var fixture = new P04ProjectionFixture();
+        var fatal = new OutOfMemoryException("terminal fatal canary");
+        var persistence = new MemoryProjectionPersistence
+        {
+            TerminalJournalWriteException = fatal
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        var thrown = Assert.Throws<OutOfMemoryException>(
+            () => service.ApplyBridge(
+                fixture.Bridge(contact: "https://fatal-terminal.example.invalid/v1")));
+
+        Assert.Same(fatal, thrown);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
