@@ -576,4 +576,32 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Equal(MembershipProjectionCode.Idempotent, result.Code);
         Assert.True(restarted.TryGetBridge(out _));
     }
+
+    [Fact]
+    public void ValidTerminalJournalDominatesOversizedPreparedTransitionAtStartup()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 3;
+        Assert.Equal(
+            MembershipProjectionCode.MonotonicAnchorTransient,
+            service.ApplyBridge(
+                fixture.Bridge(contact: "https://terminal-first.example.invalid/v1")).Code);
+        Assert.NotNull(persistence.TerminalJournal);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 0;
+        persistence.PreparedTransition = new byte[(512 * 1024) + 1];
+
+        MembershipProjectionService? restarted = null;
+        var exception = Record.Exception(
+            () => restarted = fixture.CreateService(persistence));
+
+        Assert.Null(exception);
+        Assert.NotNull(restarted);
+        Assert.False(restarted.GetStatus().Ready);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+    }
 }
