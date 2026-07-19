@@ -52,6 +52,8 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
     public bool Quarantined { get; private set; }
     public int LastReadMaximumBytes { get; private set; }
     public int ReadCount { get; private set; }
+    public byte[]? TerminalJournal { get; set; }
+    public byte[]? PreparedTransition { get; set; }
     public MemoryMonotonicAnchor Anchor { get; } = new();
 
     public byte[]? Read(int maximumBytes)
@@ -109,6 +111,7 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
     private MembershipProjectionAnchor _current = MembershipProjectionAnchor.Empty;
     public int TransientReadFailuresRemaining { get; set; }
     public int TransientCompareExchangeFailuresRemaining { get; set; }
+    public int CommitThenThrowCompareExchangeFailuresRemaining { get; set; }
 
     public MembershipProjectionAnchor Read()
     {

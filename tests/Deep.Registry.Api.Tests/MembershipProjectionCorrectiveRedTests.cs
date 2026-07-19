@@ -434,4 +434,145 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Equal("current", service.GetStatus().State);
         Assert.Equal(1, service.GetStatus().Counters.CorruptStateRecoveries);
     }
+
+    [Fact]
+    public void ForkTerminalJournalSurvivesAllAnchorPoisonCasFailures()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 3;
+
+        var result = service.ApplyBridge(
+            fixture.Bridge(contact: "https://journal.example.invalid/v1"));
+
+        Assert.Equal(MembershipProjectionCode.MonotonicAnchorTransient, result.Code);
+        Assert.NotNull(persistence.TerminalJournal);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 0;
+        var restarted = fixture.CreateService(persistence);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void PreparedGenerationRecoversOnDirectStatefulApplyAfterPrecommitCasFailures()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        var bridge = fixture.Bridge();
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 3;
+
+        var interrupted = service.ApplyBridge(bridge);
+        Assert.Equal(MembershipProjectionCode.MonotonicAnchorTransient, interrupted.Code);
+        Assert.NotNull(persistence.PreparedTransition);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 0;
+
+        var retried = service.ApplyBridge(bridge);
+
+        Assert.Equal(MembershipProjectionCode.Idempotent, retried.Code);
+        Assert.Null(persistence.PreparedTransition);
+        Assert.True(service.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void PreparedGenerationRecoversAfterRestartWhenAnchorStillExpected()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        var bridge = fixture.Bridge();
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 3;
+        Assert.Equal(
+            MembershipProjectionCode.MonotonicAnchorTransient,
+            service.ApplyBridge(bridge).Code);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 0;
+
+        var restarted = fixture.CreateService(persistence);
+
+        Assert.Equal("current", restarted.GetStatus().State);
+        Assert.True(restarted.TryGetBridge(out var recovered));
+        Assert.Equal(bridge, recovered!.Bytes);
+        Assert.Null(persistence.PreparedTransition);
+    }
+
+    [Fact]
+    public void CommitThenThrowCasIsAcceptedAsExactIntendedNextGeneration()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        persistence.Anchor.CommitThenThrowCompareExchangeFailuresRemaining = 1;
+        var bridge = fixture.Bridge();
+
+        var result = service.ApplyBridge(bridge);
+        var restarted = fixture.CreateService(persistence);
+
+        Assert.Equal(MembershipProjectionCode.Accepted, result.Code);
+        Assert.Null(persistence.PreparedTransition);
+        Assert.True(restarted.TryGetBridge(out var recovered));
+        Assert.Equal(bridge, recovered!.Bytes);
+    }
+
+    [Fact]
+    public void StatefulApplyDirectlyRecoversLeaseBusyWithoutStatusProbe()
+    {
+        var fixture = new P04ProjectionFixture();
+        var statePath = Path.Combine(
+            Path.GetTempPath(),
+            $"p06-apply-contention-{Guid.NewGuid():N}.json");
+        var firstPersistence = new FileMembershipProjectionPersistence(statePath);
+        var secondPersistence = new FileMembershipProjectionPersistence(statePath);
+        var anchor = new MemoryMonotonicAnchor();
+        try
+        {
+            var first = fixture.CreateService(firstPersistence, anchor);
+            fixture.SeedAuthority(first);
+            var bridge = fixture.Bridge();
+            Assert.True(first.ApplyBridge(bridge).Success);
+            MembershipProjectionService contending;
+            using (firstPersistence.AcquireExclusiveLease())
+            {
+                contending = fixture.CreateService(secondPersistence, anchor);
+            }
+
+            var retried = contending.ApplyBridge(bridge);
+
+            Assert.Equal(MembershipProjectionCode.Idempotent, retried.Code);
+            Assert.True(contending.TryGetBridge(out _));
+        }
+        finally
+        {
+            foreach (var file in Directory.GetFiles(
+                         Path.GetDirectoryName(statePath)!,
+                         $"{Path.GetFileName(statePath)}*"))
+            {
+                File.Delete(file);
+            }
+        }
+    }
+
+    [Fact]
+    public void StatefulApplyDirectlyRecoversStartupAnchorTransient()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var first = fixture.CreateService(persistence);
+        fixture.SeedAuthority(first);
+        var bridge = fixture.Bridge();
+        Assert.True(first.ApplyBridge(bridge).Success);
+        persistence.Anchor.TransientReadFailuresRemaining = 3;
+        var restarted = fixture.CreateService(persistence);
+        persistence.Anchor.TransientReadFailuresRemaining = 0;
+
+        var result = restarted.ApplyBridge(bridge);
+
+        Assert.Equal(MembershipProjectionCode.Idempotent, result.Code);
+        Assert.True(restarted.TryGetBridge(out _));
+    }
 }
