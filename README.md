@@ -82,11 +82,18 @@ rollback conflict.
 Each durable generation is bound to the external monotonic anchor. A missing
 file, stale generation or changed hash stops publication without quarantining
 rollback evidence. The anchor also carries an irreversible terminal-unsafe
-fork poison. Before attempting that anchor update, the service atomically
-writes an independent local terminal journal containing the verified fork
-evidence. The journal is checked before every state load/read, so a detected
-fork remains non-servable after restart even when every poison CAS attempt is
-pre-commit or ambiguous and writing the detailed main state fails.
+fork poison. Before attempting that anchor update, the service tries to
+atomically write an independent compact terminal marker containing the
+verified evidence hash, domain and sequence. The marker is checked before
+every state load/read, so a detected fork remains non-servable after restart
+even when every poison CAS attempt is pre-commit or ambiguous and writing the
+detailed main state fails.
+
+The compact marker and external terminal CAS are independent durable sinks:
+failure or overflow in one does not suppress the other attempt. Full signed
+candidate evidence is written separately on a best-effort basis and remains
+bounded; detailed main-state persistence is attempted only after terminal
+durability is established.
 Once a terminal journal is present, startup does not read or interpret a
 prepared transition; malformed or oversized lower-priority state cannot mask
 the terminal `fork-detected` condition.

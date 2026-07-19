@@ -8,6 +8,7 @@ public interface IMembershipProjectionPersistence
     void Write(ReadOnlySpan<byte> state);
     byte[]? ReadTerminalJournal(int maximumBytes);
     void WriteTerminalJournal(ReadOnlySpan<byte> journal);
+    void WriteTerminalEvidence(ReadOnlySpan<byte> evidence);
     byte[]? ReadPreparedTransition(int maximumBytes);
     void WritePreparedTransition(ReadOnlySpan<byte> transition);
     void ClearPreparedTransition();
@@ -63,6 +64,9 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
     public void WriteTerminalJournal(ReadOnlySpan<byte> journal) =>
         WriteAtomic(TerminalJournalPath, journal);
 
+    public void WriteTerminalEvidence(ReadOnlySpan<byte> evidence) =>
+        WriteAtomic(TerminalEvidencePath, evidence);
+
     public void WritePreparedTransition(ReadOnlySpan<byte> transition) =>
         WriteAtomic(PreparedTransitionPath, transition);
 
@@ -116,6 +120,8 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
     }
 
     private string TerminalJournalPath => $"{_statePath}.terminal";
+
+    private string TerminalEvidencePath => $"{_statePath}.terminal-evidence";
 
     private string PreparedTransitionPath => $"{_statePath}.prepared";
 
@@ -235,6 +241,17 @@ internal sealed record PersistedTerminalUnsafeJournal
 {
     public const string CurrentSchema =
         "deep.registry.membership-projection.terminal-unsafe.v1";
+
+    public string Schema { get; init; } = CurrentSchema;
+    public string EvidenceSha256 { get; init; } = "";
+    public string Domain { get; init; } = "";
+    public ulong Sequence { get; init; }
+}
+
+internal sealed record PersistedTerminalUnsafeEvidence
+{
+    public const string CurrentSchema =
+        "deep.registry.membership-projection.terminal-evidence.v1";
 
     public string Schema { get; init; } = CurrentSchema;
     public string EvidenceSha256 { get; init; } = "";

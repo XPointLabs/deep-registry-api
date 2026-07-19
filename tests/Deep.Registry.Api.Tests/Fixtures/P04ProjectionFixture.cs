@@ -100,6 +100,9 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
         TerminalJournal = journal.ToArray();
     }
 
+    public void WriteTerminalEvidence(ReadOnlySpan<byte> evidence) =>
+        TerminalEvidence = evidence.ToArray();
+
     public byte[]? ReadPreparedTransition(int maximumBytes) =>
         ReadFixtureBounded(PreparedTransition, maximumBytes);
 

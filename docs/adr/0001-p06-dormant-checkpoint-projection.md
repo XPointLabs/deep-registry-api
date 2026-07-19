@@ -75,16 +75,19 @@ later operation. A failed main-state write rolls back a prepared record only
 when both the file and anchor still exactly match the expected generation.
 
 An identical artifact is idempotent. A different valid same-sequence successor
-sets an in-memory unsafe latch and atomically writes an independent local
-terminal journal containing the verified fork evidence. That journal is checked
-before every main/prepared state read. P06 then compare/exchanges a
-terminal-unsafe poison into the external anchor before the main state write.
-The journal keeps restart fail-closed even if all poison CAS attempts fail
-pre-commit or become ambiguous. Both signed candidates, their canonical
-statements and hashes are then preserved in detailed state when possible; they
-do not replace the accepted LKG and publication/readiness stop. Persisted
-evidence is reverified at startup, so clearing only `forkDetected` cannot
-recover. P06 never selects a winning fork.
+sets an in-memory unsafe latch and attempts an atomic compact local terminal
+marker containing evidence hash, domain and sequence. That marker is checked
+before every main/prepared state read. Independently of local marker
+failure/overflow, P06 attempts to compare/exchange terminal-unsafe poison into
+the external anchor before the main state write. Either sink preserves
+fail-closed restart.
+
+Both signed candidates, their canonical statements and hashes are written to a
+separate bounded evidence file best-effort and then preserved in detailed main
+state when possible. Evidence-file failure never suppresses marker or anchor
+poisoning. Candidates do not replace the accepted LKG and
+publication/readiness stop. Persisted evidence is reverified at startup, so
+clearing only `forkDetected` cannot recover. P06 never selects a winning fork.
 
 A present terminal journal has strict precedence: after it latches unsafe,
 startup returns without reading main or prepared transition state. Therefore an

@@ -10,6 +10,7 @@ public sealed class MembershipProjectionService
     internal const string StateSchema = "deep.registry.membership-projection.v1";
     internal const int HardMaximumStateBytes = 1024 * 1024;
     internal const int HardMaximumArtifactBytes = 1024 * 1024;
+    private const int HardMaximumTerminalEvidenceBytes = 8 * 1024 * 1024;
     private const int TransientRetryLimit = 3;
     private static readonly ulong MaximumUnixSeconds =
         checked((ulong)DateTimeOffset.MaxValue.ToUnixTimeSeconds());
@@ -764,62 +765,108 @@ public sealed class MembershipProjectionService
             new PersistedTerminalUnsafeJournal
             {
                 EvidenceSha256 = evidenceSha256,
+                Domain = forkRecord.Domain,
+                Sequence = forkRecord.Sequence
+            },
+            MembershipProjectionJson.Options);
+        var fullEvidenceBytes = JsonSerializer.SerializeToUtf8Bytes(
+            new PersistedTerminalUnsafeEvidence
+            {
+                EvidenceSha256 = evidenceSha256,
                 Evidence = forkRecord
             },
             MembershipProjectionJson.Options);
-        if (journalBytes.Length > _options.MaximumStateBytes)
-        {
-            return Count(Rejection(MembershipProjectionCode.InvalidLength));
-        }
-
+        var markerDurable = false;
         try
         {
+            if (journalBytes.Length > _options.MaximumStateBytes)
+            {
+                throw new InvalidDataException(
+                    "The compact terminal marker exceeds the configured state limit.");
+            }
+
             _persistence.WriteTerminalJournal(journalBytes);
+            markerDurable = true;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Interlocked.Increment(ref _persistenceFailures);
+        }
+
+        MembershipProjectionApplyResult? anchorFailure = null;
+        var anchorDurable = false;
+        try
+        {
             var expected = ReadAnchorWithRetry();
             if (expected.TerminalUnsafe)
             {
-                return null;
+                anchorDurable = true;
             }
-
-            if (_state is null ||
-                expected.Generation != _state.Generation ||
-                !string.Equals(
-                    expected.StateSha256,
-                    _persistedStateSha256,
-                    StringComparison.Ordinal))
+            else if (_state is null ||
+                     expected.Generation != _state.Generation ||
+                     !string.Equals(
+                         expected.StateSha256,
+                         _persistedStateSha256,
+                         StringComparison.Ordinal))
             {
                 MarkMonotonicConflict();
-                return MembershipProjectionApplyResult.Rejected(
+                anchorFailure = MembershipProjectionApplyResult.Rejected(
                     MembershipProjectionCode.MonotonicConflict);
             }
-
-            var poisoned = expected with
+            else
             {
-                TerminalUnsafe = true,
-                UnsafeEvidenceSha256 = evidenceSha256
-            };
-            if (!CommitAnchorWithReconciliation(expected, poisoned))
-            {
-                MarkMonotonicConflict();
-                return MembershipProjectionApplyResult.Rejected(
-                    MembershipProjectionCode.MonotonicConflict);
+                var poisoned = expected with
+                {
+                    TerminalUnsafe = true,
+                    UnsafeEvidenceSha256 = evidenceSha256
+                };
+                if (CommitAnchorWithReconciliation(expected, poisoned))
+                {
+                    anchorDurable = true;
+                }
+                else
+                {
+                    MarkMonotonicConflict();
+                    anchorFailure = MembershipProjectionApplyResult.Rejected(
+                        MembershipProjectionCode.MonotonicConflict);
+                }
             }
-
-            return null;
         }
         catch (MembershipProjectionAnchorTransientException)
         {
             MarkAnchorTransient();
-            return MembershipProjectionApplyResult.Rejected(
+            anchorFailure = MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.MonotonicAnchorTransient);
         }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException)
+
+        try
         {
-            Interlocked.Increment(ref _persistenceFailures);
-            return MembershipProjectionApplyResult.Rejected(
-                MembershipProjectionCode.PersistenceFailure);
+            if (fullEvidenceBytes.Length <= HardMaximumTerminalEvidenceBytes)
+            {
+                _persistence.WriteTerminalEvidence(fullEvidenceBytes);
+            }
+            else
+            {
+                Interlocked.Increment(ref _persistenceFailures);
+            }
         }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            // Full candidates remain best-effort after a compact marker or
+            // external terminal anchor has made the unsafe decision durable.
+            Interlocked.Increment(ref _persistenceFailures);
+        }
+
+        if (!markerDurable && !anchorDurable)
+        {
+            return anchorFailure ??
+                   MembershipProjectionApplyResult.Rejected(
+                       MembershipProjectionCode.PersistenceFailure);
+        }
+
+        return anchorFailure;
     }
 
     private bool CheckTerminalJournalNoLock()
@@ -851,18 +898,10 @@ public sealed class MembershipProjectionService
                     journal.Schema,
                     PersistedTerminalUnsafeJournal.CurrentSchema,
                     StringComparison.Ordinal) ||
-                journal.Evidence is null)
-            {
-                throw new InvalidDataException();
-            }
-
-            var evidenceBytes = JsonSerializer.SerializeToUtf8Bytes(
-                journal.Evidence,
-                MembershipProjectionJson.Options);
-            if (!string.Equals(
-                    journal.EvidenceSha256,
-                    Sha256Hex(evidenceBytes),
-                    StringComparison.Ordinal))
+                string.IsNullOrWhiteSpace(journal.Domain) ||
+                journal.Sequence == 0 ||
+                journal.EvidenceSha256.Length != MembershipLimits.HashLength * 2 ||
+                !journal.EvidenceSha256.All(Uri.IsHexDigit))
             {
                 throw new InvalidDataException();
             }
