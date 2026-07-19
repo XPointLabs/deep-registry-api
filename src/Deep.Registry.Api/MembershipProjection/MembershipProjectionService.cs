@@ -449,7 +449,8 @@ public sealed class MembershipProjectionService
         {
             MarkContinuityBusy();
         }
-        catch (MembershipProjectionAnchorTransientException)
+        catch (MembershipProjectionAnchorTransientException exception)
+            when (IsRecoverableBackendException(exception))
         {
             MarkAnchorTransient();
         }
@@ -832,7 +833,8 @@ public sealed class MembershipProjectionService
                 }
             }
         }
-        catch (MembershipProjectionAnchorTransientException)
+        catch (MembershipProjectionAnchorTransientException exception)
+            when (IsRecoverableBackendException(exception))
         {
             MarkAnchorTransient();
             anchorFailure = MembershipProjectionApplyResult.Rejected(
@@ -1101,7 +1103,8 @@ public sealed class MembershipProjectionService
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.ContinuityBusy);
         }
-        catch (MembershipProjectionAnchorTransientException)
+        catch (MembershipProjectionAnchorTransientException exception)
+            when (IsRecoverableBackendException(exception))
         {
             MarkAnchorTransient();
             return MembershipProjectionApplyResult.Rejected(
@@ -1198,6 +1201,7 @@ public sealed class MembershipProjectionService
                 return anchor;
             }
             catch (MembershipProjectionAnchorTransientException exception)
+                when (IsRecoverableBackendException(exception))
             {
                 last = exception;
                 Thread.Yield();
@@ -1245,6 +1249,7 @@ public sealed class MembershipProjectionService
                 }
             }
             catch (MembershipProjectionAnchorTransientException exception)
+                when (IsRecoverableBackendException(exception))
             {
                 last = exception;
                 var observed = ReadAnchorWithRetry();
@@ -1353,14 +1358,15 @@ public sealed class MembershipProjectionService
                 ? Count(MembershipProjectionApplyResult.Accepted())
                 : new MembershipProjectionApplyResult(true, successCode);
         }
-        catch (MembershipProjectionAnchorTransientException)
+        catch (MembershipProjectionAnchorTransientException exception)
+            when (IsRecoverableBackendException(exception))
         {
             MarkAnchorTransient();
             _loadDeferred = true;
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.MonotonicAnchorTransient);
         }
-        catch
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             if (_preparedTransitionPresent)
             {
@@ -1540,7 +1546,8 @@ public sealed class MembershipProjectionService
             MarkContinuityBusy();
             _loadDeferred = true;
         }
-        catch (MembershipProjectionAnchorTransientException)
+        catch (MembershipProjectionAnchorTransientException exception)
+            when (IsRecoverableBackendException(exception))
         {
             MarkAnchorTransient();
             _loadDeferred = true;
