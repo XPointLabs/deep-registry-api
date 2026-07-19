@@ -177,7 +177,7 @@ public sealed class MembershipProjectionService
 
                     return Persist(next);
                 }
-                catch (Exception exception)
+                catch (Exception exception) when (IsRecoverableBackendException(exception))
                 {
                     return Count(Rejection(MapException(exception)));
                 }
@@ -235,7 +235,7 @@ public sealed class MembershipProjectionService
                     };
                     return Persist(next);
                 }
-                catch (Exception exception)
+                catch (Exception exception) when (IsRecoverableBackendException(exception))
                 {
                     return Count(Rejection(MapException(exception)));
                 }
@@ -303,7 +303,7 @@ public sealed class MembershipProjectionService
                     };
                     return Persist(next);
                 }
-                catch (Exception exception)
+                catch (Exception exception) when (IsRecoverableBackendException(exception))
                 {
                     return Count(Rejection(MapException(exception)));
                 }
@@ -548,7 +548,7 @@ public sealed class MembershipProjectionService
                 : current with { Membership = nextDomain };
             return Persist(next);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             return Count(Rejection(MapException(exception)));
         }
@@ -647,7 +647,7 @@ public sealed class MembershipProjectionService
                 ? MembershipProjectionApplyResult.Rejected(MembershipProjectionCode.ForkDetected)
                 : persisted;
         }
-        catch (Exception exception)
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             return Count(Rejection(MapException(exception)));
         }
@@ -748,7 +748,7 @@ public sealed class MembershipProjectionService
                 ? MembershipProjectionApplyResult.Rejected(MembershipProjectionCode.ForkDetected)
                 : persisted;
         }
-        catch (Exception exception)
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             return Count(Rejection(MapException(exception)));
         }
@@ -2283,13 +2283,26 @@ public sealed class MembershipProjectionService
     private static MembershipProjectionApplyResult Rejection(MembershipProjectionCode code) =>
         MembershipProjectionApplyResult.Rejected(code);
 
-    private static bool IsRecoverableBackendException(Exception exception) =>
-        exception is not (
+    private static bool IsRecoverableBackendException(Exception exception)
+    {
+        if (exception is
             OperationCanceledException or
             OutOfMemoryException or
             StackOverflowException or
             AccessViolationException or
-            AppDomainUnloadedException);
+            AppDomainUnloadedException)
+        {
+            return false;
+        }
+
+        if (exception is AggregateException aggregate)
+        {
+            return aggregate.InnerExceptions.All(IsRecoverableBackendException);
+        }
+
+        return exception.InnerException is null ||
+               IsRecoverableBackendException(exception.InnerException);
+    }
 
     private static MembershipProjectionCode MapException(Exception exception) =>
         exception switch
