@@ -1,6 +1,6 @@
 # P06 dormant fixture evidence
 
-Status: corrective green #5 awaiting final repeat independent review.
+Status: corrective green #8 awaiting final repeat independent review.
 
 Human owner: Mr. X.
 
@@ -29,7 +29,21 @@ Human owner: Mr. X.
 - corrective #5 red:
   `3090fed35722a6100212955879b78c8dd169b33d`;
 - corrective #5 green source:
-  `b2014e3757dad5566479f935a89a2c2133b7c0b2`.
+  `b2014e3757dad5566479f935a89a2c2133b7c0b2`;
+- corrective #6 red:
+  `dae47c5a1adc9561c297a36329e6335f9f26a7aa`;
+- corrective #6 green source:
+  `fa7bb411e7a45ecd654302b5772c2a89f6aa6a6d`;
+- corrective #7 red:
+  `f7ca9889e2dfdd3dad862a8c0ddccf60969a058a`;
+- corrective #7 authority-domain red:
+  `e1d46caa3f7ac06f16b56ea6d7a75310f53a1e3b`;
+- corrective #7 green source:
+  `ec55bfbc6241a02d18a6b7118c2b389e5e7ab3ce`;
+- corrective #8 wrapped-anchor red:
+  `d14a87e1176165f684afeac60bed6448a65c5826`;
+- corrective #8 green source:
+  `66a94c8f89f6b3009752e2099163a4d251cf9bec`.
 
 ## Prerequisite evidence
 
@@ -78,20 +92,20 @@ Release.
 | P04 hash gate | PASS, 5/5 exact files |
 | locked restore | PASS |
 | Release build | PASS, 0 warnings, 0 errors |
-| focused P06/package tests | PASS, 54/54, 0 skipped |
-| full registry suite | PASS, 77/77, 0 skipped |
+| focused P06/package tests | PASS, 60/60, 0 skipped |
+| full registry suite | PASS, 86/86, 0 skipped |
 | format verification | PASS |
-| line coverage | 2,473/2,995, 82.57% |
-| branch coverage | 777/1,207, 64.37% |
+| line coverage | 2,458/3,028, 81.17% |
+| branch coverage | 781/1,227, 63.65% |
 
 Machine-readable result SHA-256:
 
 - focused TRX:
-  `f526ea1070d87fd32fd61bb85900692601f552d51ee1a9891f70bc36f05d388e`;
+  `2c88aa83cb2f12b47a6dacfefdc3905ad4d5f3f4296da6ff1c7e34207f59904e`;
 - full TRX:
-  `3b12b5449ab70117c06dd43f715d3ccda5a771c4edc2280adc34a5cbf0ff6e3e`;
+  `d2b2195e40b6ad101f4c8d5da6e88c2a1e6f0b7a51fd12c1d78baf2adcb62c76`;
 - Cobertura:
-  `1b1c9f8002538a9aaa505b3bd927b206451e6f68f41564069d89e315c565aa2b`.
+  `936ef0240dabba3adc8bee312952ef696a34e40cc94593b9eb520c8ebf378c12`.
 
 ## Prior review findings and disposition
 
@@ -216,6 +230,44 @@ Source `b2014e3757dad5566479f935a89a2c2133b7c0b2` addresses that finding:
 - regression fixtures cover both oversized detailed evidence and terminal
   journal pre-commit I/O failure.
 
+## Corrective #6 disposition
+
+The corrective #5 security review returned GO with P0/P1/P2/P3 = 0/0/0/1.
+The architecture review returned NO-GO with 0/1/1/0: undeclared backend
+exceptions could suppress an otherwise independent terminal sink, and a
+malformed prepared transition could mask an already-durable external
+`TerminalUnsafe` anchor. Source
+`fa7bb411e7a45ecd654302b5772c2a89f6aa6a6d` addresses both findings:
+
+- recoverable backend failures are normalized without depending on a narrow
+  declared exception list;
+- compact local marker and external monotonic poison are still attempted as
+  independent sinks;
+- startup reads and honors the external terminal anchor before lower-priority
+  main or prepared state;
+- the terminal unsafe latch has strict status precedence over a previously
+  observed monotonic conflict.
+
+## Corrective #7 disposition
+
+The security pre-freeze review found that outer artifact reducers could still
+convert cancellation and fatal backend failures to `InvalidArtifact`. Source
+`ec55bfbc6241a02d18a6b7118c2b389e5e7ab3ce` makes non-recoverable
+classification recursive across `AggregateException` and general inner
+exceptions and preserves those failures through every content and authority
+reducer. Dedicated RED fixtures cover direct cancellation, wrapped
+cancellation, a representative fatal failure and the authority-fork path.
+
+## Corrective #8 disposition
+
+The final pre-freeze edge review found that the declared
+`MembershipProjectionAnchorTransientException` catches could still hide a
+fatal inner exception. Source
+`66a94c8f89f6b3009752e2099163a4d251cf9bec` applies the same recursive
+classification to typed anchor catches and the persistence boundary. A
+wrapper regression proves a fatal inner exception crosses retry and public
+reducers instead of being reported as a recoverable transient.
+
 ## Acceptance evidence
 
 - feature defaults to disabled;
@@ -232,6 +284,8 @@ Source `b2014e3757dad5566479f935a89a2c2133b7c0b2` addresses that finding:
   marker or the external monotonic anchor;
 - the local marker and external anchor are attempted independently, so failure
   of one does not suppress the other;
+- cancellation and fatal backend failures, including wrapped failures, are
+  never reduced to ordinary invalid-artifact, persistence or transient codes;
 - the compact terminal marker suppresses lower-priority main/prepared reads,
   including
   oversized or malformed prepared state;
