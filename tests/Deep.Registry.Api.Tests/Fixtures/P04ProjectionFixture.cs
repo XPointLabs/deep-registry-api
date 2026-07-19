@@ -49,6 +49,8 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
 
     public byte[]? State { get; set; }
     public bool ThrowOnWrite { get; set; }
+    public bool ThrowOnTerminalJournalWrite { get; set; }
+    public bool ThrowOnPreparedTransitionWrite { get; set; }
     public bool Quarantined { get; private set; }
     public int LastReadMaximumBytes { get; private set; }
     public int ReadCount { get; private set; }
@@ -78,6 +80,34 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
         State = state.ToArray();
     }
 
+    public byte[]? ReadTerminalJournal(int maximumBytes) =>
+        ReadFixtureBounded(TerminalJournal, maximumBytes);
+
+    public void WriteTerminalJournal(ReadOnlySpan<byte> journal)
+    {
+        if (ThrowOnTerminalJournalWrite)
+        {
+            throw new IOException("fixture terminal journal write failure");
+        }
+
+        TerminalJournal = journal.ToArray();
+    }
+
+    public byte[]? ReadPreparedTransition(int maximumBytes) =>
+        ReadFixtureBounded(PreparedTransition, maximumBytes);
+
+    public void WritePreparedTransition(ReadOnlySpan<byte> transition)
+    {
+        if (ThrowOnPreparedTransitionWrite)
+        {
+            throw new IOException("fixture prepared transition write failure");
+        }
+
+        PreparedTransition = transition.ToArray();
+    }
+
+    public void ClearPreparedTransition() => PreparedTransition = null;
+
     public void Quarantine()
     {
         Quarantined = true;
@@ -88,6 +118,16 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
     {
         Monitor.Enter(_leaseGate);
         return new MonitorLease(_leaseGate);
+    }
+
+    private static byte[]? ReadFixtureBounded(byte[]? value, int maximumBytes)
+    {
+        if (value?.Length > maximumBytes)
+        {
+            throw new InvalidDataException("fixture journal exceeds configured maximum");
+        }
+
+        return value?.ToArray();
     }
 
     private sealed class MonitorLease(object gate) : IDisposable
@@ -134,6 +174,18 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
     {
         lock (_gate)
         {
+            if (CommitThenThrowCompareExchangeFailuresRemaining > 0)
+            {
+                CommitThenThrowCompareExchangeFailuresRemaining--;
+                if (_current == expected)
+                {
+                    _current = next;
+                }
+
+                throw new MembershipProjectionAnchorTransientException(
+                    "fixture commit-then-throw compare/exchange");
+            }
+
             if (TransientCompareExchangeFailuresRemaining > 0)
             {
                 TransientCompareExchangeFailuresRemaining--;

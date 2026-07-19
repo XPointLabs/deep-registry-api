@@ -61,16 +61,28 @@ evidence is not quarantined as corruption.
 
 Lease contention and typed transient external-anchor errors are distinct from
 rollback conflicts. They use a bounded retry, report sanitized non-ready state,
-and revalidate on later reads or transitions. A successful revalidation clears
-only the transient condition. Invalid configured limits are rejected before
-any persisted read.
+and revalidate on later reads or transitions. Stateful transitions invoke that
+recovery directly, without requiring a separate status/read request. A
+successful revalidation clears only the transient condition. Invalid configured
+limits are rejected before any persisted read.
+
+Before replacing a normal N+1 state file, P06 writes an atomic local prepared
+transition containing the exact expected and intended anchors. CAS completion
+always rereads the external anchor. Exact intended N+1 means success, exact
+expected N means retry/transient, and a third value means conflict. The same
+rules reconcile pre-commit failure and commit-then-throw during startup or a
+later operation. A failed main-state write rolls back a prepared record only
+when both the file and anchor still exactly match the expected generation.
 
 An identical artifact is idempotent. A different valid same-sequence successor
-sets an in-memory unsafe latch and compare/exchanges a terminal-unsafe poison
-into the external anchor before the main state write. The poison is independent
-of detailed state persistence and survives restart. Both signed candidates,
-their canonical statements and hashes are then preserved as fork evidence;
-they do not replace the accepted LKG and publication/readiness stop. Persisted
+sets an in-memory unsafe latch and atomically writes an independent local
+terminal journal containing the verified fork evidence. That journal is checked
+before every main/prepared state read. P06 then compare/exchanges a
+terminal-unsafe poison into the external anchor before the main state write.
+The journal keeps restart fail-closed even if all poison CAS attempts fail
+pre-commit or become ambiguous. Both signed candidates, their canonical
+statements and hashes are then preserved in detailed state when possible; they
+do not replace the accepted LKG and publication/readiness stop. Persisted
 evidence is reverified at startup, so clearing only `forkDetected` cannot
 recover. P06 never selects a winning fork.
 

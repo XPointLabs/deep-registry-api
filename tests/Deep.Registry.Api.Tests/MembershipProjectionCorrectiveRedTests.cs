@@ -411,7 +411,8 @@ public sealed class MembershipProjectionCorrectiveRedTests
 
         Assert.Equal(MembershipProjectionCode.MonotonicAnchorTransient, result.Code);
         Assert.False(result.Success);
-        Assert.False(service.TryGetBridge(out _));
+        Assert.True(service.TryGetBridge(out _));
+        Assert.Equal("current", service.GetStatus().State);
     }
 
     [Fact]

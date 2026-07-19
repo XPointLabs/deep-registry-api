@@ -27,6 +27,7 @@ public sealed class MembershipProjectionService
     private bool _anchorTransient;
     private bool _continuityBusy;
     private bool _loadDeferred;
+    private bool _preparedTransitionPresent;
     private bool _corruptStatePresent;
     private bool _configurationInvalid;
 
@@ -412,7 +413,7 @@ public sealed class MembershipProjectionService
             return;
         }
 
-        if (_loadDeferred)
+        if (_loadDeferred || _preparedTransitionPresent)
         {
             LoadState();
             return;
@@ -421,6 +422,11 @@ public sealed class MembershipProjectionService
         try
         {
             using var lease = AcquireContinuityLeaseWithRetry();
+            if (CheckTerminalJournalNoLock())
+            {
+                return;
+            }
+
             if (_corruptStatePresent)
             {
                 var recoveryAnchor = ReadAnchorWithRetry();
@@ -750,8 +756,25 @@ public sealed class MembershipProjectionService
     private MembershipProjectionApplyResult? PoisonForkNoLock(
         PersistedForkRecord forkRecord)
     {
+        var evidenceBytes = JsonSerializer.SerializeToUtf8Bytes(
+            forkRecord,
+            MembershipProjectionJson.Options);
+        var evidenceSha256 = Sha256Hex(evidenceBytes);
+        var journalBytes = JsonSerializer.SerializeToUtf8Bytes(
+            new PersistedTerminalUnsafeJournal
+            {
+                EvidenceSha256 = evidenceSha256,
+                Evidence = forkRecord
+            },
+            MembershipProjectionJson.Options);
+        if (journalBytes.Length > _options.MaximumStateBytes)
+        {
+            return Count(Rejection(MembershipProjectionCode.InvalidLength));
+        }
+
         try
         {
+            _persistence.WriteTerminalJournal(journalBytes);
             var expected = ReadAnchorWithRetry();
             if (expected.TerminalUnsafe)
             {
@@ -770,15 +793,12 @@ public sealed class MembershipProjectionService
                     MembershipProjectionCode.MonotonicConflict);
             }
 
-            var evidenceBytes = JsonSerializer.SerializeToUtf8Bytes(
-                forkRecord,
-                MembershipProjectionJson.Options);
             var poisoned = expected with
             {
                 TerminalUnsafe = true,
-                UnsafeEvidenceSha256 = Sha256Hex(evidenceBytes)
+                UnsafeEvidenceSha256 = evidenceSha256
             };
-            if (!CompareExchangeAnchorWithRetry(expected, poisoned))
+            if (!CommitAnchorWithReconciliation(expected, poisoned))
             {
                 MarkMonotonicConflict();
                 return MembershipProjectionApplyResult.Rejected(
@@ -793,6 +813,66 @@ public sealed class MembershipProjectionService
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.MonotonicAnchorTransient);
         }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            Interlocked.Increment(ref _persistenceFailures);
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.PersistenceFailure);
+        }
+    }
+
+    private bool CheckTerminalJournalNoLock()
+    {
+        byte[]? bytes;
+        try
+        {
+            bytes = _persistence.ReadTerminalJournal(_options.MaximumStateBytes);
+        }
+        catch (InvalidDataException)
+        {
+            _unsafeLatch = true;
+            return true;
+        }
+
+        if (bytes is null)
+        {
+            return false;
+        }
+
+        _unsafeLatch = true;
+        try
+        {
+            var journal = JsonSerializer.Deserialize<PersistedTerminalUnsafeJournal>(
+                              bytes,
+                              MembershipProjectionJson.Options)
+                          ?? throw new InvalidDataException();
+            if (!string.Equals(
+                    journal.Schema,
+                    PersistedTerminalUnsafeJournal.CurrentSchema,
+                    StringComparison.Ordinal) ||
+                journal.Evidence is null)
+            {
+                throw new InvalidDataException();
+            }
+
+            var evidenceBytes = JsonSerializer.SerializeToUtf8Bytes(
+                journal.Evidence,
+                MembershipProjectionJson.Options);
+            if (!string.Equals(
+                    journal.EvidenceSha256,
+                    Sha256Hex(evidenceBytes),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException();
+            }
+        }
+        catch (Exception exception) when (IsPersistedStateValidationException(exception))
+        {
+            // Any present but malformed terminal marker is still terminal unsafe.
+        }
+
+        return true;
     }
 
     private MembershipProjectionApplyResult? CheckStatefulIngress(int length)
@@ -803,7 +883,10 @@ public sealed class MembershipProjectionService
             return gate;
         }
 
-        if (_state is null && _loadDeferred)
+        if (_loadDeferred ||
+            _preparedTransitionPresent ||
+            _anchorTransient ||
+            _continuityBusy)
         {
             LoadState();
         }
@@ -812,6 +895,18 @@ public sealed class MembershipProjectionService
         {
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.ContinuityBusy);
+        }
+
+        if (_unsafeLatch)
+        {
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.ForkDetected);
+        }
+
+        if (_monotonicConflict)
+        {
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.MonotonicConflict);
         }
 
         if (_anchorTransient)
@@ -907,9 +1002,40 @@ public sealed class MembershipProjectionService
                 MembershipProjectionCode.ForkDetected);
         }
 
+        if (_loadDeferred ||
+            _preparedTransitionPresent ||
+            _anchorTransient ||
+            _continuityBusy)
+        {
+            LoadState();
+            if (_unsafeLatch)
+            {
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.ForkDetected);
+            }
+
+            if (_continuityBusy)
+            {
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.ContinuityBusy);
+            }
+
+            if (_anchorTransient || _loadDeferred || _preparedTransitionPresent)
+            {
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.MonotonicAnchorTransient);
+            }
+        }
+
         try
         {
             using var lease = AcquireContinuityLeaseWithRetry();
+            if (CheckTerminalJournalNoLock())
+            {
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.ForkDetected);
+            }
+
             if (!ValidateContinuityNoLock())
             {
                 MarkMonotonicConflict();
@@ -953,6 +1079,11 @@ public sealed class MembershipProjectionService
 
     private bool ValidateContinuityNoLock()
     {
+        if (CheckTerminalJournalNoLock())
+        {
+            return true;
+        }
+
         var anchor = ReadAnchorWithRetry();
         var bytes = _persistence.Read(_options.MaximumStateBytes);
         if (anchor.TerminalUnsafe)
@@ -1033,7 +1164,7 @@ public sealed class MembershipProjectionService
             "The external monotonic anchor is temporarily unavailable.");
     }
 
-    private bool CompareExchangeAnchorWithRetry(
+    private bool CommitAnchorWithReconciliation(
         MembershipProjectionAnchor expected,
         MembershipProjectionAnchor next)
     {
@@ -1045,18 +1176,44 @@ public sealed class MembershipProjectionService
                 var exchanged = _monotonicBoundary.Required.CompareExchange(
                     expected,
                     next);
-                _anchorTransient = false;
-                return exchanged;
+                var observed = ReadAnchorWithRetry();
+                if (observed == next)
+                {
+                    _anchorTransient = false;
+                    return true;
+                }
+
+                if (observed != expected)
+                {
+                    return false;
+                }
+
+                if (exchanged)
+                {
+                    return false;
+                }
             }
             catch (MembershipProjectionAnchorTransientException exception)
             {
                 last = exception;
-                Thread.Yield();
+                var observed = ReadAnchorWithRetry();
+                if (observed == next)
+                {
+                    _anchorTransient = false;
+                    return true;
+                }
+
+                if (observed != expected)
+                {
+                    return false;
+                }
             }
+
+            Thread.Yield();
         }
 
         throw last ?? new MembershipProjectionAnchorTransientException(
-            "The external monotonic anchor is temporarily unavailable.");
+            "The external monotonic anchor did not commit the prepared generation.");
     }
 
     private static bool IsEmptyAnchor(MembershipProjectionAnchor anchor) =>
@@ -1088,20 +1245,36 @@ public sealed class MembershipProjectionService
                 return Count(Rejection(MembershipProjectionCode.InvalidLength));
             }
 
-            _persistence.Write(bytes);
             var stateHash = Sha256Hex(bytes);
             var nextAnchor = new MembershipProjectionAnchor(
                 next.Generation,
                 stateHash,
                 expectedAnchor.TerminalUnsafe,
                 expectedAnchor.UnsafeEvidenceSha256);
-            if (!CompareExchangeAnchorWithRetry(expectedAnchor, nextAnchor))
+            var preparedBytes = JsonSerializer.SerializeToUtf8Bytes(
+                new PersistedPreparedTransition
+                {
+                    ExpectedAnchor = expectedAnchor,
+                    NextAnchor = nextAnchor
+                },
+                MembershipProjectionJson.Options);
+            if (preparedBytes.Length > _options.MaximumStateBytes)
+            {
+                return Count(Rejection(MembershipProjectionCode.InvalidLength));
+            }
+
+            _persistence.WritePreparedTransition(preparedBytes);
+            _preparedTransitionPresent = true;
+            _persistence.Write(bytes);
+            if (!CommitAnchorWithReconciliation(expectedAnchor, nextAnchor))
             {
                 MarkMonotonicConflict();
                 return MembershipProjectionApplyResult.Rejected(
                     MembershipProjectionCode.MonotonicConflict);
             }
 
+            _persistence.ClearPreparedTransition();
+            _preparedTransitionPresent = false;
             _state = next;
             _persistedStateSha256 = stateHash;
             _corruptStatePresent = false;
@@ -1115,11 +1288,17 @@ public sealed class MembershipProjectionService
         catch (MembershipProjectionAnchorTransientException)
         {
             MarkAnchorTransient();
+            _loadDeferred = true;
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.MonotonicAnchorTransient);
         }
         catch
         {
+            if (_preparedTransitionPresent)
+            {
+                _loadDeferred = true;
+            }
+
             Interlocked.Increment(ref _persistenceFailures);
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.PersistenceFailure);
@@ -1132,6 +1311,13 @@ public sealed class MembershipProjectionService
         try
         {
             using var lease = AcquireContinuityLeaseWithRetry();
+            if (CheckTerminalJournalNoLock())
+            {
+                _preparedTransitionPresent =
+                    _persistence.ReadPreparedTransition(_options.MaximumStateBytes) is not null;
+                return;
+            }
+
             byte[]? bytes;
             try
             {
@@ -1143,6 +1329,24 @@ public sealed class MembershipProjectionService
                 return;
             }
 
+            PersistedPreparedTransition? prepared;
+            try
+            {
+                var preparedBytes = _persistence.ReadPreparedTransition(
+                    _options.MaximumStateBytes);
+                prepared = preparedBytes is null
+                    ? null
+                    : DecodePreparedTransition(preparedBytes);
+                _preparedTransitionPresent = prepared is not null;
+            }
+            catch (Exception exception) when (
+                exception is InvalidDataException or JsonException or FormatException)
+            {
+                _preparedTransitionPresent = true;
+                MarkMonotonicConflict();
+                return;
+            }
+
             var anchor = ReadAnchorWithRetry();
             if (anchor.TerminalUnsafe)
             {
@@ -1151,6 +1355,21 @@ public sealed class MembershipProjectionService
 
             if (bytes is null)
             {
+                if (prepared is not null)
+                {
+                    if (anchor == prepared.ExpectedAnchor &&
+                        IsEmptyAnchor(prepared.ExpectedAnchor))
+                    {
+                        _persistence.ClearPreparedTransition();
+                        _preparedTransitionPresent = false;
+                    }
+                    else
+                    {
+                        MarkMonotonicConflict();
+                        return;
+                    }
+                }
+
                 if (!IsEmptyAnchor(anchor) && !anchor.TerminalUnsafe)
                 {
                     MarkMonotonicConflict();
@@ -1175,6 +1394,56 @@ public sealed class MembershipProjectionService
             }
 
             var stateHash = Sha256Hex(bytes);
+            if (prepared is not null)
+            {
+                var matchesExpected =
+                    state.Generation == prepared.ExpectedAnchor.Generation &&
+                    string.Equals(
+                        stateHash,
+                        prepared.ExpectedAnchor.StateSha256,
+                        StringComparison.Ordinal);
+                var matchesNext =
+                    state.Generation == prepared.NextAnchor.Generation &&
+                    string.Equals(
+                        stateHash,
+                        prepared.NextAnchor.StateSha256,
+                        StringComparison.Ordinal);
+
+                if (matchesExpected && anchor == prepared.ExpectedAnchor)
+                {
+                    _persistence.ClearPreparedTransition();
+                    _preparedTransitionPresent = false;
+                }
+                else if (matchesNext)
+                {
+                    if (anchor == prepared.ExpectedAnchor)
+                    {
+                        if (!CommitAnchorWithReconciliation(
+                                prepared.ExpectedAnchor,
+                                prepared.NextAnchor))
+                        {
+                            MarkMonotonicConflict();
+                            return;
+                        }
+
+                        anchor = prepared.NextAnchor;
+                    }
+                    else if (anchor != prepared.NextAnchor)
+                    {
+                        MarkMonotonicConflict();
+                        return;
+                    }
+
+                    _persistence.ClearPreparedTransition();
+                    _preparedTransitionPresent = false;
+                }
+                else
+                {
+                    MarkMonotonicConflict();
+                    return;
+                }
+            }
+
             if (state.Generation != anchor.Generation ||
                 !string.Equals(
                     stateHash,
@@ -1214,6 +1483,52 @@ public sealed class MembershipProjectionService
         {
             MarkMonotonicConflict();
         }
+    }
+
+    private static PersistedPreparedTransition DecodePreparedTransition(
+        ReadOnlySpan<byte> bytes)
+    {
+        var prepared = JsonSerializer.Deserialize<PersistedPreparedTransition>(
+                           bytes,
+                           MembershipProjectionJson.Options)
+                       ?? throw new InvalidDataException();
+        if (!string.Equals(
+                prepared.Schema,
+                PersistedPreparedTransition.CurrentSchema,
+                StringComparison.Ordinal) ||
+            prepared.ExpectedAnchor is null ||
+            prepared.NextAnchor is null ||
+            prepared.ExpectedAnchor.Generation < 0 ||
+            prepared.ExpectedAnchor.Generation == long.MaxValue ||
+            prepared.NextAnchor.Generation != prepared.ExpectedAnchor.Generation + 1 ||
+            string.IsNullOrWhiteSpace(prepared.NextAnchor.StateSha256) ||
+            prepared.NextAnchor.StateSha256.Length != MembershipLimits.HashLength * 2 ||
+            !prepared.NextAnchor.StateSha256.All(Uri.IsHexDigit) ||
+            prepared.NextAnchor.TerminalUnsafe !=
+            prepared.ExpectedAnchor.TerminalUnsafe ||
+            !string.Equals(
+                prepared.NextAnchor.UnsafeEvidenceSha256,
+                prepared.ExpectedAnchor.UnsafeEvidenceSha256,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException();
+        }
+
+        if (prepared.ExpectedAnchor.Generation == 0)
+        {
+            if (!IsEmptyAnchor(prepared.ExpectedAnchor))
+            {
+                throw new InvalidDataException();
+            }
+        }
+        else if (prepared.ExpectedAnchor.StateSha256.Length !=
+                 MembershipLimits.HashLength * 2 ||
+                 !prepared.ExpectedAnchor.StateSha256.All(Uri.IsHexDigit))
+        {
+            throw new InvalidDataException();
+        }
+
+        return prepared;
     }
 
     private void QuarantineCorruptState()
@@ -1724,6 +2039,7 @@ public sealed class MembershipProjectionService
             _anchorTransient ||
             _continuityBusy ||
             _loadDeferred ||
+            _preparedTransitionPresent ||
             _corruptStatePresent ||
             _state is null ||
             _state.ForkDetected ||
@@ -1788,7 +2104,7 @@ public sealed class MembershipProjectionService
             return "fork-detected";
         }
 
-        if (_anchorTransient)
+        if (_anchorTransient || _preparedTransitionPresent)
         {
             return "monotonic-anchor-transient";
         }

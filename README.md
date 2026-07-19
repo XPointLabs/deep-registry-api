@@ -82,10 +82,22 @@ rollback conflict.
 Each durable generation is bound to the external monotonic anchor. A missing
 file, stale generation or changed hash stops publication without quarantining
 rollback evidence. The anchor also carries an irreversible terminal-unsafe
-fork poison. It is committed before the main state update, so a detected fork
-remains non-servable after restart even when writing the detailed state/evidence
-fails. Structurally or cryptographically corrupt state is quarantined. Its
-lifetime recovery counter does not disable future continuity checks, and a
+fork poison. Before attempting that anchor update, the service atomically
+writes an independent local terminal journal containing the verified fork
+evidence. The journal is checked before every state load/read, so a detected
+fork remains non-servable after restart even when every poison CAS attempt is
+pre-commit or ambiguous and writing the detailed main state fails.
+
+Normal state changes use a separate prepared-transition journal before the
+N+1 state file is replaced. After CAS, the service rereads the anchor: the exact
+intended N+1 value is success, the exact expected N value is retried or remains
+transient, and any third value is a conflict. Startup and later operations
+reconcile the same journal, including commit-then-throw outcomes. Stateful
+`Apply` calls perform this recovery directly; callers do not need to probe a
+status/read endpoint first.
+
+Structurally or cryptographically corrupt state is quarantined. Its lifetime
+recovery counter does not disable future continuity checks, and a
 human-authorized reset/reseed can establish fresh state.
 
 Authority changes immediately stop an older bridge until a bridge bound to the

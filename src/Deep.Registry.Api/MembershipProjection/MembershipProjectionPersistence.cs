@@ -6,6 +6,11 @@ public interface IMembershipProjectionPersistence
 {
     byte[]? Read(int maximumBytes);
     void Write(ReadOnlySpan<byte> state);
+    byte[]? ReadTerminalJournal(int maximumBytes);
+    void WriteTerminalJournal(ReadOnlySpan<byte> journal);
+    byte[]? ReadPreparedTransition(int maximumBytes);
+    void WritePreparedTransition(ReadOnlySpan<byte> transition);
+    void ClearPreparedTransition();
     void Quarantine();
     IDisposable AcquireExclusiveLease();
 }
@@ -20,14 +25,23 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
     }
 
     public byte[]? Read(int maximumBytes)
+        => ReadBounded(_statePath, maximumBytes);
+
+    public byte[]? ReadTerminalJournal(int maximumBytes) =>
+        ReadBounded(TerminalJournalPath, maximumBytes);
+
+    public byte[]? ReadPreparedTransition(int maximumBytes) =>
+        ReadBounded(PreparedTransitionPath, maximumBytes);
+
+    private static byte[]? ReadBounded(string path, int maximumBytes)
     {
-        if (!File.Exists(_statePath))
+        if (!File.Exists(path))
         {
             return null;
         }
 
         using var stream = new FileStream(
-            _statePath,
+            path,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read,
@@ -44,14 +58,31 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
     }
 
     public void Write(ReadOnlySpan<byte> state)
+        => WriteAtomic(_statePath, state);
+
+    public void WriteTerminalJournal(ReadOnlySpan<byte> journal) =>
+        WriteAtomic(TerminalJournalPath, journal);
+
+    public void WritePreparedTransition(ReadOnlySpan<byte> transition) =>
+        WriteAtomic(PreparedTransitionPath, transition);
+
+    public void ClearPreparedTransition()
     {
-        var directory = Path.GetDirectoryName(_statePath);
+        if (File.Exists(PreparedTransitionPath))
+        {
+            File.Delete(PreparedTransitionPath);
+        }
+    }
+
+    private static void WriteAtomic(string path, ReadOnlySpan<byte> state)
+    {
+        var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(directory))
         {
             Directory.CreateDirectory(directory);
         }
 
-        var temporaryPath = $"{_statePath}.tmp-{Guid.NewGuid():N}";
+        var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
         try
         {
             using (var stream = new FileStream(
@@ -66,13 +97,13 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
                 stream.Flush(flushToDisk: true);
             }
 
-            if (File.Exists(_statePath))
+            if (File.Exists(path))
             {
-                File.Replace(temporaryPath, _statePath, null);
+                File.Replace(temporaryPath, path, null);
             }
             else
             {
-                File.Move(temporaryPath, _statePath);
+                File.Move(temporaryPath, path);
             }
         }
         finally
@@ -83,6 +114,10 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
             }
         }
     }
+
+    private string TerminalJournalPath => $"{_statePath}.terminal";
+
+    private string PreparedTransitionPath => $"{_statePath}.prepared";
 
     public void Quarantine()
     {
@@ -194,6 +229,28 @@ internal sealed record PersistedForkRecord
     public string SecondCanonicalStatementBase64 { get; init; } = "";
     public string FirstHashHex { get; init; } = "";
     public string SecondHashHex { get; init; } = "";
+}
+
+internal sealed record PersistedTerminalUnsafeJournal
+{
+    public const string CurrentSchema =
+        "deep.registry.membership-projection.terminal-unsafe.v1";
+
+    public string Schema { get; init; } = CurrentSchema;
+    public string EvidenceSha256 { get; init; } = "";
+    public PersistedForkRecord Evidence { get; init; } = new();
+}
+
+internal sealed record PersistedPreparedTransition
+{
+    public const string CurrentSchema =
+        "deep.registry.membership-projection.prepared-transition.v1";
+
+    public string Schema { get; init; } = CurrentSchema;
+    public MembershipProjectionAnchor ExpectedAnchor { get; init; } =
+        MembershipProjectionAnchor.Empty;
+    public MembershipProjectionAnchor NextAnchor { get; init; } =
+        MembershipProjectionAnchor.Empty;
 }
 
 internal static class MembershipProjectionJson
