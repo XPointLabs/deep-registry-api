@@ -55,7 +55,9 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
     public int LastReadMaximumBytes { get; private set; }
     public int ReadCount { get; private set; }
     public byte[]? TerminalJournal { get; set; }
+    public byte[]? TerminalEvidence { get; set; }
     public byte[]? PreparedTransition { get; set; }
+    public int TerminalJournalMaximumBytes { get; set; } = int.MaxValue;
     public MemoryMonotonicAnchor Anchor { get; } = new();
 
     public byte[]? Read(int maximumBytes)
@@ -88,6 +90,11 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
         if (ThrowOnTerminalJournalWrite)
         {
             throw new IOException("fixture terminal journal write failure");
+        }
+
+        if (journal.Length > TerminalJournalMaximumBytes)
+        {
+            throw new InvalidDataException("fixture terminal journal overflow");
         }
 
         TerminalJournal = journal.ToArray();

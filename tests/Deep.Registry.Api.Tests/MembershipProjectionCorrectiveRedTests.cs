@@ -604,4 +604,51 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Equal("fork-detected", restarted.GetStatus().State);
         Assert.False(restarted.TryGetBridge(out _));
     }
+
+    [Fact]
+    public void OversizedDetailedForkJournalFallsBackToCompactTerminalMarker()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence
+        {
+            TerminalJournalMaximumBytes = 512
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        var result = service.ApplyBridge(
+            fixture.Bridge(contact: "https://compact-marker.example.invalid/v1"));
+
+        Assert.Equal(MembershipProjectionCode.ForkDetected, result.Code);
+        Assert.NotNull(persistence.TerminalJournal);
+        Assert.True(persistence.TerminalJournal.Length <= 512);
+        Assert.NotNull(persistence.TerminalEvidence);
+        var restarted = fixture.CreateService(persistence);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void TerminalJournalPrecommitIoFailureStillPoisonsExternalAnchor()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence
+        {
+            ThrowOnTerminalJournalWrite = true
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        var result = service.ApplyBridge(
+            fixture.Bridge(contact: "https://anchor-fallback.example.invalid/v1"));
+
+        Assert.Equal(MembershipProjectionCode.ForkDetected, result.Code);
+        Assert.Null(persistence.TerminalJournal);
+        Assert.True(persistence.Anchor.Read().TerminalUnsafe);
+        var restarted = fixture.CreateService(persistence);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+    }
 }
