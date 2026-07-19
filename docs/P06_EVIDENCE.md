@@ -1,6 +1,6 @@
 # P06 dormant fixture evidence
 
-Status: corrective green awaiting repeat independent review.
+Status: corrective green #2 awaiting repeat independent review.
 
 Human owner: Mr. X.
 
@@ -13,7 +13,11 @@ Human owner: Mr. X.
 - corrective red:
   `387e85807229c353e917c975e9a3b93c0eac1660`;
 - corrective green source:
-  `79bf87b6f7e42916a94125f665d4a2c053f5d922`.
+  `79bf87b6f7e42916a94125f665d4a2c053f5d922`;
+- corrective #2 red:
+  `acc270f7db896104f6d32bba383d35cf9a9af620`;
+- corrective #2 green source:
+  `107a7d68eb2104a94e97b486d5bfe902567f6ab0`.
 
 ## Prerequisite evidence
 
@@ -59,20 +63,20 @@ Release.
 | P04 hash gate | PASS, 5/5 exact files |
 | locked restore | PASS |
 | Release build | PASS, 0 warnings, 0 errors |
-| focused P06/package tests | PASS, 35/35, 0 skipped |
-| full registry suite | PASS, 58/58, 0 skipped |
+| focused P06/package tests | PASS, 45/45, 0 skipped |
+| full registry suite | PASS, 68/68, 0 skipped |
 | format verification | PASS |
-| line coverage | 2,172/2,569, 84.54% |
-| branch coverage | 631/973, 64.85% |
+| line coverage | 2,327/2,758, 84.37% |
+| branch coverage | 705/1,069, 65.94% |
 
 Machine-readable result SHA-256:
 
 - focused TRX:
-  `3b9d8c7a283789b32a97a2171406bea41f71ef73628e3c628ad669a88f039227`;
+  `0e28ec0c150b2e1b3d898bc8a6027a795d4fe128df58d203b29b3d2e5b38d14b`;
 - full TRX:
-  `2dc31138942a235d8a7e0fbd5d3e4853c5765536f70a26b8dd9243569a98fa29`;
+  `0548cf7af1458895f4fa8ce806d50ed6caffbd7291b02ec0ad4e43bc2365ebd8`;
 - Cobertura:
-  `a8fccb4a144ac74628b08efa3ed48be3b37718a1255dd4d30c1b13e12139b81d`.
+  `cf16577d4cd7cd65509fe1ed2db17faa1808792aa26437613717961c00387ed2`.
 
 ## Prior review findings and disposition
 
@@ -107,6 +111,35 @@ Disposition:
   `Deep.Protocol*`; documentation and evidence now describe the actual
   fail-closed activation boundary.
 
+## Corrective #2 disposition
+
+The repeat reviews inspected evidence commit
+`eaa99802a3fe8914b006784ce50ae99da81c6e2f` and source
+`79bf87b6f7e42916a94125f665d4a2c053f5d922`. The read-only
+`/root/p06_arch_recovery_review` verdict was NO-GO with P0/P1/P2/P3 =
+0/1/2/0. The read-only `/root/p06_security_privacy_review` verdict was NO-GO
+with P0/P1/P2/P3 = 0/4/3/0. Neither reviewer created a commit. Their remaining
+P0/P1/P2 union is addressed by source
+`107a7d68eb2104a94e97b486d5bfe902567f6ab0`:
+
+- valid fork detection compare/exchanges terminal-unsafe poison into the
+  external anchor before detailed state persistence; restart remains
+  fail-closed when the main state write fails;
+- lease sharing violations are typed, retried within a fixed bound and exposed
+  as recoverable `continuity-busy`; a real two-instance file-contention test
+  proves the same service instance recovers after lease release;
+- typed transient anchor read/CAS failures are retried, reported separately
+  from monotonic conflict and revalidated on later operations;
+- corruption uses a current-state flag rather than the lifetime recovery
+  counter, so explicit anchor reset/reseed resumes continuity checks;
+- configuration and hard-cap validation occurs before every startup persisted
+  read, raw artifact lengths are rejected before `ToArray`, and oversized
+  persisted files are rejected before deserialization;
+- parseable JSON with null authority, content or fork-record structures is
+  quarantined without escaping startup;
+- new transient/busy/conflict counters preserve bounded operational
+  diagnostics without exposing topology.
+
 ## Acceptance evidence
 
 - feature defaults to disabled;
@@ -118,19 +151,27 @@ Disposition:
 - authority, bridge and membership LKG chains are separate;
 - persistence completes before memory publication;
 - an external monotonic generation/hash anchor is mandatory for enabled mode;
+- fork terminal-unsafe poison is durable in that anchor before main state
+  persistence;
 - the repository ships no production anchor implementation;
 - exact configured size ceilings are enforced before persisted-state
   deserialization;
 - interprocess serialization and compare/exchange reject whole-file rollback
   both at startup and before serving;
+- typed lease contention and transient anchor failures are bounded,
+  distinguishable and recoverable;
 - rollback, gap, invalid signature, fork, expiry and corruption fail closed;
 - valid fork candidates and canonical evidence survive restart and a cleared
   boolean;
 - a write failure cannot clear the in-memory fork latch;
+- a main-state write failure after fork detection cannot clear the external
+  terminal-unsafe poison;
 - revocation immediately stops an older bridge while its historical authority
   binding remains verifiable without false quarantine;
 - a current cache survives source failure;
 - stale state is retained but not served;
+- explicit reset/reseed resumes continuity despite lifetime corruption
+  counters;
 - public bridge bytes are exact and versioned;
 - public bridge caching is private/non-storable and ETag matching accepts
   wildcard, list and weak validators;
