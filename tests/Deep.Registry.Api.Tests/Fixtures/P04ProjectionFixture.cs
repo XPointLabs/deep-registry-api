@@ -50,6 +50,7 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
     public byte[]? State { get; set; }
     public bool ThrowOnWrite { get; set; }
     public bool ThrowOnTerminalJournalWrite { get; set; }
+    public Exception? TerminalJournalWriteException { get; set; }
     public bool ThrowOnPreparedTransitionWrite { get; set; }
     public bool Quarantined { get; private set; }
     public int LastReadMaximumBytes { get; private set; }
@@ -87,6 +88,11 @@ internal sealed class MemoryProjectionPersistence : IMembershipProjectionPersist
 
     public void WriteTerminalJournal(ReadOnlySpan<byte> journal)
     {
+        if (TerminalJournalWriteException is not null)
+        {
+            throw TerminalJournalWriteException;
+        }
+
         if (ThrowOnTerminalJournalWrite)
         {
             throw new IOException("fixture terminal journal write failure");
@@ -162,6 +168,7 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
     public int TransientReadFailuresRemaining { get; set; }
     public int TransientCompareExchangeFailuresRemaining { get; set; }
     public int CommitThenThrowCompareExchangeFailuresRemaining { get; set; }
+    public int UnexpectedCompareExchangeFailuresRemaining { get; set; }
 
     public MembershipProjectionAnchor Read()
     {
@@ -184,6 +191,13 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
     {
         lock (_gate)
         {
+            if (UnexpectedCompareExchangeFailuresRemaining > 0)
+            {
+                UnexpectedCompareExchangeFailuresRemaining--;
+                throw new NotSupportedException(
+                    "fixture unexpected anchor compare/exchange canary");
+            }
+
             if (CommitThenThrowCompareExchangeFailuresRemaining > 0)
             {
                 CommitThenThrowCompareExchangeFailuresRemaining--;
@@ -241,6 +255,19 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
             _current = MembershipProjectionAnchor.Empty;
             TransientReadFailuresRemaining = 0;
             TransientCompareExchangeFailuresRemaining = 0;
+            UnexpectedCompareExchangeFailuresRemaining = 0;
+        }
+    }
+
+    public void PoisonCurrent(string evidenceSha256)
+    {
+        lock (_gate)
+        {
+            _current = _current with
+            {
+                TerminalUnsafe = true,
+                UnsafeEvidenceSha256 = evidenceSha256
+            };
         }
     }
 }

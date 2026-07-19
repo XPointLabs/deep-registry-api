@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Deep.Registry.Api.Tests.Fixtures;
 
@@ -648,6 +649,89 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Null(persistence.TerminalJournal);
         Assert.True(persistence.Anchor.Read().TerminalUnsafe);
         var restarted = fixture.CreateService(persistence);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void UndeclaredTerminalPersistenceFailureCannotSuppressExternalPoison()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence
+        {
+            TerminalJournalWriteException = new NotSupportedException(
+                "terminal persistence canary")
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+
+        var result = service.ApplyBridge(
+            fixture.Bridge(contact: "https://unexpected-local.example.invalid/v1"));
+
+        Assert.Equal(MembershipProjectionCode.ForkDetected, result.Code);
+        Assert.Null(persistence.TerminalJournal);
+        Assert.True(persistence.Anchor.Read().TerminalUnsafe);
+        var restarted = fixture.CreateService(persistence);
+        Assert.Equal("fork-detected", restarted.GetStatus().State);
+        Assert.False(restarted.TryGetBridge(out _));
+        Assert.DoesNotContain(
+            "canary",
+            JsonSerializer.Serialize(restarted.GetStatus()),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UnexpectedFailuresOfBothTerminalSinksStaySanitizedAndFailClosed()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence
+        {
+            TerminalJournalWriteException = new NotSupportedException(
+                "local terminal canary")
+        };
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        persistence.Anchor.UnexpectedCompareExchangeFailuresRemaining = 3;
+
+        var result = service.ApplyBridge(
+            fixture.Bridge(contact: "https://both-sinks.example.invalid/v1"));
+
+        Assert.Contains(
+            result.Code,
+            new[]
+            {
+                MembershipProjectionCode.PersistenceFailure,
+                MembershipProjectionCode.MonotonicAnchorTransient
+            });
+        Assert.False(service.GetStatus().Ready);
+        Assert.Equal("fork-detected", service.GetStatus().State);
+        Assert.False(service.TryGetBridge(out _));
+        Assert.DoesNotContain(
+            "canary",
+            JsonSerializer.Serialize(service.GetStatus()),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExternalTerminalAnchorDominatesMalformedPreparedRecovery(bool oversized)
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
+        persistence.Anchor.PoisonCurrent(new string('a', 64));
+        persistence.PreparedTransition = oversized
+            ? new byte[fixture.Options().MaximumStateBytes + 1]
+            : "{not-json"u8.ToArray();
+
+        var restarted = fixture.CreateService(persistence);
+
+        Assert.False(restarted.GetStatus().Ready);
         Assert.Equal("fork-detected", restarted.GetStatus().State);
         Assert.False(restarted.TryGetBridge(out _));
     }
