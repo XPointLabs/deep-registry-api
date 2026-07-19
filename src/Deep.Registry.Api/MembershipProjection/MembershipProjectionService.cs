@@ -788,8 +788,7 @@ public sealed class MembershipProjectionService
             _persistence.WriteTerminalJournal(journalBytes);
             markerDurable = true;
         }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             Interlocked.Increment(ref _persistenceFailures);
         }
@@ -839,6 +838,12 @@ public sealed class MembershipProjectionService
             anchorFailure = MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.MonotonicAnchorTransient);
         }
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
+        {
+            MarkAnchorTransient();
+            anchorFailure = MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.MonotonicAnchorTransient);
+        }
 
         try
         {
@@ -851,8 +856,7 @@ public sealed class MembershipProjectionService
                 Interlocked.Increment(ref _persistenceFailures);
             }
         }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             // Full candidates remain best-effort after a compact marker or
             // external terminal anchor has made the unsafe decision durable.
@@ -876,9 +880,10 @@ public sealed class MembershipProjectionService
         {
             bytes = _persistence.ReadTerminalJournal(_options.MaximumStateBytes);
         }
-        catch (InvalidDataException)
+        catch (Exception exception) when (IsRecoverableBackendException(exception))
         {
             _unsafeLatch = true;
+            Interlocked.Increment(ref _persistenceFailures);
             return true;
         }
 
@@ -1197,6 +1202,13 @@ public sealed class MembershipProjectionService
                 last = exception;
                 Thread.Yield();
             }
+            catch (Exception exception) when (IsRecoverableBackendException(exception))
+            {
+                last = new MembershipProjectionAnchorTransientException(
+                    "The external monotonic anchor is temporarily unavailable.",
+                    exception);
+                Thread.Yield();
+            }
         }
 
         throw last ?? new MembershipProjectionAnchorTransientException(
@@ -1235,6 +1247,23 @@ public sealed class MembershipProjectionService
             catch (MembershipProjectionAnchorTransientException exception)
             {
                 last = exception;
+                var observed = ReadAnchorWithRetry();
+                if (observed == next)
+                {
+                    _anchorTransient = false;
+                    return true;
+                }
+
+                if (observed != expected)
+                {
+                    return false;
+                }
+            }
+            catch (Exception exception) when (IsRecoverableBackendException(exception))
+            {
+                last = new MembershipProjectionAnchorTransientException(
+                    "The external monotonic anchor compare/exchange is temporarily unavailable.",
+                    exception);
                 var observed = ReadAnchorWithRetry();
                 if (observed == next)
                 {
@@ -1355,6 +1384,13 @@ public sealed class MembershipProjectionService
                 return;
             }
 
+            var anchor = ReadAnchorWithRetry();
+            if (anchor.TerminalUnsafe)
+            {
+                _unsafeLatch = true;
+                return;
+            }
+
             byte[]? bytes;
             try
             {
@@ -1382,12 +1418,6 @@ public sealed class MembershipProjectionService
                 _preparedTransitionPresent = true;
                 MarkMonotonicConflict();
                 return;
-            }
-
-            var anchor = ReadAnchorWithRetry();
-            if (anchor.TerminalUnsafe)
-            {
-                _unsafeLatch = true;
             }
 
             if (bytes is null)
@@ -2131,14 +2161,14 @@ public sealed class MembershipProjectionService
             return "invalid-configuration";
         }
 
-        if (_monotonicConflict)
-        {
-            return "monotonic-conflict";
-        }
-
         if (_unsafeLatch)
         {
             return "fork-detected";
+        }
+
+        if (_monotonicConflict)
+        {
+            return "monotonic-conflict";
         }
 
         if (_anchorTransient || _preparedTransitionPresent)
@@ -2252,6 +2282,14 @@ public sealed class MembershipProjectionService
 
     private static MembershipProjectionApplyResult Rejection(MembershipProjectionCode code) =>
         MembershipProjectionApplyResult.Rejected(code);
+
+    private static bool IsRecoverableBackendException(Exception exception) =>
+        exception is not (
+            OperationCanceledException or
+            OutOfMemoryException or
+            StackOverflowException or
+            AccessViolationException or
+            AppDomainUnloadedException);
 
     private static MembershipProjectionCode MapException(Exception exception) =>
         exception switch
