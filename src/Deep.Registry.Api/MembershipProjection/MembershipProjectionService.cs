@@ -1313,8 +1313,6 @@ public sealed class MembershipProjectionService
             using var lease = AcquireContinuityLeaseWithRetry();
             if (CheckTerminalJournalNoLock())
             {
-                _preparedTransitionPresent =
-                    _persistence.ReadPreparedTransition(_options.MaximumStateBytes) is not null;
                 return;
             }
 

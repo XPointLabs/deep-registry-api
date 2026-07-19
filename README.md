@@ -87,6 +87,9 @@ writes an independent local terminal journal containing the verified fork
 evidence. The journal is checked before every state load/read, so a detected
 fork remains non-servable after restart even when every poison CAS attempt is
 pre-commit or ambiguous and writing the detailed main state fails.
+Once a terminal journal is present, startup does not read or interpret a
+prepared transition; malformed or oversized lower-priority state cannot mask
+the terminal `fork-detected` condition.
 
 Normal state changes use a separate prepared-transition journal before the
 N+1 state file is replaced. After CAS, the service rereads the anchor: the exact

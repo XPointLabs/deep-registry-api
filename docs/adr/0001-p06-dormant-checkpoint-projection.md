@@ -86,6 +86,11 @@ do not replace the accepted LKG and publication/readiness stop. Persisted
 evidence is reverified at startup, so clearing only `forkDetected` cannot
 recover. P06 never selects a winning fork.
 
+A present terminal journal has strict precedence: after it latches unsafe,
+startup returns without reading main or prepared transition state. Therefore an
+oversized or malformed prepared file cannot throw past startup or weaken the
+terminal result.
+
 Each content envelope retains the exact delegation and authority LKG under
 which it was accepted. This permits historical verification after a later
 revocation while readiness immediately stops serving the old bridge. Persisted
