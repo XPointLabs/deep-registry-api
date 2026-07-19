@@ -2,7 +2,7 @@
   "schema": "deep-survival-work-package-report.v1",
   "workPackage": "P06",
   "title": "Dormant registry checkpoint projection",
-  "status": "corrective-green-2-awaiting-repeat-independent-review",
+  "status": "corrective-green-3-awaiting-final-repeat-independent-review",
   "humanOwner": "Mr. X",
   "repository": "deep-registry-api",
   "branch": "survival/w02-p06-registry-checkpoint",
@@ -12,7 +12,9 @@
   "correctiveRedCommit": "387e85807229c353e917c975e9a3b93c0eac1660",
   "firstCorrectiveGreenSourceCommit": "79bf87b6f7e42916a94125f665d4a2c053f5d922",
   "corrective2RedCommit": "acc270f7db896104f6d32bba383d35cf9a9af620",
-  "greenSourceCommit": "107a7d68eb2104a94e97b486d5bfe902567f6ab0",
+  "corrective2GreenSourceCommit": "107a7d68eb2104a94e97b486d5bfe902567f6ab0",
+  "corrective3RedCommit": "fb26a0d4132e934241cae1620242c06a43a86f0e",
+  "greenSourceCommit": "a801106f9201ea382ac0568a8a1eba943731970d",
   "prerequisite": {
     "w1w2FinalEvidence": "1c01e24e24647a46b4f37622f3934dc2cc1284ef",
     "carrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
@@ -29,21 +31,21 @@
   },
   "tests": {
     "focused": {
-      "passed": 45,
+      "passed": 51,
       "failed": 0,
       "skipped": 0,
-      "trxSha256": "0e28ec0c150b2e1b3d898bc8a6027a795d4fe128df58d203b29b3d2e5b38d14b"
+      "trxSha256": "39dade77d42f7a44371fafe345d93909d50f6f5a1e451f1478081dc14435551a"
     },
     "full": {
-      "passed": 68,
+      "passed": 74,
       "failed": 0,
       "skipped": 0,
-      "trxSha256": "0548cf7af1458895f4fa8ce806d50ed6caffbd7291b02ec0ad4e43bc2365ebd8"
+      "trxSha256": "4ec2777362244252150b31f5db94a214a877c5e9ba977363a578d7eae247f9f6"
     },
     "coverage": {
-      "lines": "2327/2758",
-      "branches": "705/1069",
-      "coberturaSha256": "cf16577d4cd7cd65509fe1ed2db17faa1808792aa26437613717961c00387ed2"
+      "lines": "2405/2969",
+      "branches": "754/1195",
+      "coberturaSha256": "5872d6f21fffb3d551fb42f09cc7d47795f6bc627de05411e9c21edf87b9472e"
     }
   },
   "runtime": {
@@ -69,6 +71,10 @@
     "repeatSecurityPrivacy": "NO-GO-0/4/3/0",
     "reviewerCommits": [],
     "corrective2SourceCommit": "107a7d68eb2104a94e97b486d5bfe902567f6ab0",
+    "corrective2EvidenceCommit": "28e20b61a9a215b85f00f5e990f5d1a94cd75d6b",
+    "corrective2ArchitectureRecovery": "NO-GO-0/1/1/1",
+    "corrective2SecurityPrivacy": "NO-GO-0/1/2/1",
+    "corrective3SourceCommit": "a801106f9201ea382ac0568a8a1eba943731970d",
     "architectureRecovery": "pending",
     "securityPrivacy": "pending"
   },

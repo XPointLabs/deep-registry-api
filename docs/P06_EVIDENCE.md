@@ -1,6 +1,6 @@
 # P06 dormant fixture evidence
 
-Status: corrective green #2 awaiting repeat independent review.
+Status: corrective green #3 awaiting final repeat independent review.
 
 Human owner: Mr. X.
 
@@ -17,7 +17,11 @@ Human owner: Mr. X.
 - corrective #2 red:
   `acc270f7db896104f6d32bba383d35cf9a9af620`;
 - corrective #2 green source:
-  `107a7d68eb2104a94e97b486d5bfe902567f6ab0`.
+  `107a7d68eb2104a94e97b486d5bfe902567f6ab0`;
+- corrective #3 red:
+  `fb26a0d4132e934241cae1620242c06a43a86f0e`;
+- corrective #3 green source:
+  `a801106f9201ea382ac0568a8a1eba943731970d`.
 
 ## Prerequisite evidence
 
@@ -63,20 +67,20 @@ Release.
 | P04 hash gate | PASS, 5/5 exact files |
 | locked restore | PASS |
 | Release build | PASS, 0 warnings, 0 errors |
-| focused P06/package tests | PASS, 45/45, 0 skipped |
-| full registry suite | PASS, 68/68, 0 skipped |
+| focused P06/package tests | PASS, 51/51, 0 skipped |
+| full registry suite | PASS, 74/74, 0 skipped |
 | format verification | PASS |
-| line coverage | 2,327/2,758, 84.37% |
-| branch coverage | 705/1,069, 65.94% |
+| line coverage | 2,405/2,969, 81.00% |
+| branch coverage | 754/1,195, 63.09% |
 
 Machine-readable result SHA-256:
 
 - focused TRX:
-  `0e28ec0c150b2e1b3d898bc8a6027a795d4fe128df58d203b29b3d2e5b38d14b`;
+  `39dade77d42f7a44371fafe345d93909d50f6f5a1e451f1478081dc14435551a`;
 - full TRX:
-  `0548cf7af1458895f4fa8ce806d50ed6caffbd7291b02ec0ad4e43bc2365ebd8`;
+  `4ec2777362244252150b31f5db94a214a877c5e9ba977363a578d7eae247f9f6`;
 - Cobertura:
-  `cf16577d4cd7cd65509fe1ed2db17faa1808792aa26437613717961c00387ed2`.
+  `5872d6f21fffb3d551fb42f09cc7d47795f6bc627de05411e9c21edf87b9472e`.
 
 ## Prior review findings and disposition
 
@@ -140,6 +144,30 @@ P0/P1/P2 union is addressed by source
 - new transient/busy/conflict counters preserve bounded operational
   diagnostics without exposing topology.
 
+## Corrective #3 disposition
+
+The next read-only reviews inspected evidence
+`28e20b61a9a215b85f00f5e990f5d1a94cd75d6b` and source
+`107a7d68eb2104a94e97b486d5bfe902567f6ab0`.
+`/root/p06_arch_recovery_review` returned P0/P1/P2/P3 = 0/1/1/1 and
+`/root/p06_security_privacy_review` returned 0/1/2/1. Their P0/P1/P2 union is
+addressed by source `a801106f9201ea382ac0568a8a1eba943731970d`:
+
+- verified fork evidence is atomically written to an independent terminal
+  journal before external poison CAS; the journal is checked before every
+  main/prepared state read, so restart remains terminal unsafe when every
+  poison attempt fails pre-commit or is ambiguous;
+- every normal N+1 transition has an atomic prepared record containing exact
+  expected/intended anchors before the main state replacement;
+- CAS reconciliation rereads the anchor, accepts only the exact intended next,
+  retries or remains transient for the exact expected value, and treats only a
+  third value as conflict;
+- startup and later operations reconcile both pre-commit failure and
+  commit-then-throw, while a main-write failure clears prepared state only when
+  the old file and expected anchor still match exactly;
+- stateful `Apply` invokes deferred lease/anchor/prepared recovery directly and
+  succeeds idempotently without a preceding status/read probe.
+
 ## Acceptance evidence
 
 - feature defaults to disabled;
@@ -153,6 +181,8 @@ P0/P1/P2 union is addressed by source
 - an external monotonic generation/hash anchor is mandatory for enabled mode;
 - fork terminal-unsafe poison is durable in that anchor before main state
   persistence;
+- independent local terminal evidence preserves fail-closed restart when
+  external poison CAS is unavailable or ambiguous;
 - the repository ships no production anchor implementation;
 - exact configured size ceilings are enforced before persisted-state
   deserialization;
@@ -160,6 +190,8 @@ P0/P1/P2 union is addressed by source
   both at startup and before serving;
 - typed lease contention and transient anchor failures are bounded,
   distinguishable and recoverable;
+- prepared N+1 state and ambiguous CAS are reconciled against exact
+  expected/intended anchors;
 - rollback, gap, invalid signature, fork, expiry and corruption fail closed;
 - valid fork candidates and canonical evidence survive restart and a cleared
   boolean;
@@ -172,6 +204,8 @@ P0/P1/P2 union is addressed by source
 - stale state is retained but not served;
 - explicit reset/reseed resumes continuity despite lifetime corruption
   counters;
+- stateful retries recover transient continuity directly without a separate
+  health/status request;
 - public bridge bytes are exact and versioned;
 - public bridge caching is private/non-storable and ETag matching accepts
   wildcard, list and weak validators;
