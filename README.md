@@ -73,14 +73,25 @@ implementation, so configuration alone cannot activate the projection. The
 only accepted local package status is `fixture-go-runtime-blocked`.
 
 Checkpoint state is read with the exact configured size ceiling before
-deserialization and updated under an interprocess file lease. Each durable
-generation is bound to the external monotonic anchor; a missing file, stale
-generation, changed hash or anchor failure stops publication without
-quarantining rollback evidence. Structurally or cryptographically corrupt
-state is quarantined. Authority changes immediately stop an older bridge until
-a bridge bound to the current delegation is accepted. Valid fork candidates
-and their canonical evidence are retained, and a fork latch cannot be cleared
-by changing only the state boolean.
+deserialization, and invalid/hard-cap-exceeding limits prevent any persisted
+read. Updates run under an interprocess file lease with bounded retry. A busy
+lease or typed transient anchor failure reports a bounded non-ready state and
+is revalidated on the next operation; it is not promoted to a permanent
+rollback conflict.
+
+Each durable generation is bound to the external monotonic anchor. A missing
+file, stale generation or changed hash stops publication without quarantining
+rollback evidence. The anchor also carries an irreversible terminal-unsafe
+fork poison. It is committed before the main state update, so a detected fork
+remains non-servable after restart even when writing the detailed state/evidence
+fails. Structurally or cryptographically corrupt state is quarantined. Its
+lifetime recovery counter does not disable future continuity checks, and a
+human-authorized reset/reseed can establish fresh state.
+
+Authority changes immediately stop an older bridge until a bridge bound to the
+current delegation is accepted. Valid fork candidates and their canonical
+evidence are retained, and a fork latch cannot be cleared by changing only the
+state boolean.
 
 Successful bridge responses use `private, no-store, max-age=0,
 must-revalidate` and support wildcard, list and weak `If-None-Match`

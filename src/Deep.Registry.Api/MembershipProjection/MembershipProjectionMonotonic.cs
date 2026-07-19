@@ -2,7 +2,9 @@ namespace Deep.Registry.Api;
 
 public sealed record MembershipProjectionAnchor(
     long Generation,
-    string StateSha256)
+    string StateSha256,
+    bool TerminalUnsafe = false,
+    string UnsafeEvidenceSha256 = "")
 {
     public static MembershipProjectionAnchor Empty { get; } = new(0, "");
 }
@@ -42,3 +44,18 @@ public sealed class MembershipProjectionMonotonicBoundary
 }
 
 internal sealed class MonotonicAnchorUnavailableException : Exception;
+
+public sealed class MembershipProjectionAnchorTransientException : Exception
+{
+    public MembershipProjectionAnchorTransientException(string message)
+        : base(message)
+    {
+    }
+
+    public MembershipProjectionAnchorTransientException(
+        string message,
+        Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

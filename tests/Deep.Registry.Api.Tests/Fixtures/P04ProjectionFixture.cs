@@ -107,11 +107,20 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
 {
     private readonly object _gate = new();
     private MembershipProjectionAnchor _current = MembershipProjectionAnchor.Empty;
+    public int TransientReadFailuresRemaining { get; set; }
+    public int TransientCompareExchangeFailuresRemaining { get; set; }
 
     public MembershipProjectionAnchor Read()
     {
         lock (_gate)
         {
+            if (TransientReadFailuresRemaining > 0)
+            {
+                TransientReadFailuresRemaining--;
+                throw new MembershipProjectionAnchorTransientException(
+                    "fixture transient anchor read");
+            }
+
             return _current;
         }
     }
@@ -122,6 +131,13 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
     {
         lock (_gate)
         {
+            if (TransientCompareExchangeFailuresRemaining > 0)
+            {
+                TransientCompareExchangeFailuresRemaining--;
+                throw new MembershipProjectionAnchorTransientException(
+                    "fixture transient anchor compare/exchange");
+            }
+
             if (_current != expected)
             {
                 return false;
@@ -140,6 +156,26 @@ internal sealed class MemoryMonotonicAnchor : IMembershipProjectionMonotonicAnch
             {
                 StateSha256 = Convert.ToHexString(SHA256.HashData(state)).ToLowerInvariant()
             };
+        }
+    }
+
+    public void RebindAsGeneration(long generation, ReadOnlySpan<byte> state)
+    {
+        lock (_gate)
+        {
+            _current = new MembershipProjectionAnchor(
+                generation,
+                Convert.ToHexString(SHA256.HashData(state)).ToLowerInvariant());
+        }
+    }
+
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _current = MembershipProjectionAnchor.Empty;
+            TransientReadFailuresRemaining = 0;
+            TransientCompareExchangeFailuresRemaining = 0;
         }
     }
 }

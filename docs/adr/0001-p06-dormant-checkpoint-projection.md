@@ -55,23 +55,34 @@ Every transition verifies against the expected predecessor while holding a
 single-process gate and an interprocess file lease. Durable state is flushed
 and atomically replaced before an external generation/hash anchor is advanced
 with compare/exchange and before the in-memory reference changes. An anchor
-mismatch, missing file behind a non-empty anchor, stale generation, changed
-file hash or anchor I/O failure permanently stops publication for that service
-instance. Rollback evidence is not quarantined as corruption.
+mismatch, missing file behind a non-empty anchor, stale generation or changed
+file hash permanently stops publication for that service instance. Rollback
+evidence is not quarantined as corruption.
+
+Lease contention and typed transient external-anchor errors are distinct from
+rollback conflicts. They use a bounded retry, report sanitized non-ready state,
+and revalidate on later reads or transitions. A successful revalidation clears
+only the transient condition. Invalid configured limits are rejected before
+any persisted read.
 
 An identical artifact is idempotent. A different valid same-sequence successor
-sets an in-memory unsafe latch before persistence. Both signed candidates,
-their canonical statements and hashes are preserved as fork evidence; they do
-not replace the accepted LKG and publication/readiness stop. Persisted evidence
-is reverified at startup, so clearing only `forkDetected` cannot recover.
-P06 never selects a winning fork.
+sets an in-memory unsafe latch and compare/exchanges a terminal-unsafe poison
+into the external anchor before the main state write. The poison is independent
+of detailed state persistence and survives restart. Both signed candidates,
+their canonical statements and hashes are then preserved as fork evidence;
+they do not replace the accepted LKG and publication/readiness stop. Persisted
+evidence is reverified at startup, so clearing only `forkDetected` cannot
+recover. P06 never selects a winning fork.
 
 Each content envelope retains the exact delegation and authority LKG under
 which it was accepted. This permits historical verification after a later
 revocation while readiness immediately stops serving the old bridge. Persisted
 bytes are size-bounded before allocation/deserialization and cryptographically
 reverified at startup. Structurally or cryptographically corrupt state is
-quarantined. Expired state is retained as stale evidence but is not served.
+quarantined, including parseable JSON with null/malformed nested records.
+Corruption counters are diagnostic rather than a lifetime continuity bypass;
+after explicit anchor reset and reseed, checks resume normally. Expired state
+is retained as stale evidence but is not served.
 
 ## Public disclosure
 

@@ -181,7 +181,8 @@ public sealed class MembershipProjectionCorrectiveRedTests
             var second = new FileMembershipProjectionPersistence(path);
             using var lease = first.AcquireExclusiveLease();
 
-            Assert.Throws<IOException>(() => second.AcquireExclusiveLease());
+            Assert.Throws<MembershipProjectionLeaseBusyException>(
+                () => second.AcquireExclusiveLease());
         }
         finally
         {
@@ -293,6 +294,7 @@ public sealed class MembershipProjectionCorrectiveRedTests
         var firstPersistence = new FileMembershipProjectionPersistence(statePath);
         var secondPersistence = new FileMembershipProjectionPersistence(statePath);
         var anchor = new MemoryMonotonicAnchor();
+        MembershipProjectionService? contending = null;
         try
         {
             var first = fixture.CreateService(firstPersistence, anchor);
@@ -300,14 +302,13 @@ public sealed class MembershipProjectionCorrectiveRedTests
             Assert.True(first.ApplyBridge(fixture.Bridge()).Success);
             using (firstPersistence.AcquireExclusiveLease())
             {
-                var contending = fixture.CreateService(secondPersistence, anchor);
+                contending = fixture.CreateService(secondPersistence, anchor);
                 Assert.Equal("continuity-busy", contending.GetStatus().State);
                 Assert.False(contending.TryGetBridge(out _));
             }
 
-            var recovered = fixture.CreateService(secondPersistence, anchor);
-            Assert.Equal("current", recovered.GetStatus().State);
-            Assert.True(recovered.TryGetBridge(out _));
+            Assert.Equal("current", contending.GetStatus().State);
+            Assert.True(contending.TryGetBridge(out _));
         }
         finally
         {
@@ -351,7 +352,7 @@ public sealed class MembershipProjectionCorrectiveRedTests
         };
         var options = fixture.Options() with
         {
-            MaximumStateBytes = MembershipProjectionService.HardMaximumStateBytes + 1
+            MaximumStateBytes = (1024 * 1024) + 1
         };
 
         var service = new MembershipProjectionService(
@@ -370,15 +371,47 @@ public sealed class MembershipProjectionCorrectiveRedTests
     {
         var fixture = new P04ProjectionFixture();
         var persistence = new MemoryProjectionPersistence();
+        var first = fixture.CreateService(persistence);
+        fixture.SeedAuthority(first);
+        Assert.True(first.ApplyBridge(fixture.Bridge()).Success);
+        persistence.Anchor.TransientReadFailuresRemaining = 9;
         var service = fixture.CreateService(persistence);
-        fixture.SeedAuthority(service);
-        Assert.True(service.ApplyBridge(fixture.Bridge()).Success);
-        persistence.Anchor.TransientReadFailuresRemaining = 6;
 
         Assert.Equal("monotonic-anchor-transient", service.GetStatus().State);
         Assert.False(service.TryGetBridge(out _));
         Assert.Equal("current", service.GetStatus().State);
         Assert.True(service.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void TransientAnchorCasRetriesWithinBound()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 2;
+
+        var result = service.ApplyBridge(fixture.Bridge());
+
+        Assert.Equal(MembershipProjectionCode.Accepted, result.Code);
+        Assert.True(service.TryGetBridge(out _));
+    }
+
+    [Fact]
+    public void ExhaustedTransientAnchorCasReturnsTypedNonReadyResult()
+    {
+        var fixture = new P04ProjectionFixture();
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        fixture.SeedAuthority(service);
+        persistence.Anchor.TransientCompareExchangeFailuresRemaining = 3;
+
+        var result = service.ApplyBridge(fixture.Bridge());
+
+        Assert.Equal(MembershipProjectionCode.MonotonicAnchorTransient, result.Code);
+        Assert.False(result.Success);
+        Assert.False(service.TryGetBridge(out _));
     }
 
     [Fact]

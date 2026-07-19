@@ -10,6 +10,7 @@ public sealed class MembershipProjectionService
     internal const string StateSchema = "deep.registry.membership-projection.v1";
     internal const int HardMaximumStateBytes = 1024 * 1024;
     internal const int HardMaximumArtifactBytes = 1024 * 1024;
+    private const int TransientRetryLimit = 3;
     private static readonly ulong MaximumUnixSeconds =
         checked((ulong)DateTimeOffset.MaxValue.ToUnixTimeSeconds());
 
@@ -23,6 +24,11 @@ public sealed class MembershipProjectionService
     private string _persistedStateSha256 = "";
     private bool _unsafeLatch;
     private bool _monotonicConflict;
+    private bool _anchorTransient;
+    private bool _continuityBusy;
+    private bool _loadDeferred;
+    private bool _corruptStatePresent;
+    private bool _configurationInvalid;
 
     private long _accepted;
     private long _idempotent;
@@ -37,6 +43,9 @@ public sealed class MembershipProjectionService
     private long _corruptStateRecoveries;
     private long _persistenceFailures;
     private long _sourceFailures;
+    private long _anchorTransientEvents;
+    private long _continuityBusyEvents;
+    private long _monotonicConflictEvents;
 
     public MembershipProjectionService(
         IOptions<MembershipProjectionOptions> options,
@@ -77,10 +86,12 @@ public sealed class MembershipProjectionService
         _artifactVerifier = artifactVerifier;
         _persistence = persistence;
         _monotonicBoundary = monotonicBoundary;
+        _configurationInvalid = !HasValidConfiguredLimits();
 
         if (_options.Enabled &&
             _artifactVerifier.IsAvailable &&
-            _monotonicBoundary.IsAvailable)
+            _monotonicBoundary.IsAvailable &&
+            !_configurationInvalid)
         {
             LoadState();
         }
@@ -90,15 +101,15 @@ public sealed class MembershipProjectionService
         ReadOnlySpan<byte> canonicalGenesis,
         IReadOnlyList<MembershipSignature> signatures)
     {
-        var genesisBytes = canonicalGenesis.ToArray();
         lock (_gate)
         {
-            var gate = CheckIngress(genesisBytes.Length);
+            var gate = CheckIngress(canonicalGenesis.Length);
             if (gate is not null)
             {
                 return gate;
             }
 
+            var genesisBytes = canonicalGenesis.ToArray();
             return WithContinuityLease(() =>
             {
                 try
@@ -174,15 +185,15 @@ public sealed class MembershipProjectionService
 
     public MembershipProjectionApplyResult ApplyDelegation(ReadOnlySpan<byte> signedDelegation)
     {
-        var delegationBytes = signedDelegation.ToArray();
         lock (_gate)
         {
-            var gate = CheckStatefulIngress(delegationBytes.Length);
+            var gate = CheckStatefulIngress(signedDelegation.Length);
             if (gate is not null)
             {
                 return gate;
             }
 
+            var delegationBytes = signedDelegation.ToArray();
             return WithContinuityLease(() =>
             {
                 try
@@ -232,15 +243,15 @@ public sealed class MembershipProjectionService
 
     public MembershipProjectionApplyResult ApplyRevocation(ReadOnlySpan<byte> signedRevocation)
     {
-        var revocationBytes = signedRevocation.ToArray();
         lock (_gate)
         {
-            var gate = CheckStatefulIngress(revocationBytes.Length);
+            var gate = CheckStatefulIngress(signedRevocation.Length);
             if (gate is not null)
             {
                 return gate;
             }
 
+            var revocationBytes = signedRevocation.ToArray();
             return WithContinuityLease(() =>
             {
                 try
@@ -300,9 +311,15 @@ public sealed class MembershipProjectionService
 
     public MembershipProjectionApplyResult ApplyBridge(ReadOnlySpan<byte> signedBridge)
     {
-        var bytes = signedBridge.ToArray();
         lock (_gate)
         {
+            var gate = CheckStatefulIngress(signedBridge.Length);
+            if (gate is not null)
+            {
+                return gate;
+            }
+
+            var bytes = signedBridge.ToArray();
             return WithContinuityLease(
                 () => ApplyContent(bytes, isBridge: true));
         }
@@ -310,9 +327,15 @@ public sealed class MembershipProjectionService
 
     public MembershipProjectionApplyResult ApplyMembership(ReadOnlySpan<byte> signedMembership)
     {
-        var bytes = signedMembership.ToArray();
         lock (_gate)
         {
+            var gate = CheckStatefulIngress(signedMembership.Length);
+            if (gate is not null)
+            {
+                return gate;
+            }
+
+            var bytes = signedMembership.ToArray();
             return WithContinuityLease(
                 () => ApplyContent(bytes, isBridge: false));
         }
@@ -348,7 +371,10 @@ public sealed class MembershipProjectionService
                     Interlocked.Read(ref _clockSkew),
                     Interlocked.Read(ref _corruptStateRecoveries),
                     Interlocked.Read(ref _persistenceFailures),
-                    Interlocked.Read(ref _sourceFailures)));
+                    Interlocked.Read(ref _sourceFailures),
+                    Interlocked.Read(ref _anchorTransientEvents),
+                    Interlocked.Read(ref _continuityBusyEvents),
+                    Interlocked.Read(ref _monotonicConflictEvents)));
         }
     }
 
@@ -379,30 +405,51 @@ public sealed class MembershipProjectionService
         if (!_options.Enabled ||
             !_artifactVerifier.IsAvailable ||
             !_monotonicBoundary.IsAvailable ||
+            _configurationInvalid ||
             _monotonicConflict ||
-            _unsafeLatch ||
-            Interlocked.Read(ref _corruptStateRecoveries) > 0)
+            _unsafeLatch)
         {
+            return;
+        }
+
+        if (_loadDeferred)
+        {
+            LoadState();
             return;
         }
 
         try
         {
-            using var lease = _persistence.AcquireExclusiveLease();
+            using var lease = AcquireContinuityLeaseWithRetry();
+            if (_corruptStatePresent)
+            {
+                var recoveryAnchor = ReadAnchorWithRetry();
+                _ = _persistence.Read(_options.MaximumStateBytes);
+                if (recoveryAnchor.TerminalUnsafe)
+                {
+                    _unsafeLatch = true;
+                }
+
+                return;
+            }
+
             if (!ValidateContinuityNoLock())
             {
-                _monotonicConflict = true;
-                _unsafeLatch = true;
+                MarkMonotonicConflict();
             }
         }
-        catch (Exception exception) when (
-            exception is IOException or
-                UnauthorizedAccessException or
-                InvalidDataException or
-                MonotonicAnchorUnavailableException)
+        catch (MembershipProjectionLeaseBusyException)
         {
-            _monotonicConflict = true;
-            _unsafeLatch = true;
+            MarkContinuityBusy();
+        }
+        catch (MembershipProjectionAnchorTransientException)
+        {
+            MarkAnchorTransient();
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            MarkMonotonicConflict();
         }
     }
 
@@ -410,12 +457,6 @@ public sealed class MembershipProjectionService
         ReadOnlySpan<byte> signedArtifact,
         bool isBridge)
     {
-        var gate = CheckStatefulIngress(signedArtifact.Length);
-        if (gate is not null)
-        {
-            return gate;
-        }
-
         if (string.IsNullOrWhiteSpace(_state!.ActiveDelegationBase64))
         {
             return Count(Rejection(MembershipProjectionCode.StateUnavailable));
@@ -577,6 +618,13 @@ public sealed class MembershipProjectionService
                 FirstHashHex = Sha256Hex(firstCanonical),
                 SecondHashHex = Sha256Hex(secondCanonical)
             };
+            var poisonFailure = PoisonForkNoLock(forkRecord);
+            if (poisonFailure is not null)
+            {
+                Interlocked.Increment(ref _fork);
+                return poisonFailure;
+            }
+
             var persisted = Persist(
                 current with
                 {
@@ -671,6 +719,13 @@ public sealed class MembershipProjectionService
                 FirstHashHex = Sha256Hex(firstCanonical),
                 SecondHashHex = Sha256Hex(secondCanonical)
             };
+            var poisonFailure = PoisonForkNoLock(forkRecord);
+            if (poisonFailure is not null)
+            {
+                Interlocked.Increment(ref _fork);
+                return poisonFailure;
+            }
+
             var persisted = Persist(
                 current with
                 {
@@ -692,12 +747,77 @@ public sealed class MembershipProjectionService
         }
     }
 
+    private MembershipProjectionApplyResult? PoisonForkNoLock(
+        PersistedForkRecord forkRecord)
+    {
+        try
+        {
+            var expected = ReadAnchorWithRetry();
+            if (expected.TerminalUnsafe)
+            {
+                return null;
+            }
+
+            if (_state is null ||
+                expected.Generation != _state.Generation ||
+                !string.Equals(
+                    expected.StateSha256,
+                    _persistedStateSha256,
+                    StringComparison.Ordinal))
+            {
+                MarkMonotonicConflict();
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.MonotonicConflict);
+            }
+
+            var evidenceBytes = JsonSerializer.SerializeToUtf8Bytes(
+                forkRecord,
+                MembershipProjectionJson.Options);
+            var poisoned = expected with
+            {
+                TerminalUnsafe = true,
+                UnsafeEvidenceSha256 = Sha256Hex(evidenceBytes)
+            };
+            if (!CompareExchangeAnchorWithRetry(expected, poisoned))
+            {
+                MarkMonotonicConflict();
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.MonotonicConflict);
+            }
+
+            return null;
+        }
+        catch (MembershipProjectionAnchorTransientException)
+        {
+            MarkAnchorTransient();
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.MonotonicAnchorTransient);
+        }
+    }
+
     private MembershipProjectionApplyResult? CheckStatefulIngress(int length)
     {
         var gate = CheckIngress(length);
         if (gate is not null)
         {
             return gate;
+        }
+
+        if (_state is null && _loadDeferred)
+        {
+            LoadState();
+        }
+
+        if (_continuityBusy)
+        {
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.ContinuityBusy);
+        }
+
+        if (_anchorTransient)
+        {
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.MonotonicAnchorTransient);
         }
 
         return _state is null
@@ -725,8 +845,7 @@ public sealed class MembershipProjectionService
                 MembershipProjectionCode.MonotonicAnchorUnavailable);
         }
 
-        if (_options.MaximumArtifactBytes is <= 0 or > HardMaximumArtifactBytes ||
-            _options.MaximumStateBytes is <= 0 or > HardMaximumStateBytes ||
+        if (_configurationInvalid ||
             length is <= 0 ||
             length > _options.MaximumArtifactBytes)
         {
@@ -744,6 +863,10 @@ public sealed class MembershipProjectionService
 
         return null;
     }
+
+    private bool HasValidConfiguredLimits() =>
+        _options.MaximumArtifactBytes is > 0 and <= HardMaximumArtifactBytes &&
+        _options.MaximumStateBytes is > 0 and <= HardMaximumStateBytes;
 
     private MembershipProjectionApplyResult WithContinuityLease(
         Func<MembershipProjectionApplyResult> action)
@@ -766,6 +889,12 @@ public sealed class MembershipProjectionService
                 MembershipProjectionCode.MonotonicAnchorUnavailable);
         }
 
+        if (_configurationInvalid)
+        {
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.InvalidLength);
+        }
+
         if (_monotonicConflict)
         {
             return MembershipProjectionApplyResult.Rejected(
@@ -780,16 +909,33 @@ public sealed class MembershipProjectionService
 
         try
         {
-            using var lease = _persistence.AcquireExclusiveLease();
+            using var lease = AcquireContinuityLeaseWithRetry();
             if (!ValidateContinuityNoLock())
             {
-                _monotonicConflict = true;
-                _unsafeLatch = true;
+                MarkMonotonicConflict();
                 return MembershipProjectionApplyResult.Rejected(
                     MembershipProjectionCode.MonotonicConflict);
             }
 
+            if (_unsafeLatch)
+            {
+                return MembershipProjectionApplyResult.Rejected(
+                    MembershipProjectionCode.ForkDetected);
+            }
+
             return action();
+        }
+        catch (MembershipProjectionLeaseBusyException)
+        {
+            MarkContinuityBusy();
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.ContinuityBusy);
+        }
+        catch (MembershipProjectionAnchorTransientException)
+        {
+            MarkAnchorTransient();
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.MonotonicAnchorTransient);
         }
         catch (MonotonicAnchorUnavailableException)
         {
@@ -799,8 +945,7 @@ public sealed class MembershipProjectionService
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            _monotonicConflict = true;
-            _unsafeLatch = true;
+            MarkMonotonicConflict();
             return MembershipProjectionApplyResult.Rejected(
                 MembershipProjectionCode.MonotonicConflict);
         }
@@ -808,13 +953,22 @@ public sealed class MembershipProjectionService
 
     private bool ValidateContinuityNoLock()
     {
-        var anchor = _monotonicBoundary.Required.Read();
+        var anchor = ReadAnchorWithRetry();
         var bytes = _persistence.Read(_options.MaximumStateBytes);
+        if (anchor.TerminalUnsafe)
+        {
+            _unsafeLatch = true;
+        }
+
         if (_state is null)
         {
-            return bytes is null &&
-                   anchor.Generation == MembershipProjectionAnchor.Empty.Generation &&
-                   string.IsNullOrEmpty(anchor.StateSha256);
+            var isEmpty = bytes is null && IsEmptyAnchor(anchor);
+            if (isEmpty)
+            {
+                _corruptStatePresent = false;
+            }
+
+            return isEmpty;
         }
 
         if (bytes is null)
@@ -834,19 +988,95 @@ public sealed class MembershipProjectionService
                    StringComparison.Ordinal);
     }
 
+    private IDisposable AcquireContinuityLeaseWithRetry()
+    {
+        MembershipProjectionLeaseBusyException? last = null;
+        for (var attempt = 0; attempt < TransientRetryLimit; attempt++)
+        {
+            try
+            {
+                var lease = _persistence.AcquireExclusiveLease();
+                _continuityBusy = false;
+                return lease;
+            }
+            catch (MembershipProjectionLeaseBusyException exception)
+            {
+                last = exception;
+                Thread.Yield();
+            }
+        }
+
+        throw last ?? new MembershipProjectionLeaseBusyException(
+            "The membership projection continuity lease is busy.",
+            new IOException());
+    }
+
+    private MembershipProjectionAnchor ReadAnchorWithRetry()
+    {
+        MembershipProjectionAnchorTransientException? last = null;
+        for (var attempt = 0; attempt < TransientRetryLimit; attempt++)
+        {
+            try
+            {
+                var anchor = _monotonicBoundary.Required.Read();
+                _anchorTransient = false;
+                return anchor;
+            }
+            catch (MembershipProjectionAnchorTransientException exception)
+            {
+                last = exception;
+                Thread.Yield();
+            }
+        }
+
+        throw last ?? new MembershipProjectionAnchorTransientException(
+            "The external monotonic anchor is temporarily unavailable.");
+    }
+
+    private bool CompareExchangeAnchorWithRetry(
+        MembershipProjectionAnchor expected,
+        MembershipProjectionAnchor next)
+    {
+        MembershipProjectionAnchorTransientException? last = null;
+        for (var attempt = 0; attempt < TransientRetryLimit; attempt++)
+        {
+            try
+            {
+                var exchanged = _monotonicBoundary.Required.CompareExchange(
+                    expected,
+                    next);
+                _anchorTransient = false;
+                return exchanged;
+            }
+            catch (MembershipProjectionAnchorTransientException exception)
+            {
+                last = exception;
+                Thread.Yield();
+            }
+        }
+
+        throw last ?? new MembershipProjectionAnchorTransientException(
+            "The external monotonic anchor is temporarily unavailable.");
+    }
+
+    private static bool IsEmptyAnchor(MembershipProjectionAnchor anchor) =>
+        anchor.Generation == 0 &&
+        string.IsNullOrEmpty(anchor.StateSha256) &&
+        !anchor.TerminalUnsafe &&
+        string.IsNullOrEmpty(anchor.UnsafeEvidenceSha256);
+
     private MembershipProjectionApplyResult Persist(
         PersistedMembershipProjection next,
         MembershipProjectionCode successCode = MembershipProjectionCode.Accepted)
     {
         try
         {
-            var expectedAnchor = _monotonicBoundary.Required.Read();
+            var expectedAnchor = ReadAnchorWithRetry();
             if ((_state is null && expectedAnchor.Generation != 0) ||
                 (_state is not null && expectedAnchor.Generation != _state.Generation) ||
                 expectedAnchor.Generation == long.MaxValue)
             {
-                _monotonicConflict = true;
-                _unsafeLatch = true;
+                MarkMonotonicConflict();
                 return MembershipProjectionApplyResult.Rejected(
                     MembershipProjectionCode.MonotonicConflict);
             }
@@ -860,20 +1090,33 @@ public sealed class MembershipProjectionService
 
             _persistence.Write(bytes);
             var stateHash = Sha256Hex(bytes);
-            var nextAnchor = new MembershipProjectionAnchor(next.Generation, stateHash);
-            if (!_monotonicBoundary.Required.CompareExchange(expectedAnchor, nextAnchor))
+            var nextAnchor = new MembershipProjectionAnchor(
+                next.Generation,
+                stateHash,
+                expectedAnchor.TerminalUnsafe,
+                expectedAnchor.UnsafeEvidenceSha256);
+            if (!CompareExchangeAnchorWithRetry(expectedAnchor, nextAnchor))
             {
-                _monotonicConflict = true;
-                _unsafeLatch = true;
+                MarkMonotonicConflict();
                 return MembershipProjectionApplyResult.Rejected(
                     MembershipProjectionCode.MonotonicConflict);
             }
 
             _state = next;
             _persistedStateSha256 = stateHash;
+            _corruptStatePresent = false;
+            _loadDeferred = false;
+            _continuityBusy = false;
+            _anchorTransient = false;
             return successCode == MembershipProjectionCode.Accepted
                 ? Count(MembershipProjectionApplyResult.Accepted())
                 : new MembershipProjectionApplyResult(true, successCode);
+        }
+        catch (MembershipProjectionAnchorTransientException)
+        {
+            MarkAnchorTransient();
+            return MembershipProjectionApplyResult.Rejected(
+                MembershipProjectionCode.MonotonicAnchorTransient);
         }
         catch
         {
@@ -885,9 +1128,10 @@ public sealed class MembershipProjectionService
 
     private void LoadState()
     {
+        _loadDeferred = false;
         try
         {
-            using var lease = _persistence.AcquireExclusiveLease();
+            using var lease = AcquireContinuityLeaseWithRetry();
             byte[]? bytes;
             try
             {
@@ -899,13 +1143,17 @@ public sealed class MembershipProjectionService
                 return;
             }
 
-            var anchor = _monotonicBoundary.Required.Read();
+            var anchor = ReadAnchorWithRetry();
+            if (anchor.TerminalUnsafe)
+            {
+                _unsafeLatch = true;
+            }
+
             if (bytes is null)
             {
-                if (anchor != MembershipProjectionAnchor.Empty)
+                if (!IsEmptyAnchor(anchor) && !anchor.TerminalUnsafe)
                 {
-                    _monotonicConflict = true;
-                    _unsafeLatch = true;
+                    MarkMonotonicConflict();
                 }
 
                 return;
@@ -920,12 +1168,7 @@ public sealed class MembershipProjectionService
                         ?? throw new InvalidDataException();
                 ValidatePersistedState(state);
             }
-            catch (Exception exception) when (
-                exception is InvalidDataException or
-                    FormatException or
-                    JsonException or
-                    MembershipContractException or
-                    OverflowException)
+            catch (Exception exception) when (IsPersistedStateValidationException(exception))
             {
                 QuarantineCorruptState();
                 return;
@@ -938,24 +1181,38 @@ public sealed class MembershipProjectionService
                     anchor.StateSha256,
                     StringComparison.Ordinal))
             {
-                _monotonicConflict = true;
-                _unsafeLatch = true;
+                MarkMonotonicConflict();
                 return;
             }
 
             _state = state;
             _persistedStateSha256 = stateHash;
-            _unsafeLatch = state.ForkDetected || state.ForkRecords.Count > 0;
+            _unsafeLatch =
+                anchor.TerminalUnsafe ||
+                state.ForkDetected ||
+                state.ForkRecords.Count > 0;
+            _corruptStatePresent = false;
+            _continuityBusy = false;
+            _anchorTransient = false;
         }
         catch (MonotonicAnchorUnavailableException)
         {
             // Constructor already guards this path; retain a fail-closed fallback.
         }
+        catch (MembershipProjectionLeaseBusyException)
+        {
+            MarkContinuityBusy();
+            _loadDeferred = true;
+        }
+        catch (MembershipProjectionAnchorTransientException)
+        {
+            MarkAnchorTransient();
+            _loadDeferred = true;
+        }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException)
         {
-            _monotonicConflict = true;
-            _unsafeLatch = true;
+            MarkMonotonicConflict();
         }
     }
 
@@ -973,7 +1230,18 @@ public sealed class MembershipProjectionService
         Interlocked.Increment(ref _corruptStateRecoveries);
         _state = null;
         _persistedStateSha256 = "";
+        _corruptStatePresent = true;
+        _loadDeferred = false;
     }
+
+    private static bool IsPersistedStateValidationException(Exception exception) =>
+        exception is InvalidDataException or
+            FormatException or
+            JsonException or
+            MembershipContractException or
+            OverflowException or
+            ArgumentException or
+            NullReferenceException;
 
     private void ValidatePersistedState(PersistedMembershipProjection state)
     {
@@ -1450,8 +1718,13 @@ public sealed class MembershipProjectionService
         if (!_options.Enabled ||
             !_artifactVerifier.IsAvailable ||
             !_monotonicBoundary.IsAvailable ||
+            _configurationInvalid ||
             _monotonicConflict ||
             _unsafeLatch ||
+            _anchorTransient ||
+            _continuityBusy ||
+            _loadDeferred ||
+            _corruptStatePresent ||
             _state is null ||
             _state.ForkDetected ||
             string.IsNullOrWhiteSpace(_state.ActiveDelegationBase64) ||
@@ -1500,6 +1773,11 @@ public sealed class MembershipProjectionService
             return "monotonic-anchor-unavailable";
         }
 
+        if (_configurationInvalid)
+        {
+            return "invalid-configuration";
+        }
+
         if (_monotonicConflict)
         {
             return "monotonic-conflict";
@@ -1510,11 +1788,24 @@ public sealed class MembershipProjectionService
             return "fork-detected";
         }
 
+        if (_anchorTransient)
+        {
+            return "monotonic-anchor-transient";
+        }
+
+        if (_continuityBusy || _loadDeferred)
+        {
+            return "continuity-busy";
+        }
+
+        if (_corruptStatePresent)
+        {
+            return "corrupt-state";
+        }
+
         if (_state is null)
         {
-            return Interlocked.Read(ref _corruptStateRecoveries) > 0
-                ? "corrupt-state"
-                : "state-unavailable";
+            return "state-unavailable";
         }
 
         if (_state.ForkDetected)
@@ -1537,6 +1828,28 @@ public sealed class MembershipProjectionService
         }
 
         return IsReadyNoLock() ? "current" : "stale";
+    }
+
+    private void MarkAnchorTransient()
+    {
+        _anchorTransient = true;
+        Interlocked.Increment(ref _anchorTransientEvents);
+    }
+
+    private void MarkContinuityBusy()
+    {
+        _continuityBusy = true;
+        Interlocked.Increment(ref _continuityBusyEvents);
+    }
+
+    private void MarkMonotonicConflict()
+    {
+        if (!_monotonicConflict)
+        {
+            Interlocked.Increment(ref _monotonicConflictEvents);
+        }
+
+        _monotonicConflict = true;
     }
 
     private MembershipProjectionApplyResult Count(MembershipProjectionApplyResult result)

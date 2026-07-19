@@ -104,13 +104,35 @@ public sealed class FileMembershipProjectionPersistence : IMembershipProjectionP
             Directory.CreateDirectory(directory);
         }
 
-        return new FileStream(
-            $"{_statePath}.lock",
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            FileShare.None,
-            bufferSize: 1,
-            FileOptions.WriteThrough);
+        try
+        {
+            return new FileStream(
+                $"{_statePath}.lock",
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.WriteThrough);
+        }
+        catch (IOException exception) when (IsSharingViolation(exception))
+        {
+            throw new MembershipProjectionLeaseBusyException(
+                "The membership projection continuity lease is busy.",
+                exception);
+        }
+    }
+
+    private static bool IsSharingViolation(IOException exception) =>
+        (exception.HResult & 0xffff) is 11 or 32 or 33;
+}
+
+public sealed class MembershipProjectionLeaseBusyException : IOException
+{
+    public MembershipProjectionLeaseBusyException(
+        string message,
+        Exception innerException)
+        : base(message, innerException)
+    {
     }
 }
 

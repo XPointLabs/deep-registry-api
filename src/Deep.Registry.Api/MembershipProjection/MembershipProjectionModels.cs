@@ -24,7 +24,9 @@ public enum MembershipProjectionCode
     Disabled,
     VerifierUnavailable,
     MonotonicAnchorUnavailable,
+    MonotonicAnchorTransient,
     MonotonicConflict,
+    ContinuityBusy,
     StateUnavailable,
     InvalidLength,
     InvalidArtifact,
@@ -74,7 +76,10 @@ public sealed record MembershipProjectionCounters(
     long ClockSkew,
     long CorruptStateRecoveries,
     long PersistenceFailures,
-    long SourceFailures);
+    long SourceFailures,
+    long MonotonicAnchorTransient,
+    long ContinuityBusy,
+    long MonotonicConflicts);
 
 public sealed record MembershipProjectionStatus(
     bool Enabled,
