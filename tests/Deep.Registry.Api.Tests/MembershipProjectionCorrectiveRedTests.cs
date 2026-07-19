@@ -776,6 +776,25 @@ public sealed class MembershipProjectionCorrectiveRedTests
         Assert.Same(fatal, thrown);
     }
 
+    [Fact]
+    public void AuthorityForkTerminalCancellationCrossesEveryReducer()
+    {
+        var fixture = new P04ProjectionFixture();
+        var cancellation = new OperationCanceledException(
+            "authority terminal cancellation canary");
+        var persistence = new MemoryProjectionPersistence();
+        var service = fixture.CreateService(persistence);
+        Assert.True(
+            service.ApplyGenesis(fixture.GenesisBytes, fixture.GenesisSignatures).Success);
+        Assert.True(service.ApplyDelegation(fixture.DelegationBytes).Success);
+        persistence.TerminalJournalWriteException = cancellation;
+
+        var thrown = Assert.Throws<OperationCanceledException>(
+            () => service.ApplyDelegation(fixture.CompetingDelegation()));
+
+        Assert.Same(cancellation, thrown);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
