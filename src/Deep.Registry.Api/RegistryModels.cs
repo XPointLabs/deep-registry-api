@@ -218,6 +218,11 @@ public sealed record RegistryOptions
     public int StakingProjectionTimeoutSeconds { get; init; } = 5;
 
     public string? StatePath { get; init; }
+
+    public string? MembershipRouteArtifactPath { get; init; }
+
+    public int MembershipRouteArtifactMaximumBytes { get; init; } =
+        MembershipRouteArtifactStore.MaximumAllowedBytes;
 }
 
 public sealed record RegistryResult<T>(bool Success, T? Value, string? Error)

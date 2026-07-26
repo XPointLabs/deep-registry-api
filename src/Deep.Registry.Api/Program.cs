@@ -22,6 +22,7 @@ builder.Services.AddSingleton<CallSignalStore>();
 builder.Services.AddSingleton<CallIceCredentialIssuer>();
 builder.Services.AddHttpClient<CallPushNotifier>();
 builder.Services.AddSingleton<RegistryCatalogReplayGuard>();
+builder.Services.AddSingleton<MembershipRouteArtifactStore>();
 builder.Services.AddTransient<ProjectionConsistencyService>();
 builder.Services.AddHostedService<RegistryReconciliationWorker>();
 
@@ -34,6 +35,36 @@ app.MapGet("/", () => Results.Redirect("/index.html"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-registry-api" }));
 
 var api = app.MapGroup("/api");
+
+api.MapGet("/network/membership-route-catalog", async (
+    MembershipRouteArtifactStore artifacts,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var artifact = await artifacts.ReadAsync(cancellationToken);
+        return artifact is null
+            ? Results.Problem(
+                "No quorum-signed membership route artifact is configured.",
+                statusCode: StatusCodes.Status503ServiceUnavailable)
+            : Results.File(
+                artifact,
+                "application/vnd.deep.membership-route-catalog",
+                enableRangeProcessing: false);
+    }
+    catch (InvalidDataException)
+    {
+        return Results.Problem(
+            "The configured membership route artifact is invalid.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.Problem(
+            "Membership route artifact publication is misconfigured.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
 
 var calls = api.MapGroup("/calls");
 calls.MapPost("/signal", async (CallSignalRequest request, CallSignalStore store, CallPushNotifier push, CancellationToken cancellationToken) =>

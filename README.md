@@ -23,11 +23,17 @@ registration extension fields that are not part of the Session contracts.
 - `GET /api/nodes` (public node status; transport credentials, registration proofs, and signer endpoints are omitted)
 - `GET /api/internal/nodes` (Docker control-plane catalog; never expose through the public reverse proxy)
 - `GET /api/relay-contacts` (registered-node Ed25519 authentication required)
+- `GET /api/network/membership-route-catalog` (opaque pre-signed artifact; `503` when absent)
 - `GET /api/nodes/runtime`
 - `GET /api/nodes/reconciliation`
 - `GET /api/nodes/reconciliation/projections`
 
 The static admin demo is served at `/`.
+
+The membership-route endpoint never builds authority from cached registrations. It only serves the
+bounded file configured by `Registry:MembershipRouteArtifactPath`; clients must quorum-verify its
+P04 membership envelope and every MRL1 proof. Production signer keys must not be configured in
+this service. Deterministic artifacts are for mounted Docker development fixtures only.
 
 State persistence behavior:
 

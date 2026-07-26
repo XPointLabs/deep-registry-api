@@ -35,6 +35,10 @@ Use local upstream Session service-node/client references when available under `
 - Staking is projected from XPNT contracts/backend rather than upstream OXEN runtime.
 - Static admin UI is diagnostic only.
 - Registry is an optional cache/bootstrap aid, not the Session network authority. Active membership comes from chain/indexer state and signed node contact manifests.
+- Registry may publish an opaque, externally generated membership-route artifact, but does not
+  parse, sign, synthesize or mutate it. Missing configuration fails closed. A registry response is
+  not authoritative until the client quorum-verifies the P04 envelope, monotonic LKG and all MRL1
+  inclusion proofs.
 
 ## Evidence Checklist
 

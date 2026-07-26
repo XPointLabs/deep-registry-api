@@ -12,6 +12,46 @@ namespace Deep.Registry.Api.Tests;
 public sealed class RegistryApiTests
 {
     [Fact]
+    public async Task MembershipRouteArtifact_IsOpaqueAndFailsClosedWhenUnconfigured()
+    {
+        await using var unconfigured = new WebApplicationFactory<Program>();
+        using var unconfiguredClient = unconfigured.CreateClient();
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await unconfiguredClient.GetAsync("/api/network/membership-route-catalog")).StatusCode);
+
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "registry-membership-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "catalog.bin");
+        var expected = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
+        try
+        {
+            await File.WriteAllBytesAsync(path, expected);
+            await using var configured = unconfigured.WithWebHostBuilder(builder =>
+                builder.ConfigureAppConfiguration((_, configuration) =>
+                    configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["Registry:MembershipRouteArtifactPath"] = path,
+                        ["Registry:MembershipRouteArtifactMaximumBytes"] = expected.Length.ToString()
+                    })));
+            using var configuredClient = configured.CreateClient();
+            var response = await configuredClient.GetAsync("/api/network/membership-route-catalog");
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(
+                "application/vnd.deep.membership-route-catalog",
+                response.Content.Headers.ContentType?.MediaType);
+            Assert.Equal(expected, await response.Content.ReadAsByteArrayAsync());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RelayCatalog_RequiresFreshRegisteredNodeSignature_AndRejectsReplay()
     {
         await using var factory = new WebApplicationFactory<Program>();
