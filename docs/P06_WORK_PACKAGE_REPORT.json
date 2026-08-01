@@ -1,0 +1,113 @@
+{
+  "schema": "deep-survival-work-package-report.v1",
+  "workPackage": "P06",
+  "title": "Dormant registry checkpoint projection",
+  "status": "fixture-go-runtime-blocked",
+  "humanOwner": "Mr. X",
+  "repository": "deep-registry-api",
+  "branch": "survival/w02-p06-registry-checkpoint",
+  "baseCommit": "fb7ebac6404e7a53241af08bb2f80d8a81022be8",
+  "redCommit": "70395d5903b078bd57c50db94e8744620bd01bfd",
+  "initialGreenSourceCommit": "59a7ae1b0bfe931c02a637f0e131d42e44b369de",
+  "correctiveRedCommit": "387e85807229c353e917c975e9a3b93c0eac1660",
+  "firstCorrectiveGreenSourceCommit": "79bf87b6f7e42916a94125f665d4a2c053f5d922",
+  "corrective2RedCommit": "acc270f7db896104f6d32bba383d35cf9a9af620",
+  "corrective2GreenSourceCommit": "107a7d68eb2104a94e97b486d5bfe902567f6ab0",
+  "corrective3RedCommit": "fb26a0d4132e934241cae1620242c06a43a86f0e",
+  "corrective3GreenSourceCommit": "a801106f9201ea382ac0568a8a1eba943731970d",
+  "corrective4RedCommit": "23d03267c6aa6d80127a7d38b7f3619a93b53195",
+  "corrective4GreenSourceCommit": "17d2b0aece401023f536394f736d0cc01abe23b6",
+  "corrective5RedCommit": "3090fed35722a6100212955879b78c8dd169b33d",
+  "corrective5GreenSourceCommit": "b2014e3757dad5566479f935a89a2c2133b7c0b2",
+  "corrective6RedCommit": "dae47c5a1adc9561c297a36329e6335f9f26a7aa",
+  "corrective6GreenSourceCommit": "fa7bb411e7a45ecd654302b5772c2a89f6aa6a6d",
+  "corrective7RedCommits": [
+    "f7ca9889e2dfdd3dad862a8c0ddccf60969a058a",
+    "e1d46caa3f7ac06f16b56ea6d7a75310f53a1e3b"
+  ],
+  "corrective7GreenSourceCommit": "ec55bfbc6241a02d18a6b7118c2b389e5e7ab3ce",
+  "corrective8RedCommit": "d14a87e1176165f684afeac60bed6448a65c5826",
+  "greenSourceCommit": "66a94c8f89f6b3009752e2099163a4d251cf9bec",
+  "prerequisite": {
+    "w1w2FinalEvidence": "1c01e24e24647a46b4f37622f3934dc2cc1284ef",
+    "carrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
+    "manifestSha256": "920b24bb5bcfcc8b4f91aef56ed210127246ec9fd2d49178ed9856c8555d0b93",
+    "strictProducerArtifacts": 17,
+    "verdict": "GO-0-0-0-0"
+  },
+  "p04": {
+    "contract": "Deep.Protocol/P04-canonical-v1",
+    "sourceCommit": "b887fa088f486390be182cac4cbcb59b60ce8931",
+    "packageVersion": "0.3.0-p04.b887fa0",
+    "lockedRestore": true,
+    "vendoredExactFiles": 5
+  },
+  "tests": {
+    "focused": {
+      "passed": 60,
+      "failed": 0,
+      "skipped": 0,
+      "trxSha256": "2c88aa83cb2f12b47a6dacfefdc3905ad4d5f3f4296da6ff1c7e34207f59904e"
+    },
+    "full": {
+      "passed": 86,
+      "failed": 0,
+      "skipped": 0,
+      "trxSha256": "d2b2195e40b6ad101f4c8d5da6e88c2a1e6f0b7a51fd12c1d78baf2adcb62c76"
+    },
+    "coverage": {
+      "lines": "2458/3028",
+      "branches": "781/1227",
+      "coberturaSha256": "936ef0240dabba3adc8bee312952ef696a34e40cc94593b9eb520c8ebf378c12"
+    }
+  },
+  "runtime": {
+    "defaultEnabled": false,
+    "productionVerifierPresent": false,
+    "liveSourcePresent": false,
+    "checkpointMutationEndpointPresent": false,
+    "nodeRegistryAuthority": false,
+    "dockerUsed": false,
+    "networkServiceUsed": false,
+    "keysOrCredentialsAccessed": false,
+    "pushPerformed": false
+  },
+  "independentReview": {
+    "priorEvidenceCommit": "d6608812fc7a108c305a2ad7d408a9949b657102",
+    "priorArchitectureRecovery": "0/2/1/1",
+    "priorSecurityPrivacy": "0/4/6/2",
+    "repeatReviewEvidenceCommit": "eaa99802a3fe8914b006784ce50ae99da81c6e2f",
+    "repeatReviewSourceCommit": "79bf87b6f7e42916a94125f665d4a2c053f5d922",
+    "repeatArchitectureRecoveryAgent": "/root/p06_arch_recovery_review",
+    "repeatArchitectureRecovery": "NO-GO-0/1/2/0",
+    "repeatSecurityPrivacyAgent": "/root/p06_security_privacy_review",
+    "repeatSecurityPrivacy": "NO-GO-0/4/3/0",
+    "reviewerCommits": [],
+    "corrective2SourceCommit": "107a7d68eb2104a94e97b486d5bfe902567f6ab0",
+    "corrective2EvidenceCommit": "28e20b61a9a215b85f00f5e990f5d1a94cd75d6b",
+    "corrective2ArchitectureRecovery": "NO-GO-0/1/1/1",
+    "corrective2SecurityPrivacy": "NO-GO-0/1/2/1",
+    "corrective3SourceCommit": "a801106f9201ea382ac0568a8a1eba943731970d",
+    "corrective3EvidenceCommit": "fff9773d79701ebd62e54ba3bff1007d81d3c13f",
+    "corrective3ArchitectureRecoveryAgent": "/root/p06_final_arch_review",
+    "corrective3ArchitectureRecovery": "GO-0/0/0/0",
+    "corrective3SecurityPrivacyAgent": "/root/p06_final_security_review",
+    "corrective3SecurityPrivacy": "NO-GO-0/1/0/0",
+    "corrective4SourceCommit": "17d2b0aece401023f536394f736d0cc01abe23b6",
+    "corrective4ArchitectureRecoveryAgent": null,
+    "corrective4ArchitectureRecovery": "NO-GO-0/1/0/0",
+    "corrective5SourceCommit": "b2014e3757dad5566479f935a89a2c2133b7c0b2",
+    "corrective5ArchitectureRecovery": "NO-GO-0/1/1/0",
+    "corrective5SecurityPrivacy": "GO-0/0/0/1",
+    "corrective6SourceCommit": "fa7bb411e7a45ecd654302b5772c2a89f6aa6a6d",
+    "corrective7SourceCommit": "ec55bfbc6241a02d18a6b7118c2b389e5e7ab3ce",
+    "corrective8SourceCommit": "66a94c8f89f6b3009752e2099163a4d251cf9bec",
+    "finalReviewedSourceCommit": "66a94c8f89f6b3009752e2099163a4d251cf9bec",
+    "finalReviewedEvidenceCommit": "b67824ae2e93ae715ecd786981714471dd27a0e4",
+    "architectureRecoveryAgent": "/root/p06_c5_arch_review",
+    "architectureRecovery": "GO-0/0/0/0",
+    "securityPrivacyAgent": "/root/p10b_protocol_security_review",
+    "securityPrivacy": "GO-0/0/0/0"
+  },
+  "requiredFinalStatus": "fixture-go-runtime-blocked"
+}

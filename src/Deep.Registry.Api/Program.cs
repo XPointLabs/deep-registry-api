@@ -4,6 +4,24 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RegistryOptions>(builder.Configuration.GetSection("Registry"));
 builder.Services.Configure<CallInfrastructureOptions>(builder.Configuration.GetSection("Calls"));
+builder.Services.Configure<MembershipProjectionOptions>(
+    builder.Configuration.GetSection("MembershipProjection"));
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(services =>
+    P04MembershipArtifactVerifier.Create(
+        services.GetServices<Deep.Protocol.DeepExtension.Membership.IMembershipSignatureVerifier>()));
+builder.Services.AddSingleton(services =>
+    MembershipProjectionMonotonicBoundary.Create(
+        services.GetServices<IMembershipProjectionMonotonicAnchor>()));
+builder.Services.AddSingleton<IMembershipProjectionPersistence>(services =>
+    new FileMembershipProjectionPersistence(
+        MembershipProjectionService.ResolveStatePath(
+            services
+                .GetRequiredService<
+                    Microsoft.Extensions.Options.IOptions<MembershipProjectionOptions>>()
+                .Value)));
+builder.Services.AddSingleton<MembershipProjectionService>();
+builder.Services.AddHostedService<MembershipProjectionWorker>();
 builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient>((services, client) =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<RegistryOptions>>().Value;
@@ -33,6 +51,7 @@ app.UseStaticFiles();
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-registry-api" }));
+app.MapMembershipProjectionEndpoints();
 
 var api = app.MapGroup("/api");
 
