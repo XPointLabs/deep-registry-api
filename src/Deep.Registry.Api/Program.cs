@@ -7,6 +7,9 @@ builder.Services.Configure<CallInfrastructureOptions>(builder.Configuration.GetS
 builder.Services.Configure<MembershipProjectionOptions>(
     builder.Configuration.GetSection("MembershipProjection"));
 builder.Services.AddSingleton(TimeProvider.System);
+var productionMailboxEnabled =
+    Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.AddProductionMailbox(
+        builder.Services, builder.Configuration, builder.Environment);
 builder.Services.AddSingleton(services =>
     P04MembershipArtifactVerifier.Create(
         services.GetServices<Deep.Protocol.DeepExtension.Membership.IMembershipSignatureVerifier>()));
@@ -52,6 +55,8 @@ app.UseStaticFiles();
 app.MapGet("/", () => Results.Redirect("/index.html"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-registry-api" }));
 app.MapMembershipProjectionEndpoints();
+if (productionMailboxEnabled)
+    Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.MapProductionMailboxEndpoints(app);
 
 var api = app.MapGroup("/api");
 

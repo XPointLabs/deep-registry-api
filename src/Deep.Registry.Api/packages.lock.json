@@ -4,14 +4,29 @@
     "net10.0": {
       "Deep.Protocol": {
         "type": "Direct",
-        "requested": "[0.3.0-p04.b887fa0, 0.3.0-p04.b887fa0]",
-        "resolved": "0.3.0-p04.b887fa0",
-        "contentHash": "SuKYcvhW1RNz/pPiQ6iac5J4XdnTOtLaxb8mFKc3MWhGseV2a6Jq5+BQg5r/AIobMvzKr85HcgQzkV6KF6jxVQ==",
+        "requested": "[0.4.0-production.eacaeb8, 0.4.0-production.eacaeb8]",
+        "resolved": "0.4.0-production.eacaeb8",
+        "contentHash": "YyR+h6nW/xiplfb4ZjknhmRBu9L/pTzOORK+H5qVON5rCpp2P2/SUFZ9GBWXn2HMGrp7JMZzGckpaVBnXTjYPg==",
         "dependencies": {
-          "Deep.Protocol.Abstractions": "0.3.0-p04.b887fa0",
-          "Deep.Protocol.Protobuf": "0.3.0-p04.b887fa0",
+          "Deep.Protocol.Abstractions": "0.4.0-production.eacaeb8",
+          "Deep.Protocol.Protobuf": "0.4.0-production.eacaeb8",
           "Sodium.Core": "1.4.1"
         }
+      },
+      "Deep.Protocol.MembershipRoutes": {
+        "type": "Direct",
+        "requested": "[0.4.0-production.eacaeb8, 0.4.0-production.eacaeb8]",
+        "resolved": "0.4.0-production.eacaeb8",
+        "contentHash": "lgJpG5FxwhuWD0TT5Me5udHZIJkyb+/PmUz6kKcPsStvmbAF+kk0ThGEJyp4OXBUA9DoyacSSng1TI0u+pV3ng==",
+        "dependencies": {
+          "Deep.Protocol": "0.4.0-production.eacaeb8"
+        }
+      },
+      "Npgsql": {
+        "type": "Direct",
+        "requested": "[10.0.3, )",
+        "resolved": "10.0.3",
+        "contentHash": "7nb5YzXuvWWJxB0J8DiyL3we+X4FOctZrt0fIBnucOIaIevFEEwGQVZKtiu9olXdlNAK1eNgqSral6r/jlhI4w=="
       },
       "Rebex.Elliptic.Ed25519": {
         "type": "Direct",
@@ -30,13 +45,13 @@
       },
       "Deep.Protocol.Abstractions": {
         "type": "Transitive",
-        "resolved": "0.3.0-p04.b887fa0",
-        "contentHash": "T7JyXZuUXR5JXSNKEkVgMpUZWF8Y2HyQkJIQAt9RY50Ui/6XNHw6aH56aktpN2Vn4m/zgGZfd9RRxcKhH+uZCQ=="
+        "resolved": "0.4.0-production.eacaeb8",
+        "contentHash": "2/bIwOAn2rqmomdX+8lnSltbolDGmF+FsGA5sg+IsK5FUdTzhDBIexCXQlxidl7GvPC7wJBok5L1AvGcKCpTKA=="
       },
       "Deep.Protocol.Protobuf": {
         "type": "Transitive",
-        "resolved": "0.3.0-p04.b887fa0",
-        "contentHash": "qou2jnQ1G4eBg8crtpIp83lF6DRGSySoZKhTt4cLdL+v0AUp+cr7tYzJK0oo/zIwUOG3PeHZ2MyfYe8OBNsIPA==",
+        "resolved": "0.4.0-production.eacaeb8",
+        "contentHash": "eHoRqtwp72LsfgxefKPv3ADFynjo17NyzW4rsTxVFsvrb+8mFiolTijeeQZHb3ltVqz6ch25wQQ2PpQowCMBJw==",
         "dependencies": {
           "Google.Protobuf": "3.32.1"
         }
