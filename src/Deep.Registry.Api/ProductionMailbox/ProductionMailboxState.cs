@@ -297,7 +297,8 @@ public interface IProductionMailboxStateStore
         CancellationToken cancellationToken);
 }
 
-public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStateStore
+public sealed partial class InMemoryProductionMailboxStateStore : IProductionMailboxStateStore,
+    IProductionMailboxRouteContinuityStateStore
 {
     private readonly TimeProvider timeProvider;
     private int throwAfterIssueCommitOnce;
@@ -1419,8 +1420,8 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
     private sealed record RouteAdvertisementRecord(ulong Sequence, byte[] AdvertisementHash);
 }
 
-public sealed class PostgreSqlProductionMailboxStateStore(string connectionString)
-    : IProductionMailboxStateStore
+public sealed partial class PostgreSqlProductionMailboxStateStore(string connectionString)
+    : IProductionMailboxStateStore, IProductionMailboxRouteContinuityStateStore
 {
     private readonly SemaphoreSlim initializeGate = new(1, 1);
     private volatile bool initialized;

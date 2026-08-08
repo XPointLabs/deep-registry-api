@@ -126,6 +126,24 @@ cannot silently evict a still-valid content address or grow memory/disk metadata
 > route. Production promotion remains blocked until the independently reviewed RCD1/RDA1/RCR1/
 > RCH1/RTC1/RCA1/PRA2/PSS2 continuity contract and atomic high-level verifier are integrated.
 
+The first clean-break V2 persistence slice is deliberately narrower than route activation. A
+separate `production_mailbox_route_continuity_v2` state keeps the exact canonical ROL1, tagged
+authorization hash/sequence, PRC1, authorization, RTC1, optional RCH1, PSS2 transcript, and the
+latest accepted RCD1/RDA1 pair. All unsigned counters are stored as canonical eight-byte
+big-endian values rather than PostgreSQL `bigint`, so the database cannot create a lower terminal
+counter than the protocol. Both InMemory and PostgreSQL mutations use the same predecessor rules,
+freeze the opaque route-state key before waiting, and accept only non-forgeable protocol outputs:
+`VerifiedProductionMailboxRouteSelectionTransition` or
+`ProductionMailboxRouteContinuityEnrollmentCommitPlan`. The PostgreSQL mutation is serialized by
+the opaque route-state-key advisory lock and commits the entire successor row atomically.
+
+RCR1 and RHB1/RHC1 columns are reserved in this schema, but this slice intentionally exposes no
+mutation method for them. Owner revocation remains blocked until the protocol package exposes a
+sealed public owner-revocation verification result. History persistence remains blocked until its
+verified cursor/commit plan exports the exact defensive restore tuple, including the current ROL1
+hash. Registry must not parse internal fixed offsets or accept a raw "already verified" artifact
+to bypass either capability boundary.
+
 Artifact reload infrastructure stages a promotion rather than immediately swapping the pointer.
 PostgreSQL records one active
 promotion with an immutable owner-sequence watermark and a resumable cursor. New enrollment and
