@@ -28,6 +28,10 @@ public sealed class ProductionMailboxOptions
     public uint ClosurePublisherSignerTimeoutSeconds { get; set; } = 5;
     public string ClosurePublisherEd25519PublicKey { get; set; } = "";
     public int MaximumRetainedArtifactClosures { get; set; } = 16;
+    public uint CapacityReservationLifetimeSeconds { get; set; } = 3600;
+    public uint CapacityReservationRenewalMarginSeconds { get; set; } = 300;
+    public ulong ClosureScheduleAccountingOverheadBytes { get; set; } = 1024;
+    public int MaximumCapacityPlanTargets { get; set; } = 4096;
     public string ArtifactCatalogDirectory { get; set; } = "";
     public string DevelopmentSoftwareSignerSeedPath { get; set; } = "";
     public string DevelopmentClosurePublisherSeedPath { get; set; } = "";

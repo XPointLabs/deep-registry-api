@@ -21,6 +21,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Deep.Registry.Api\Deep.Registry.Api.csproj" />
+    <ProjectReference Include="..\..\..\xnode\src\XNode\XNode.csproj"
+                      Aliases="xnode" />
   </ItemGroup>
 
   <ItemGroup>

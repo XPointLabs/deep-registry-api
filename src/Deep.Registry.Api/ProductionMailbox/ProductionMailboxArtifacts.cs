@@ -962,7 +962,11 @@ public sealed class ProductionMailboxArtifactProvider
         if (OperatingSystem.IsWindows())
         {
             if (!MoveFileEx(temporary, final, 0x1 | 0x8))
-                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            {
+                var error = Marshal.GetLastPInvokeError();
+                throw new Win32Exception(error,
+                    $"Production mailbox durable rename failed from '{temporary}' to '{final}'.");
+            }
             return;
         }
         File.Move(temporary, final, overwrite: true);

@@ -51,6 +51,7 @@ public sealed record ProductionMailboxPublicationItem(
     IReadOnlyList<byte[]> AuthorizedLegacyReplicaIds,
     byte[] CanonicalEnvelope,
     byte[] EnvelopeSha256,
+    byte[] ReservationCohortId,
     byte[]? LastAttemptSha256 = null,
     ulong? LastAttemptAtUnixSeconds = null,
     bool Acknowledged = false);
@@ -73,7 +74,51 @@ public sealed record ProductionMailboxArtifactPromotionState(
     long OwnerWatermark,
     long Cursor,
     bool SweepCompleted,
-    bool Published);
+    bool Published,
+    bool CapacityReleaseCompleted);
+
+public sealed record ProductionMailboxCapacityTargetState(
+    byte[] TargetReplicaId,
+    string Endpoint,
+    byte[] CurrentSpkiSha256,
+    byte[] NextSpkiSha256,
+    uint ReservedClosureCount,
+    ulong ReservedBytes,
+    ulong Revision,
+    ulong? ReceiptExpiresAtUnixSeconds,
+    byte[]? LastCommandSha256,
+    byte[]? CanonicalReceipt,
+    byte[]? PendingCanonicalCommand,
+    ulong? PendingRevision,
+    bool Released);
+
+public sealed record ProductionMailboxCapacityPlanState(
+    byte[] PromotionStateKey,
+    long Cursor,
+    bool Completed,
+    IReadOnlyList<ProductionMailboxCapacityTargetState> Targets);
+
+internal static class ProductionMailboxCapacityRevisionPolicy
+{
+    internal const ulong MaximumStoredRevision = (ulong)long.MaxValue;
+
+    internal static bool CanIssueSuccessor(
+        ulong currentRevision,
+        ProductionMailboxCapacityOperation operation) => operation switch
+    {
+        ProductionMailboxCapacityOperation.ReserveOrRenew =>
+            currentRevision < MaximumStoredRevision - 1,
+        ProductionMailboxCapacityOperation.Release =>
+            currentRevision < MaximumStoredRevision,
+        _ => false
+    };
+
+    internal static bool IsStorableReceipt(
+        ProductionMailboxCapacityReceipt receipt) =>
+        receipt.Revision <= MaximumStoredRevision
+        && (receipt.Operation == ProductionMailboxCapacityOperation.Release
+            || receipt.Revision < MaximumStoredRevision);
+}
 
 public enum ProductionMailboxRouteAdvertisementAcceptance
 {
@@ -179,16 +224,59 @@ public interface IProductionMailboxStateStore
             ReadOnlyMemory<byte> promotionStateKey,
             int maximumCount,
             CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<ProductionMailboxOwnerBundleRecord>>
+        ListOwnerBundlesForCapacityPlanningAsync(
+            ReadOnlyMemory<byte> promotionStateKey,
+            int maximumCount,
+            CancellationToken cancellationToken);
+    ValueTask<bool> CommitCapacityPlannedOwnerAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ProductionMailboxOwnerBundleRecord expectedOwner,
+        IReadOnlyList<ProductionMailboxPublicationItem> publicationItems,
+        ulong perScheduleOverheadBytes,
+        CancellationToken cancellationToken);
+    ValueTask<bool> CompleteCapacityPlanAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken);
+    ValueTask<ProductionMailboxCapacityPlanState?> GetCapacityPlanAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken);
+    ValueTask<bool> RecordCapacityReceiptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedPreviousRevision,
+        ProductionMailboxCapacityReceipt receipt,
+        ReadOnlyMemory<byte> canonicalReceipt,
+        CancellationToken cancellationToken);
+    ValueTask<bool> RecordCapacityReconciliationReceiptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedRevision,
+        ReadOnlyMemory<byte> expectedPendingReleaseCommand,
+        ProductionMailboxCapacityReconciliationReceipt receipt,
+        ReadOnlyMemory<byte> canonicalReceipt,
+        CancellationToken cancellationToken);
+    ValueTask<byte[]?> GetOrRecordCapacityAttemptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedPreviousRevision,
+        ulong attemptRevision,
+        ReadOnlyMemory<byte> canonicalCommand,
+        CancellationToken cancellationToken);
     ValueTask<bool> CommitPromotedOwnerAsync(
         ReadOnlyMemory<byte> promotionStateKey,
         ProductionMailboxOwnerBundleRecord expectedOwner,
         ProductionMailboxPreparedIssue preparedIssue,
         ulong updatedAtUnixSeconds,
+        uint capacityRenewalMarginSeconds,
         CancellationToken cancellationToken);
     ValueTask<bool> CompleteArtifactPromotionSweepAsync(
         ReadOnlyMemory<byte> promotionStateKey,
         CancellationToken cancellationToken);
     ValueTask<bool> MarkArtifactPromotionPublishedAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken);
+    ValueTask<bool> MarkArtifactPromotionCapacityReleasedAsync(
         ReadOnlyMemory<byte> promotionStateKey,
         CancellationToken cancellationToken);
 
@@ -211,9 +299,11 @@ public interface IProductionMailboxStateStore
 
 public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStateStore
 {
+    private readonly TimeProvider timeProvider;
     private int throwAfterIssueCommitOnce;
     private int throwAfterPromotedOwnerCommitOnce;
     private int throwBeforePromotionPublishedOnce;
+    private int throwBeforeCapacityReleasedOnce;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Dictionary<string, ChallengeRecord> challenges = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IssuanceRecord> issuances = new(StringComparer.Ordinal);
@@ -232,6 +322,9 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
     private byte[]? publishedArtifactClosureHash;
     private readonly List<ulong> challengeTimes = [];
     private long nextOwnerSequence;
+
+    public InMemoryProductionMailboxStateStore(TimeProvider? timeProvider = null) =>
+        this.timeProvider = timeProvider ?? TimeProvider.System;
 
     internal IReadOnlyList<byte[]> SnapshotOwnerRouteStateKeys() =>
         ownerBundles.Keys.Select(Convert.FromHexString).ToArray();
@@ -253,6 +346,13 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
     {
         set => Interlocked.Exchange(ref throwBeforePromotionPublishedOnce, value ? 1 : 0);
     }
+
+    internal bool ThrowBeforeCapacityReleasedOnce
+    {
+        set => Interlocked.Exchange(ref throwBeforeCapacityReleasedOnce, value ? 1 : 0);
+    }
+
+    internal Action? AfterPromotionPublishedForTests { get; set; }
 
     public async ValueTask<ProductionMailboxChallengeState?> CreateChallengeAsync(
         ulong nowUnixSeconds, ulong expiresAtUnixSeconds,
@@ -572,7 +672,8 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
                         "Production mailbox artifact promotion replay conflicts.");
                 return Snapshot(promotionStateKey.Span, existing);
             }
-            if (promotions.Values.Any(static value => !value.Published))
+            if (promotions.Values.Any(static value =>
+                    !value.Published || !value.CapacityReleaseCompleted))
                 throw new InvalidOperationException(
                     "Another production mailbox artifact promotion is active.");
             publishedArtifactClosureHash ??= oldArtifactClosureHash.ToArray();
@@ -582,7 +683,7 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
                     "Artifact promotion old closure is not the durable published closure.");
             var created = new MutablePromotionRecord(
                 oldArtifactClosureHash.ToArray(), newArtifactClosureHash.ToArray(),
-                nextOwnerSequence, 0, false, false, []);
+                nextOwnerSequence, 0, false, false, false, []);
             promotions[key] = created;
             return Snapshot(promotionStateKey.Span, created);
         }
@@ -610,7 +711,8 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
         await gate.WaitAsync(cancellationToken);
         try
         {
-            var active = promotions.SingleOrDefault(static pair => !pair.Value.Published);
+            var active = promotions.SingleOrDefault(static pair =>
+                !pair.Value.Published || !pair.Value.CapacityReleaseCompleted);
             return active.Value is null
                 ? null
                 : Snapshot(Convert.FromHexString(active.Key), active.Value);
@@ -660,11 +762,92 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
         finally { gate.Release(); }
     }
 
-    public async ValueTask<bool> CommitPromotedOwnerAsync(
+    public async ValueTask<IReadOnlyList<ProductionMailboxOwnerBundleRecord>>
+        ListOwnerBundlesForCapacityPlanningAsync(
+            ReadOnlyMemory<byte> promotionStateKey,
+            int maximumCount,
+            CancellationToken cancellationToken)
+    {
+        if (maximumCount is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(maximumCount));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || promotion.Published || promotion.CapacityPlanCompleted)
+                return [];
+            return ownerBundles.Values
+                .Where(owner => owner.Sequence > promotion.CapacityCursor
+                    && owner.Sequence <= promotion.OwnerWatermark)
+                .OrderBy(static owner => owner.Sequence)
+                .Take(maximumCount)
+                .Select(static owner => new ProductionMailboxOwnerBundleRecord(
+                    owner.Sequence, owner.RouteStateKey.ToArray(),
+                    owner.CanonicalBundle.ToArray()))
+                .ToArray();
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<bool> CommitCapacityPlannedOwnerAsync(
         ReadOnlyMemory<byte> promotionStateKey,
         ProductionMailboxOwnerBundleRecord expectedOwner,
-        ProductionMailboxPreparedIssue preparedIssue,
-        ulong updatedAtUnixSeconds,
+        IReadOnlyList<ProductionMailboxPublicationItem> publicationItems,
+        ulong perScheduleOverheadBytes,
+        CancellationToken cancellationToken)
+    {
+        var frozen = FreezeItems(publicationItems);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || promotion.Published || promotion.CapacityPlanCompleted
+                || expectedOwner.Sequence != promotion.CapacityCursor + 1
+                || expectedOwner.Sequence > promotion.OwnerWatermark)
+                return false;
+            var ownerKey = Convert.ToHexString(expectedOwner.RouteStateKey);
+            if (!ownerBundles.TryGetValue(ownerKey, out var owner)
+                || owner.Sequence != expectedOwner.Sequence
+                || !CryptographicEqual(owner.CanonicalBundle,
+                    expectedOwner.CanonicalBundle))
+                return false;
+            foreach (var item in frozen)
+            {
+                if (!CryptographicEqual(item.ReservationCohortId,
+                        promotionStateKey.Span))
+                    return false;
+                var targetKey = Convert.ToHexString(item.TargetReplicaId);
+                var charge = checked((ulong)item.CanonicalEnvelope.Length
+                    + 12UL + perScheduleOverheadBytes);
+                if (!promotion.CapacityTargets.TryGetValue(
+                        targetKey, out var target))
+                {
+                    target = new MutableCapacityTarget(
+                        item.TargetReplicaId.ToArray(), item.Endpoint,
+                        item.CurrentSpkiSha256.ToArray(),
+                        item.NextSpkiSha256.ToArray());
+                    promotion.CapacityTargets.Add(targetKey, target);
+                }
+                else if (target.Endpoint != item.Endpoint
+                    || !CryptographicEqual(target.CurrentSpkiSha256,
+                        item.CurrentSpkiSha256)
+                    || !CryptographicEqual(target.NextSpkiSha256,
+                        item.NextSpkiSha256))
+                    return false;
+                target.ReservedClosureCount = checked(
+                    target.ReservedClosureCount + 1);
+                target.ReservedBytes = checked(target.ReservedBytes + charge);
+            }
+            promotion.CapacityCursor = expectedOwner.Sequence;
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<bool> CompleteCapacityPlanAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
         CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken);
@@ -672,8 +855,199 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
         {
             if (!promotions.TryGetValue(
                     Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || promotion.Published
+                || promotion.CapacityCursor < promotion.OwnerWatermark)
+                return false;
+            promotion.CapacityPlanCompleted = true;
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<ProductionMailboxCapacityPlanState?> GetCapacityPlanAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            return promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                ? SnapshotCapacityPlan(promotionStateKey.Span, promotion) : null;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<bool> RecordCapacityReceiptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedPreviousRevision,
+        ProductionMailboxCapacityReceipt receipt,
+        ReadOnlyMemory<byte> canonicalReceipt,
+        CancellationToken cancellationToken)
+    {
+        var receiptBytes = canonicalReceipt.ToArray();
+        try
+        {
+            receipt = ProductionMailboxCapacityReceiptCodec.DecodeAndVerify(
+                receiptBytes, targetReplicaId.Span);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+        if (!ProductionMailboxCapacityRevisionPolicy.IsStorableReceipt(receipt))
+            return false;
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || !promotion.CapacityPlanCompleted
+                || !promotion.CapacityTargets.TryGetValue(
+                    Convert.ToHexString(targetReplicaId.Span), out var target)
+                || target.Released
+                || target.Revision != expectedPreviousRevision
+                || receipt.Revision != checked(expectedPreviousRevision + 1)
+                || target.PendingRevision != receipt.Revision
+                || target.PendingCanonicalCommand is null
+                || !CryptographicEqual(
+                    System.Security.Cryptography.SHA256.HashData(
+                        target.PendingCanonicalCommand), receipt.CommandSha256)
+                || !CryptographicEqual(receipt.CohortId, promotionStateKey.Span)
+                || !CryptographicEqual(receipt.TargetReplicaId,
+                    targetReplicaId.Span)
+                || receipt.Operation == ProductionMailboxCapacityOperation.ReserveOrRenew
+                    && (receipt.ReservedClosureCount != target.ReservedClosureCount
+                        || receipt.ReservedBytes != target.ReservedBytes)
+                || receipt.Operation == ProductionMailboxCapacityOperation.Release
+                    && (receipt.ReservedClosureCount > target.ReservedClosureCount
+                        || receipt.ReservedBytes > target.ReservedBytes))
+                return false;
+            target.Revision = receipt.Revision;
+            target.ReceiptExpiresAtUnixSeconds = receipt.ExpiresAtUnixSeconds;
+            target.LastCommandSha256 = receipt.CommandSha256.ToArray();
+            target.CanonicalReceipt = receiptBytes;
+            target.PendingCanonicalCommand = null;
+            target.PendingRevision = null;
+            target.Released = receipt.Operation
+                == ProductionMailboxCapacityOperation.Release;
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<bool> RecordCapacityReconciliationReceiptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedRevision,
+        ReadOnlyMemory<byte> expectedPendingReleaseCommand,
+        ProductionMailboxCapacityReconciliationReceipt receipt,
+        ReadOnlyMemory<byte> canonicalReceipt,
+        CancellationToken cancellationToken)
+    {
+        var receiptBytes = canonicalReceipt.ToArray();
+        try
+        {
+            receipt = ProductionMailboxCapacityReconciliationReceiptCodec.DecodeAndVerify(
+                receiptBytes, targetReplicaId.Span);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || !promotion.CapacityPlanCompleted
+                || !promotion.CapacityTargets.TryGetValue(
+                    Convert.ToHexString(targetReplicaId.Span), out var target)
+                || target.Released || target.Revision != expectedRevision
+                || target.CanonicalReceipt is null || target.LastCommandSha256 is null
+                || target.PendingCanonicalCommand is null
+                || !CryptographicEqual(target.PendingCanonicalCommand,
+                    expectedPendingReleaseCommand.Span)
+                || target.PendingRevision != checked(expectedRevision + 1)
+                || receipt.Status
+                    != ProductionMailboxCapacityReconciliationStatus.AbsentTerminal
+                || receipt.LastKnownRevision != expectedRevision
+                || !CryptographicEqual(receipt.CohortId, promotionStateKey.Span)
+                || !CryptographicEqual(receipt.TargetReplicaId, targetReplicaId.Span)
+                || !CryptographicEqual(receipt.LastReceiptSha256,
+                    System.Security.Cryptography.SHA256.HashData(target.CanonicalReceipt))
+                || !CryptographicEqual(
+                    receipt.LastCommandSha256, target.LastCommandSha256))
+                return false;
+            target.ReleaseReconciliationReceipt = receiptBytes;
+            target.PendingCanonicalCommand = null;
+            target.PendingRevision = null;
+            target.Released = true;
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<byte[]?> GetOrRecordCapacityAttemptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedPreviousRevision,
+        ulong attemptRevision,
+        ReadOnlyMemory<byte> canonicalCommand,
+        CancellationToken cancellationToken)
+    {
+        if (attemptRevision > ProductionMailboxCapacityRevisionPolicy.MaximumStoredRevision)
+            return null;
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || !promotion.CapacityPlanCompleted
+                || !promotion.CapacityTargets.TryGetValue(
+                    Convert.ToHexString(targetReplicaId.Span), out var target)
+                || target.Released
+                || target.Revision != expectedPreviousRevision
+                || attemptRevision != checked(expectedPreviousRevision + 1))
+                return null;
+            if (target.PendingCanonicalCommand is not null)
+                return target.PendingRevision == attemptRevision
+                    ? target.PendingCanonicalCommand.ToArray()
+                    : throw new InvalidDataException(
+                        "Production mailbox capacity pending attempt is corrupt.");
+            target.PendingCanonicalCommand = canonicalCommand.ToArray();
+            target.PendingRevision = attemptRevision;
+            return target.PendingCanonicalCommand.ToArray();
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<bool> CommitPromotedOwnerAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ProductionMailboxOwnerBundleRecord expectedOwner,
+        ProductionMailboxPreparedIssue preparedIssue,
+        ulong updatedAtUnixSeconds,
+        uint capacityRenewalMarginSeconds,
+        CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var capacitySafeUntil = checked((ulong)timeProvider.GetUtcNow()
+                .ToUnixTimeSeconds() + capacityRenewalMarginSeconds);
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
                 || promotion.Published || expectedOwner.Sequence <= promotion.Cursor
-                || expectedOwner.Sequence > promotion.OwnerWatermark)
+                || expectedOwner.Sequence > promotion.OwnerWatermark
+                || !promotion.CapacityPlanCompleted
+                || promotion.CapacityTargets.Values.Any(target => target.Released
+                    || target.CanonicalReceipt is null
+                    || target.PendingCanonicalCommand is not null
+                    || target.PendingRevision is not null
+                    || target.ReceiptExpiresAtUnixSeconds is null
+                    || target.ReceiptExpiresAtUnixSeconds.Value
+                        < capacitySafeUntil))
                 return false;
             var ownerKey = Convert.ToHexString(expectedOwner.RouteStateKey);
             if (!ownerBundles.TryGetValue(ownerKey, out var owner)
@@ -742,6 +1116,28 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
                 return false;
             publishedArtifactClosureHash = promotion.NewArtifactClosureHash.ToArray();
             promotion.Published = true;
+            AfterPromotionPublishedForTests?.Invoke();
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<bool> MarkArtifactPromotionCapacityReleasedAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!promotions.TryGetValue(
+                    Convert.ToHexString(promotionStateKey.Span), out var promotion)
+                || !promotion.Published
+                || promotion.CapacityTargets.Values.Any(static target => !target.Released))
+                return false;
+            if (Interlocked.Exchange(ref throwBeforeCapacityReleasedOnce, 0) == 1)
+                throw new IOException(
+                    "Injected failure before promotion capacity release marker.");
+            promotion.CapacityReleaseCompleted = true;
             return true;
         }
         finally { gate.Release(); }
@@ -826,7 +1222,26 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
         ReadOnlySpan<byte> promotionStateKey, MutablePromotionRecord record) => new(
         promotionStateKey.ToArray(), record.OldArtifactClosureHash.ToArray(),
         record.NewArtifactClosureHash.ToArray(), record.OwnerWatermark,
-        record.Cursor, record.SweepCompleted, record.Published);
+        record.Cursor, record.SweepCompleted, record.Published,
+        record.CapacityReleaseCompleted);
+
+    private static ProductionMailboxCapacityPlanState SnapshotCapacityPlan(
+        ReadOnlySpan<byte> promotionStateKey, MutablePromotionRecord record) => new(
+        promotionStateKey.ToArray(), record.CapacityCursor,
+        record.CapacityPlanCompleted,
+        record.CapacityTargets.Values
+            .OrderBy(static target => Convert.ToHexString(target.TargetReplicaId),
+                StringComparer.Ordinal)
+            .Select(static target => new ProductionMailboxCapacityTargetState(
+                target.TargetReplicaId.ToArray(), target.Endpoint,
+                target.CurrentSpkiSha256.ToArray(), target.NextSpkiSha256.ToArray(),
+                target.ReservedClosureCount, target.ReservedBytes,
+                target.Revision, target.ReceiptExpiresAtUnixSeconds,
+                target.LastCommandSha256?.ToArray(),
+                target.CanonicalReceipt?.ToArray(),
+                target.PendingCanonicalCommand?.ToArray(), target.PendingRevision,
+                target.Released))
+            .ToArray());
 
     private sealed record ChallengeRecord(
         byte[] Challenge, byte[] ArtifactClosureHash, ulong ExpiresAtUnixSeconds, bool Used);
@@ -857,6 +1272,7 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
                 item.CurrentSpkiSha256.ToArray(), item.NextSpkiSha256.ToArray(),
                 item.AuthorizedLegacyReplicaIds.Select(static value => value.ToArray()).ToArray(),
                 item.CanonicalEnvelope.ToArray(), item.EnvelopeSha256.ToArray(),
+                item.ReservationCohortId.ToArray(),
                 item.LastAttemptSha256?.ToArray(), item.LastAttemptAtUnixSeconds,
                 item.Acknowledged))
             .OrderBy(static item => Convert.ToHexString(item.TargetStateKey),
@@ -866,7 +1282,9 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
                 || item.TargetReplicaId.Length != 32
                 || item.CurrentSpkiSha256.Length != 32
                 || item.NextSpkiSha256.Length != 32
-                || item.EnvelopeSha256.Length != 32 || item.CanonicalEnvelope.Length == 0
+                || item.EnvelopeSha256.Length != 32
+                || item.ReservationCohortId.Length != 32
+                || item.CanonicalEnvelope.Length == 0
                 || !CryptographicEqual(System.Security.Cryptography.SHA256.HashData(
                     item.CanonicalEnvelope), item.EnvelopeSha256)
                 || item.AuthorizedLegacyReplicaIds.Count > 2
@@ -897,7 +1315,9 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
             && ExactByteLists(pair.First.AuthorizedLegacyReplicaIds,
                 pair.Second.AuthorizedLegacyReplicaIds)
             && CryptographicEqual(pair.First.CanonicalEnvelope, pair.Second.CanonicalEnvelope)
-            && CryptographicEqual(pair.First.EnvelopeSha256, pair.Second.EnvelopeSha256));
+            && CryptographicEqual(pair.First.EnvelopeSha256, pair.Second.EnvelopeSha256)
+            && CryptographicEqual(pair.First.ReservationCohortId,
+                pair.Second.ReservationCohortId));
     }
 
     private static ProductionMailboxPublicationState Snapshot(
@@ -908,6 +1328,7 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
             item.CurrentSpkiSha256.ToArray(), item.NextSpkiSha256.ToArray(),
             item.AuthorizedLegacyReplicaIds.Select(static value => value.ToArray()).ToArray(),
             item.CanonicalEnvelope.ToArray(), item.EnvelopeSha256.ToArray(),
+            item.ReservationCohortId.ToArray(),
             item.LastAttemptSha256?.ToArray(), item.LastAttemptAtUnixSeconds,
             item.Acknowledged)).ToArray(),
         record.Items.All(static item => item.Acknowledged));
@@ -939,6 +1360,7 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
     private sealed class MutablePromotionRecord(
         byte[] oldArtifactClosureHash, byte[] newArtifactClosureHash,
         long ownerWatermark, long cursor, bool sweepCompleted, bool published,
+        bool capacityReleaseCompleted,
         List<byte[]> publicationStateKeys)
     {
         public byte[] OldArtifactClosureHash { get; } = oldArtifactClosureHash;
@@ -947,13 +1369,38 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
         public long Cursor { get; set; } = cursor;
         public bool SweepCompleted { get; set; } = sweepCompleted;
         public bool Published { get; set; } = published;
+        public bool CapacityReleaseCompleted { get; set; } = capacityReleaseCompleted;
         public List<byte[]> PublicationStateKeys { get; } = publicationStateKeys;
+        public long CapacityCursor { get; set; }
+        public bool CapacityPlanCompleted { get; set; }
+        public Dictionary<string, MutableCapacityTarget> CapacityTargets { get; } =
+            new(StringComparer.Ordinal);
+    }
+    private sealed class MutableCapacityTarget(
+        byte[] targetReplicaId, string endpoint,
+        byte[] currentSpkiSha256, byte[] nextSpkiSha256)
+    {
+        public byte[] TargetReplicaId { get; } = targetReplicaId;
+        public string Endpoint { get; } = endpoint;
+        public byte[] CurrentSpkiSha256 { get; } = currentSpkiSha256;
+        public byte[] NextSpkiSha256 { get; } = nextSpkiSha256;
+        public uint ReservedClosureCount { get; set; }
+        public ulong ReservedBytes { get; set; }
+        public ulong Revision { get; set; }
+        public ulong? ReceiptExpiresAtUnixSeconds { get; set; }
+        public byte[]? LastCommandSha256 { get; set; }
+        public byte[]? CanonicalReceipt { get; set; }
+        public byte[]? ReleaseReconciliationReceipt { get; set; }
+        public byte[]? PendingCanonicalCommand { get; set; }
+        public ulong? PendingRevision { get; set; }
+        public bool Released { get; set; }
     }
     private sealed class MutablePublicationItem(
         byte[] targetStateKey, byte[] targetReplicaId, string endpoint,
         byte[] currentSpkiSha256, byte[] nextSpkiSha256,
         IReadOnlyList<byte[]> authorizedLegacyReplicaIds, byte[] canonicalEnvelope,
-        byte[] envelopeSha256, byte[]? lastAttemptSha256,
+        byte[] envelopeSha256, byte[] reservationCohortId,
+        byte[]? lastAttemptSha256,
         ulong? lastAttemptAtUnixSeconds, bool acknowledged)
     {
         public byte[] TargetStateKey { get; } = targetStateKey;
@@ -964,6 +1411,7 @@ public sealed class InMemoryProductionMailboxStateStore : IProductionMailboxStat
         public IReadOnlyList<byte[]> AuthorizedLegacyReplicaIds { get; } = authorizedLegacyReplicaIds;
         public byte[] CanonicalEnvelope { get; } = canonicalEnvelope;
         public byte[] EnvelopeSha256 { get; } = envelopeSha256;
+        public byte[] ReservationCohortId { get; } = reservationCohortId;
         public byte[]? LastAttemptSha256 { get; set; } = lastAttemptSha256;
         public ulong? LastAttemptAtUnixSeconds { get; set; } = lastAttemptAtUnixSeconds;
         public bool Acknowledged { get; set; } = acknowledged;
@@ -976,6 +1424,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
 {
     private readonly SemaphoreSlim initializeGate = new(1, 1);
     private volatile bool initialized;
+    internal TimeSpan CommitPromotedOwnerDelayBeforeFinalCapacityCheck { get; set; }
 
     public async ValueTask<ProductionMailboxChallengeState?> CreateChallengeAsync(
         ulong nowUnixSeconds, ulong expiresAtUnixSeconds,
@@ -1352,7 +1801,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             return existing;
         }
         await using (var active = new NpgsqlCommand(
-            "SELECT EXISTS(SELECT 1 FROM production_mailbox_artifact_promotions WHERE published=false)",
+            "SELECT EXISTS(SELECT 1 FROM production_mailbox_artifact_promotions WHERE published=false OR capacity_release_completed=false)",
             connection, transaction))
         {
             if ((bool)(await active.ExecuteScalarAsync(cancellationToken) ?? false))
@@ -1365,7 +1814,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             connection, transaction))
             watermark = (long)(await ownerWatermark.ExecuteScalarAsync(cancellationToken) ?? 0L);
         await using (var insert = new NpgsqlCommand(
-            "INSERT INTO production_mailbox_artifact_promotions(promotion_state_key,old_artifact_closure_hash,new_artifact_closure_hash,owner_watermark,cursor,sweep_completed,published) VALUES(@key,@old,@new,@watermark,0,false,false)",
+            "INSERT INTO production_mailbox_artifact_promotions(promotion_state_key,old_artifact_closure_hash,new_artifact_closure_hash,owner_watermark,cursor,sweep_completed,published,capacity_release_completed) VALUES(@key,@old,@new,@watermark,0,false,false,false)",
             connection, transaction))
         {
             insert.Parameters.AddWithValue("key", promotionStateKey.ToArray());
@@ -1374,9 +1823,16 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             insert.Parameters.AddWithValue("watermark", watermark);
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
+        await using (var capacity = new NpgsqlCommand(
+            "INSERT INTO production_mailbox_capacity_plans(promotion_state_key,cursor,completed) VALUES(@key,0,false)",
+            connection, transaction))
+        {
+            capacity.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            await capacity.ExecuteNonQueryAsync(cancellationToken);
+        }
         await transaction.CommitAsync(cancellationToken);
         return new(promotionStateKey.ToArray(), oldArtifactClosureHash.ToArray(),
-            newArtifactClosureHash.ToArray(), watermark, 0, false, false);
+            newArtifactClosureHash.ToArray(), watermark, 0, false, false, false);
     }
 
     public async ValueTask<ProductionMailboxArtifactPromotionState?>
@@ -1394,7 +1850,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var command = new NpgsqlCommand(
-            "SELECT promotion_state_key,old_artifact_closure_hash,new_artifact_closure_hash,owner_watermark,cursor,sweep_completed,published FROM production_mailbox_artifact_promotions WHERE published=false ORDER BY promotion_state_key LIMIT 2",
+            "SELECT promotion_state_key,old_artifact_closure_hash,new_artifact_closure_hash,owner_watermark,cursor,sweep_completed,published,capacity_release_completed FROM production_mailbox_artifact_promotions WHERE published=false OR capacity_release_completed=false ORDER BY promotion_state_key LIMIT 2",
             connection);
         ProductionMailboxArtifactPromotionState? result = null;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1405,7 +1861,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
                     "Multiple active production mailbox artifact promotions exist.");
             result = new(reader.GetFieldValue<byte[]>(0), reader.GetFieldValue<byte[]>(1),
                 reader.GetFieldValue<byte[]>(2), reader.GetInt64(3), reader.GetInt64(4),
-                reader.GetBoolean(5), reader.GetBoolean(6));
+                reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7));
         }
         return result;
     }
@@ -1452,11 +1908,422 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
         return output;
     }
 
+    public async ValueTask<IReadOnlyList<ProductionMailboxOwnerBundleRecord>>
+        ListOwnerBundlesForCapacityPlanningAsync(
+            ReadOnlyMemory<byte> promotionStateKey,
+            int maximumCount,
+            CancellationToken cancellationToken)
+    {
+        if (maximumCount is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(maximumCount));
+        await using var connection = await OpenAsync(cancellationToken);
+        long cursor;
+        bool completed;
+        await using (var plan = new NpgsqlCommand(
+            "SELECT cursor,completed FROM production_mailbox_capacity_plans WHERE promotion_state_key=@key",
+            connection))
+        {
+            plan.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            await using var reader = await plan.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return [];
+            cursor = reader.GetInt64(0);
+            completed = reader.GetBoolean(1);
+        }
+        if (completed) return [];
+        var promotion = await ReadPromotionAsync(
+            connection, null, promotionStateKey, false, cancellationToken);
+        if (promotion is null || promotion.Published) return [];
+        await using var command = new NpgsqlCommand(
+            "SELECT owner_sequence,route_state_key,canonical_bundle FROM production_mailbox_owner_route_state WHERE owner_sequence>@cursor AND owner_sequence<=@watermark ORDER BY owner_sequence LIMIT @limit",
+            connection);
+        command.Parameters.AddWithValue("cursor", cursor);
+        command.Parameters.AddWithValue("watermark", promotion.OwnerWatermark);
+        command.Parameters.AddWithValue("limit", maximumCount);
+        var output = new List<ProductionMailboxOwnerBundleRecord>();
+        await using var owners = await command.ExecuteReaderAsync(cancellationToken);
+        while (await owners.ReadAsync(cancellationToken))
+            output.Add(new(owners.GetInt64(0), owners.GetFieldValue<byte[]>(1),
+                owners.GetFieldValue<byte[]>(2)));
+        return output;
+    }
+
+    public async ValueTask<bool> CommitCapacityPlannedOwnerAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ProductionMailboxOwnerBundleRecord expectedOwner,
+        IReadOnlyList<ProductionMailboxPublicationItem> publicationItems,
+        ulong perScheduleOverheadBytes,
+        CancellationToken cancellationToken)
+    {
+        ValidatePublicationItems(publicationItems);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await PromotionGateLockAsync(connection, transaction, cancellationToken);
+        var promotion = await ReadPromotionAsync(
+            connection, transaction, promotionStateKey, true, cancellationToken);
+        if (promotion is null || promotion.Published) return false;
+        long cursor;
+        bool completed;
+        await using (var plan = new NpgsqlCommand(
+            "SELECT cursor,completed FROM production_mailbox_capacity_plans WHERE promotion_state_key=@key FOR UPDATE",
+            connection, transaction))
+        {
+            plan.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            await using var reader = await plan.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return false;
+            cursor = reader.GetInt64(0);
+            completed = reader.GetBoolean(1);
+        }
+        if (completed || expectedOwner.Sequence != cursor + 1
+            || expectedOwner.Sequence > promotion.OwnerWatermark)
+            return false;
+        await using (var owner = new NpgsqlCommand(
+            "SELECT route_state_key,canonical_bundle FROM production_mailbox_owner_route_state WHERE owner_sequence=@sequence FOR UPDATE",
+            connection, transaction))
+        {
+            owner.Parameters.AddWithValue("sequence", expectedOwner.Sequence);
+            await using var reader = await owner.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)
+                || !Fixed(reader.GetFieldValue<byte[]>(0), expectedOwner.RouteStateKey)
+                || !Fixed(reader.GetFieldValue<byte[]>(1), expectedOwner.CanonicalBundle))
+                return false;
+        }
+        foreach (var item in publicationItems)
+        {
+            if (!Fixed(item.ReservationCohortId, promotionStateKey.Span))
+                return false;
+            var charge = checked((ulong)item.CanonicalEnvelope.Length
+                + 12UL + perScheduleOverheadBytes);
+            if (charge > long.MaxValue) return false;
+            long? existingCount = null;
+            long? existingBytes = null;
+            string? endpoint = null;
+            byte[]? currentPin = null;
+            byte[]? nextPin = null;
+            await using (var select = new NpgsqlCommand(
+                "SELECT endpoint,current_spki_sha256,next_spki_sha256,reserved_closure_count,reserved_bytes FROM production_mailbox_capacity_targets WHERE promotion_state_key=@promotion AND target_replica_id=@target FOR UPDATE",
+                connection, transaction))
+            {
+                select.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+                select.Parameters.AddWithValue("target", item.TargetReplicaId);
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    endpoint = reader.GetString(0);
+                    currentPin = reader.GetFieldValue<byte[]>(1);
+                    nextPin = reader.GetFieldValue<byte[]>(2);
+                    existingCount = reader.GetInt64(3);
+                    existingBytes = reader.GetInt64(4);
+                }
+            }
+            if (existingCount.HasValue)
+            {
+                if (endpoint != item.Endpoint || !Fixed(currentPin!, item.CurrentSpkiSha256)
+                    || !Fixed(nextPin!, item.NextSpkiSha256))
+                    return false;
+                var nextCount = checked(existingCount.Value + 1);
+                var nextBytes = checked(existingBytes!.Value + checked((long)charge));
+                await using var update = new NpgsqlCommand(
+                    "UPDATE production_mailbox_capacity_targets SET reserved_closure_count=@count,reserved_bytes=@bytes WHERE promotion_state_key=@promotion AND target_replica_id=@target",
+                    connection, transaction);
+                update.Parameters.AddWithValue("count", nextCount);
+                update.Parameters.AddWithValue("bytes", nextBytes);
+                update.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+                update.Parameters.AddWithValue("target", item.TargetReplicaId);
+                if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+                    return false;
+            }
+            else
+            {
+                await using var insert = new NpgsqlCommand(
+                    "INSERT INTO production_mailbox_capacity_targets(promotion_state_key,target_replica_id,endpoint,current_spki_sha256,next_spki_sha256,reserved_closure_count,reserved_bytes,revision,receipt_expires_at,last_command_sha256,canonical_receipt,pending_canonical_command,pending_command_sha256,pending_revision,released) VALUES(@promotion,@target,@endpoint,@current,@next,1,@bytes,0,NULL,NULL,NULL,NULL,NULL,NULL,false)",
+                    connection, transaction);
+                insert.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+                insert.Parameters.AddWithValue("target", item.TargetReplicaId);
+                insert.Parameters.AddWithValue("endpoint", item.Endpoint);
+                insert.Parameters.AddWithValue("current", item.CurrentSpkiSha256);
+                insert.Parameters.AddWithValue("next", item.NextSpkiSha256);
+                insert.Parameters.AddWithValue("bytes", checked((long)charge));
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        await using (var updatePlan = new NpgsqlCommand(
+            "UPDATE production_mailbox_capacity_plans SET cursor=@cursor WHERE promotion_state_key=@key AND cursor=@previous AND completed=false",
+            connection, transaction))
+        {
+            updatePlan.Parameters.AddWithValue("cursor", expectedOwner.Sequence);
+            updatePlan.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            updatePlan.Parameters.AddWithValue("previous", cursor);
+            if (await updatePlan.ExecuteNonQueryAsync(cancellationToken) != 1)
+                return false;
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    public async ValueTask<bool> CompleteCapacityPlanAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await PromotionGateLockAsync(connection, transaction, cancellationToken);
+        await using var update = new NpgsqlCommand(
+            "UPDATE production_mailbox_capacity_plans p SET completed=true FROM production_mailbox_artifact_promotions a WHERE p.promotion_state_key=@key AND a.promotion_state_key=p.promotion_state_key AND a.published=false AND p.completed=false AND p.cursor>=a.owner_watermark",
+            connection, transaction);
+        update.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+        var changed = await update.ExecuteNonQueryAsync(cancellationToken) == 1;
+        if (changed) await transaction.CommitAsync(cancellationToken);
+        return changed;
+    }
+
+    public async ValueTask<bool> MarkArtifactPromotionCapacityReleasedAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await PromotionGateLockAsync(connection, transaction, cancellationToken);
+        await using var update = new NpgsqlCommand(
+            "UPDATE production_mailbox_artifact_promotions a SET capacity_release_completed=true WHERE a.promotion_state_key=@key AND a.published=true AND a.capacity_release_completed=false AND NOT EXISTS(SELECT 1 FROM production_mailbox_capacity_targets t WHERE t.promotion_state_key=a.promotion_state_key AND t.released=false)",
+            connection, transaction);
+        update.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+        var changed = await update.ExecuteNonQueryAsync(cancellationToken) == 1;
+        if (changed) await transaction.CommitAsync(cancellationToken);
+        return changed;
+    }
+
+    public async ValueTask<ProductionMailboxCapacityPlanState?> GetCapacityPlanAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        long cursor;
+        bool completed;
+        await using (var plan = new NpgsqlCommand(
+            "SELECT cursor,completed FROM production_mailbox_capacity_plans WHERE promotion_state_key=@key",
+            connection))
+        {
+            plan.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            await using var reader = await plan.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return null;
+            cursor = reader.GetInt64(0);
+            completed = reader.GetBoolean(1);
+        }
+        var targets = new List<ProductionMailboxCapacityTargetState>();
+        await using (var command = new NpgsqlCommand(
+            "SELECT target_replica_id,endpoint,current_spki_sha256,next_spki_sha256,reserved_closure_count,reserved_bytes,revision,receipt_expires_at,last_command_sha256,canonical_receipt,pending_canonical_command,pending_revision,released FROM production_mailbox_capacity_targets WHERE promotion_state_key=@key ORDER BY target_replica_id",
+            connection))
+        {
+            command.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                targets.Add(new(reader.GetFieldValue<byte[]>(0), reader.GetString(1),
+                    reader.GetFieldValue<byte[]>(2), reader.GetFieldValue<byte[]>(3),
+                    checked((uint)reader.GetInt64(4)), checked((ulong)reader.GetInt64(5)),
+                    checked((ulong)reader.GetInt64(6)), reader.IsDBNull(7) ? null
+                        : checked((ulong)reader.GetInt64(7)),
+                    reader.IsDBNull(8) ? null : reader.GetFieldValue<byte[]>(8),
+                    reader.IsDBNull(9) ? null : reader.GetFieldValue<byte[]>(9),
+                    reader.IsDBNull(10) ? null : reader.GetFieldValue<byte[]>(10),
+                    reader.IsDBNull(11) ? null : checked((ulong)reader.GetInt64(11)),
+                    reader.GetBoolean(12)));
+        }
+        return new(promotionStateKey.ToArray(), cursor, completed, targets);
+    }
+
+    public async ValueTask<bool> RecordCapacityReceiptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedPreviousRevision,
+        ProductionMailboxCapacityReceipt receipt,
+        ReadOnlyMemory<byte> canonicalReceipt,
+        CancellationToken cancellationToken)
+    {
+        var receiptBytes = canonicalReceipt.ToArray();
+        try
+        {
+            receipt = ProductionMailboxCapacityReceiptCodec.DecodeAndVerify(
+                receiptBytes, targetReplicaId.Span);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+        if (!ProductionMailboxCapacityRevisionPolicy.IsStorableReceipt(receipt))
+            return false;
+        if (receipt.Revision != checked(expectedPreviousRevision + 1)
+            || !Fixed(receipt.CohortId, promotionStateKey.Span)
+            || !Fixed(receipt.TargetReplicaId, targetReplicaId.Span))
+            return false;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await PromotionGateLockAsync(connection, transaction, cancellationToken);
+        await using var update = new NpgsqlCommand(
+            "UPDATE production_mailbox_capacity_targets t SET revision=@revision,receipt_expires_at=@expires,last_command_sha256=@command,canonical_receipt=@receipt,pending_canonical_command=NULL,pending_command_sha256=NULL,pending_revision=NULL,released=@released FROM production_mailbox_capacity_plans p WHERE t.promotion_state_key=@promotion AND p.promotion_state_key=t.promotion_state_key AND p.completed=true AND t.released=false AND t.target_replica_id=@target AND t.revision=@previous AND t.pending_revision=@revision AND t.pending_command_sha256=@command AND ((NOT @released AND t.reserved_closure_count=@count AND t.reserved_bytes=@bytes) OR (@released AND @count<=t.reserved_closure_count AND @bytes<=t.reserved_bytes))",
+            connection, transaction);
+        update.Parameters.AddWithValue("revision", checked((long)receipt.Revision));
+        update.Parameters.AddWithValue("expires", checked((long)receipt.ExpiresAtUnixSeconds));
+        update.Parameters.AddWithValue("command", receipt.CommandSha256);
+        update.Parameters.AddWithValue("receipt", receiptBytes);
+        update.Parameters.AddWithValue("released",
+            receipt.Operation == ProductionMailboxCapacityOperation.Release);
+        update.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+        update.Parameters.AddWithValue("target", targetReplicaId.ToArray());
+        update.Parameters.AddWithValue("previous", checked((long)expectedPreviousRevision));
+        update.Parameters.AddWithValue("count", checked((long)receipt.ReservedClosureCount));
+        update.Parameters.AddWithValue("bytes", checked((long)receipt.ReservedBytes));
+        var changed = await update.ExecuteNonQueryAsync(cancellationToken) == 1;
+        if (changed) await transaction.CommitAsync(cancellationToken);
+        return changed;
+    }
+
+    public async ValueTask<bool> RecordCapacityReconciliationReceiptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedRevision,
+        ReadOnlyMemory<byte> expectedPendingReleaseCommand,
+        ProductionMailboxCapacityReconciliationReceipt receipt,
+        ReadOnlyMemory<byte> canonicalReceipt,
+        CancellationToken cancellationToken)
+    {
+        var receiptBytes = canonicalReceipt.ToArray();
+        try
+        {
+            receipt = ProductionMailboxCapacityReconciliationReceiptCodec.DecodeAndVerify(
+                receiptBytes, targetReplicaId.Span);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+        if (receipt.Status != ProductionMailboxCapacityReconciliationStatus.AbsentTerminal
+            || receipt.LastKnownRevision != expectedRevision
+            || !Fixed(receipt.CohortId, promotionStateKey.Span)
+            || !Fixed(receipt.TargetReplicaId, targetReplicaId.Span))
+            return false;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await PromotionGateLockAsync(connection, transaction, cancellationToken);
+        byte[]? priorCanonicalReceipt = null;
+        byte[]? priorCommandHash = null;
+        byte[]? pendingCanonicalCommand = null;
+        long? currentRevision = null;
+        long? pendingRevision = null;
+        bool released = false;
+        bool completed = false;
+        await using (var select = new NpgsqlCommand(
+            "SELECT t.canonical_receipt,t.last_command_sha256,t.revision,t.pending_revision,t.released,p.completed,t.pending_canonical_command FROM production_mailbox_capacity_targets t JOIN production_mailbox_capacity_plans p ON p.promotion_state_key=t.promotion_state_key WHERE t.promotion_state_key=@promotion AND t.target_replica_id=@target FOR UPDATE",
+            connection, transaction))
+        {
+            select.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+            select.Parameters.AddWithValue("target", targetReplicaId.ToArray());
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                priorCanonicalReceipt = reader.IsDBNull(0)
+                    ? null : reader.GetFieldValue<byte[]>(0);
+                priorCommandHash = reader.IsDBNull(1)
+                    ? null : reader.GetFieldValue<byte[]>(1);
+                currentRevision = reader.GetInt64(2);
+                pendingRevision = reader.IsDBNull(3) ? null : reader.GetInt64(3);
+                released = reader.GetBoolean(4);
+                completed = reader.GetBoolean(5);
+                pendingCanonicalCommand = reader.IsDBNull(6)
+                    ? null : reader.GetFieldValue<byte[]>(6);
+            }
+        }
+        if (!completed || released
+            || currentRevision != checked((long)expectedRevision)
+            || pendingRevision != checked((long)(expectedRevision + 1))
+            || pendingCanonicalCommand is null
+            || !Fixed(pendingCanonicalCommand,
+                expectedPendingReleaseCommand.Span)
+            || priorCanonicalReceipt is null || priorCommandHash is null
+            || !Fixed(receipt.LastReceiptSha256,
+                System.Security.Cryptography.SHA256.HashData(priorCanonicalReceipt))
+            || !Fixed(receipt.LastCommandSha256, priorCommandHash))
+            return false;
+        await using var update = new NpgsqlCommand(
+            "UPDATE production_mailbox_capacity_targets SET release_reconciliation_receipt=@receipt,pending_canonical_command=NULL,pending_command_sha256=NULL,pending_revision=NULL,released=true WHERE promotion_state_key=@promotion AND target_replica_id=@target AND released=false AND revision=@revision AND pending_revision=@pending AND pending_canonical_command IS NOT NULL",
+            connection, transaction);
+        update.Parameters.AddWithValue("receipt", receiptBytes);
+        update.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+        update.Parameters.AddWithValue("target", targetReplicaId.ToArray());
+        update.Parameters.AddWithValue("revision", checked((long)expectedRevision));
+        update.Parameters.AddWithValue("pending", checked((long)(expectedRevision + 1)));
+        var changed = await update.ExecuteNonQueryAsync(cancellationToken) == 1;
+        if (changed) await transaction.CommitAsync(cancellationToken);
+        return changed;
+    }
+
+    public async ValueTask<byte[]?> GetOrRecordCapacityAttemptAsync(
+        ReadOnlyMemory<byte> promotionStateKey,
+        ReadOnlyMemory<byte> targetReplicaId,
+        ulong expectedPreviousRevision,
+        ulong attemptRevision,
+        ReadOnlyMemory<byte> canonicalCommand,
+        CancellationToken cancellationToken)
+    {
+        if (attemptRevision != checked(expectedPreviousRevision + 1)
+            || attemptRevision
+                > ProductionMailboxCapacityRevisionPolicy.MaximumStoredRevision)
+            return null;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await PromotionGateLockAsync(connection, transaction, cancellationToken);
+        byte[]? pending = null;
+        long? pendingRevision = null;
+        long? currentRevision = null;
+        await using (var select = new NpgsqlCommand(
+            "SELECT t.revision,t.pending_revision,t.pending_canonical_command FROM production_mailbox_capacity_targets t JOIN production_mailbox_capacity_plans p ON p.promotion_state_key=t.promotion_state_key WHERE t.promotion_state_key=@promotion AND t.target_replica_id=@target AND p.completed=true AND t.released=false FOR UPDATE",
+            connection, transaction))
+        {
+            select.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+            select.Parameters.AddWithValue("target", targetReplicaId.ToArray());
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                currentRevision = reader.GetInt64(0);
+                pendingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                pending = reader.IsDBNull(2) ? null : reader.GetFieldValue<byte[]>(2);
+            }
+        }
+        if (currentRevision != checked((long)expectedPreviousRevision)) return null;
+        if (pending is not null)
+        {
+            if (pendingRevision != checked((long)attemptRevision))
+                throw new InvalidDataException(
+                    "Production mailbox capacity pending attempt is corrupt.");
+            await transaction.CommitAsync(cancellationToken);
+            return pending;
+        }
+        await using var update = new NpgsqlCommand(
+            "UPDATE production_mailbox_capacity_targets SET pending_canonical_command=@command,pending_command_sha256=@hash,pending_revision=@revision WHERE promotion_state_key=@promotion AND target_replica_id=@target AND revision=@previous AND released=false AND pending_canonical_command IS NULL AND pending_revision IS NULL",
+            connection, transaction);
+        update.Parameters.AddWithValue("command", canonicalCommand.ToArray());
+        update.Parameters.AddWithValue("hash",
+            System.Security.Cryptography.SHA256.HashData(canonicalCommand.Span));
+        update.Parameters.AddWithValue("revision", checked((long)attemptRevision));
+        update.Parameters.AddWithValue("promotion", promotionStateKey.ToArray());
+        update.Parameters.AddWithValue("target", targetReplicaId.ToArray());
+        update.Parameters.AddWithValue("previous", checked((long)expectedPreviousRevision));
+        if (await update.ExecuteNonQueryAsync(cancellationToken) != 1) return null;
+        await transaction.CommitAsync(cancellationToken);
+        return canonicalCommand.ToArray();
+    }
+
     public async ValueTask<bool> CommitPromotedOwnerAsync(
         ReadOnlyMemory<byte> promotionStateKey,
         ProductionMailboxOwnerBundleRecord expectedOwner,
         ProductionMailboxPreparedIssue preparedIssue,
         ulong updatedAtUnixSeconds,
+        uint capacityRenewalMarginSeconds,
         CancellationToken cancellationToken)
     {
         if (preparedIssue.PublicationItems.Count == 0
@@ -1465,6 +2332,17 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.Serializable, cancellationToken);
+        var capacityTransactionTimeoutMilliseconds = checked((int)Math.Max(1UL,
+            Math.Min((ulong)int.MaxValue,
+                (ulong)capacityRenewalMarginSeconds * 750UL)));
+        await using (var timeout = new NpgsqlCommand(
+            "SELECT set_config('statement_timeout',@timeout,true),set_config('lock_timeout',@timeout,true),set_config('idle_in_transaction_session_timeout',@timeout,true)",
+            connection, transaction))
+        {
+            timeout.Parameters.AddWithValue("timeout",
+                $"{capacityTransactionTimeoutMilliseconds}ms");
+            await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
         await PromotionGateLockAsync(connection, transaction, cancellationToken);
         var promotion = await ReadPromotionAsync(
             connection, transaction, promotionStateKey, true, cancellationToken);
@@ -1472,6 +2350,16 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             || expectedOwner.Sequence <= promotion.Cursor
             || expectedOwner.Sequence > promotion.OwnerWatermark)
             return false;
+        await using (var capacity = new NpgsqlCommand(
+            "SELECT p.completed AND NOT EXISTS(SELECT 1 FROM production_mailbox_capacity_targets t WHERE t.promotion_state_key=p.promotion_state_key AND (t.released OR t.canonical_receipt IS NULL OR t.pending_canonical_command IS NOT NULL OR t.pending_revision IS NOT NULL OR t.receipt_expires_at IS NULL OR t.receipt_expires_at<CAST(extract(epoch from clock_timestamp()) AS bigint)+@margin)) FROM production_mailbox_capacity_plans p WHERE p.promotion_state_key=@key FOR UPDATE",
+            connection, transaction))
+        {
+            capacity.Parameters.AddWithValue("margin",
+                checked((long)capacityRenewalMarginSeconds));
+            capacity.Parameters.AddWithValue("key", promotionStateKey.ToArray());
+            if (!(bool)(await capacity.ExecuteScalarAsync(cancellationToken) ?? false))
+                return false;
+        }
         long? nextSequence;
         byte[]? routeStateKey;
         byte[]? canonicalBundle;
@@ -1521,13 +2409,18 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             link.Parameters.AddWithValue("publication", preparedIssue.PublicationStateKey);
             await link.ExecuteNonQueryAsync(cancellationToken);
         }
+        if (CommitPromotedOwnerDelayBeforeFinalCapacityCheck > TimeSpan.Zero)
+            await Task.Delay(CommitPromotedOwnerDelayBeforeFinalCapacityCheck,
+                cancellationToken);
         await using (var cursor = new NpgsqlCommand(
-            "UPDATE production_mailbox_artifact_promotions SET cursor=@cursor WHERE promotion_state_key=@key AND cursor=@oldCursor AND published=false",
+            "UPDATE production_mailbox_artifact_promotions a SET cursor=@cursor WHERE a.promotion_state_key=@key AND a.cursor=@oldCursor AND a.published=false AND EXISTS(SELECT 1 FROM production_mailbox_capacity_plans p WHERE p.promotion_state_key=a.promotion_state_key AND p.completed=true AND NOT EXISTS(SELECT 1 FROM production_mailbox_capacity_targets t WHERE t.promotion_state_key=p.promotion_state_key AND (t.released OR t.canonical_receipt IS NULL OR t.pending_canonical_command IS NOT NULL OR t.pending_revision IS NOT NULL OR t.receipt_expires_at IS NULL OR t.receipt_expires_at<CAST(extract(epoch from clock_timestamp()) AS bigint)+@margin)))",
             connection, transaction))
         {
             cursor.Parameters.AddWithValue("cursor", expectedOwner.Sequence);
             cursor.Parameters.AddWithValue("key", promotionStateKey.ToArray());
             cursor.Parameters.AddWithValue("oldCursor", promotion.Cursor);
+            cursor.Parameters.AddWithValue("margin",
+                checked((long)capacityRenewalMarginSeconds));
             if (await cursor.ExecuteNonQueryAsync(cancellationToken) != 1) return false;
         }
         await transaction.CommitAsync(cancellationToken);
@@ -1862,9 +2755,17 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
                     current_spki_sha256 bytea NOT NULL, next_spki_sha256 bytea NOT NULL,
                     authorized_legacy_replica_ids bytea NOT NULL,
                     canonical_envelope bytea NOT NULL, envelope_sha256 bytea NOT NULL,
+                    reservation_cohort_id bytea NOT NULL,
                     last_attempt_sha256 bytea NULL, last_attempt_at bigint NULL,
                     acknowledged boolean NOT NULL,
                     PRIMARY KEY(publication_state_key,target_state_key));
+                ALTER TABLE production_mailbox_publication_items
+                    ADD COLUMN IF NOT EXISTS reservation_cohort_id bytea;
+                UPDATE production_mailbox_publication_items
+                    SET reservation_cohort_id=decode(repeat('00',32),'hex')
+                    WHERE reservation_cohort_id IS NULL;
+                ALTER TABLE production_mailbox_publication_items
+                    ALTER COLUMN reservation_cohort_id SET NOT NULL;
                 CREATE TABLE IF NOT EXISTS production_mailbox_artifact_promotions(
                     promotion_state_key bytea PRIMARY KEY,
                     old_artifact_closure_hash bytea NOT NULL,
@@ -1872,9 +2773,38 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
                     owner_watermark bigint NOT NULL,
                     cursor bigint NOT NULL,
                     sweep_completed boolean NOT NULL,
-                    published boolean NOT NULL);
+                    published boolean NOT NULL,
+                    capacity_release_completed boolean NOT NULL DEFAULT false);
+                ALTER TABLE production_mailbox_artifact_promotions
+                    ADD COLUMN IF NOT EXISTS capacity_release_completed boolean NOT NULL DEFAULT false;
+                CREATE TABLE IF NOT EXISTS production_mailbox_capacity_plans(
+                    promotion_state_key bytea PRIMARY KEY
+                        REFERENCES production_mailbox_artifact_promotions(promotion_state_key),
+                    cursor bigint NOT NULL,
+                    completed boolean NOT NULL);
+                CREATE TABLE IF NOT EXISTS production_mailbox_capacity_targets(
+                    promotion_state_key bytea NOT NULL
+                        REFERENCES production_mailbox_capacity_plans(promotion_state_key),
+                    target_replica_id bytea NOT NULL,
+                    endpoint text NOT NULL,
+                    current_spki_sha256 bytea NOT NULL,
+                    next_spki_sha256 bytea NOT NULL,
+                    reserved_closure_count bigint NOT NULL,
+                    reserved_bytes bigint NOT NULL,
+                    revision bigint NOT NULL,
+                    receipt_expires_at bigint NULL,
+                    last_command_sha256 bytea NULL,
+                    canonical_receipt bytea NULL,
+                    pending_canonical_command bytea NULL,
+                    pending_command_sha256 bytea NULL,
+                    pending_revision bigint NULL,
+                    release_reconciliation_receipt bytea NULL,
+                    released boolean NOT NULL,
+                    PRIMARY KEY(promotion_state_key,target_replica_id));
+                ALTER TABLE production_mailbox_capacity_targets
+                    ADD COLUMN IF NOT EXISTS release_reconciliation_receipt bytea NULL;
                 CREATE INDEX IF NOT EXISTS ix_production_mailbox_artifact_promotions_active
-                    ON production_mailbox_artifact_promotions(published);
+                    ON production_mailbox_artifact_promotions(published,capacity_release_completed);
                 CREATE TABLE IF NOT EXISTS production_mailbox_artifact_active(
                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
                     closure_hash bytea NOT NULL CHECK(octet_length(closure_hash)=32));
@@ -1943,7 +2873,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             ReadOnlyMemory<byte> promotionStateKey, bool forUpdate,
             CancellationToken cancellationToken)
     {
-        var sql = "SELECT old_artifact_closure_hash,new_artifact_closure_hash,owner_watermark,cursor,sweep_completed,published FROM production_mailbox_artifact_promotions WHERE promotion_state_key=@key"
+        var sql = "SELECT old_artifact_closure_hash,new_artifact_closure_hash,owner_watermark,cursor,sweep_completed,published,capacity_release_completed FROM production_mailbox_artifact_promotions WHERE promotion_state_key=@key"
             + (forUpdate ? " FOR UPDATE" : string.Empty);
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("key", promotionStateKey.ToArray());
@@ -1951,7 +2881,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
         if (!await reader.ReadAsync(cancellationToken)) return null;
         return new(promotionStateKey.ToArray(), reader.GetFieldValue<byte[]>(0),
             reader.GetFieldValue<byte[]>(1), reader.GetInt64(2), reader.GetInt64(3),
-            reader.GetBoolean(4), reader.GetBoolean(5));
+            reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6));
     }
 
     private static async ValueTask AdvisoryLockAsync(
@@ -2011,7 +2941,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
         foreach (var item in items)
         {
             await using var insert = new NpgsqlCommand(
-                "INSERT INTO production_mailbox_publication_items(publication_state_key,target_state_key,target_replica_id,endpoint,current_spki_sha256,next_spki_sha256,authorized_legacy_replica_ids,canonical_envelope,envelope_sha256,last_attempt_sha256,last_attempt_at,acknowledged) VALUES(@publication,@target,@replica,@endpoint,@currentSpki,@nextSpki,@legacy,@envelope,@envelopeHash,@attempt,@attemptAt,@acknowledged)",
+                "INSERT INTO production_mailbox_publication_items(publication_state_key,target_state_key,target_replica_id,endpoint,current_spki_sha256,next_spki_sha256,authorized_legacy_replica_ids,canonical_envelope,envelope_sha256,reservation_cohort_id,last_attempt_sha256,last_attempt_at,acknowledged) VALUES(@publication,@target,@replica,@endpoint,@currentSpki,@nextSpki,@legacy,@envelope,@envelopeHash,@cohort,@attempt,@attemptAt,@acknowledged)",
                 connection, transaction);
             insert.Parameters.AddWithValue("publication", publicationStateKey);
             insert.Parameters.AddWithValue("target", item.TargetStateKey);
@@ -2022,6 +2952,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             insert.Parameters.AddWithValue("legacy", Flatten(item.AuthorizedLegacyReplicaIds));
             insert.Parameters.AddWithValue("envelope", item.CanonicalEnvelope);
             insert.Parameters.AddWithValue("envelopeHash", item.EnvelopeSha256);
+            insert.Parameters.AddWithValue("cohort", item.ReservationCohortId);
             insert.Parameters.AddWithValue("attempt", (object?)item.LastAttemptSha256 ?? DBNull.Value);
             insert.Parameters.AddWithValue("attemptAt", item.LastAttemptAtUnixSeconds.HasValue
                 ? checked((long)item.LastAttemptAtUnixSeconds.Value) : DBNull.Value);
@@ -2052,7 +2983,7 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
         if (responseHash is null) return null;
         var items = new List<ProductionMailboxPublicationItem>();
         await using (var command = new NpgsqlCommand(
-            "SELECT target_state_key,target_replica_id,endpoint,current_spki_sha256,next_spki_sha256,authorized_legacy_replica_ids,canonical_envelope,envelope_sha256,last_attempt_sha256,last_attempt_at,acknowledged FROM production_mailbox_publication_items WHERE publication_state_key=@key ORDER BY target_state_key",
+            "SELECT target_state_key,target_replica_id,endpoint,current_spki_sha256,next_spki_sha256,authorized_legacy_replica_ids,canonical_envelope,envelope_sha256,reservation_cohort_id,last_attempt_sha256,last_attempt_at,acknowledged FROM production_mailbox_publication_items WHERE publication_state_key=@key ORDER BY target_state_key",
             connection, transaction))
         {
             command.Parameters.AddWithValue("key", publicationStateKey.ToArray());
@@ -2063,9 +2994,10 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
                     reader.GetString(2), reader.GetFieldValue<byte[]>(3),
                     reader.GetFieldValue<byte[]>(4), Split(reader.GetFieldValue<byte[]>(5)),
                     reader.GetFieldValue<byte[]>(6), reader.GetFieldValue<byte[]>(7),
-                    reader.IsDBNull(8) ? null : reader.GetFieldValue<byte[]>(8),
-                    reader.IsDBNull(9) ? null : checked((ulong)reader.GetInt64(9)),
-                    reader.GetBoolean(10)));
+                    reader.GetFieldValue<byte[]>(8),
+                    reader.IsDBNull(9) ? null : reader.GetFieldValue<byte[]>(9),
+                    reader.IsDBNull(10) ? null : checked((ulong)reader.GetInt64(10)),
+                    reader.GetBoolean(11)));
         }
         return new(publicationStateKey.ToArray(), responseHash, items, completed);
     }
@@ -2087,7 +3019,9 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
             && ExactByteLists(pair.First.AuthorizedLegacyReplicaIds,
                 pair.Second.AuthorizedLegacyReplicaIds)
             && Fixed(pair.First.CanonicalEnvelope, pair.Second.CanonicalEnvelope)
-            && Fixed(pair.First.EnvelopeSha256, pair.Second.EnvelopeSha256));
+            && Fixed(pair.First.EnvelopeSha256, pair.Second.EnvelopeSha256)
+            && Fixed(pair.First.ReservationCohortId,
+                pair.Second.ReservationCohortId));
     }
 
     private static void ValidatePublicationItems(
@@ -2098,7 +3032,9 @@ public sealed class PostgreSqlProductionMailboxStateStore(string connectionStrin
                 || item.TargetReplicaId.Length != 32
                 || item.CurrentSpkiSha256.Length != 32
                 || item.NextSpkiSha256.Length != 32
-                || item.EnvelopeSha256.Length != 32 || item.CanonicalEnvelope.Length == 0
+                || item.EnvelopeSha256.Length != 32
+                || item.ReservationCohortId.Length != 32
+                || item.CanonicalEnvelope.Length == 0
                 || !Fixed(System.Security.Cryptography.SHA256.HashData(
                     item.CanonicalEnvelope), item.EnvelopeSha256)
                 || item.AuthorizedLegacyReplicaIds.Count > 2

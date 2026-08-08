@@ -120,22 +120,66 @@ and bounded restart reconciliation. Reload is rejected before memory or persiste
 exceed `MaximumRetainedArtifactClosures` (default 16, maximum 64), so a rapid administrative reload
 cannot silently evict a still-valid content address or grow memory/disk metadata without bound.
 
-Artifact reload is a staged promotion, not an immediate pointer swap. PostgreSQL records one active
+> **Route-activation NO-GO:** the capacity and publication machinery below is infrastructure only.
+> The current owner sweep must not be enabled for a production cutover: copying an old PRC1/PRA1
+> into a new PMA closure is cryptographically invalid, and PSS1 does not authorize or extend that
+> route. Production promotion remains blocked until the independently reviewed RCD1/RDA1/RCR1/
+> RCH1/RTC1/RCA1/PRA2/PSS2 continuity contract and atomic high-level verifier are integrated.
+
+Artifact reload infrastructure stages a promotion rather than immediately swapping the pointer.
+PostgreSQL records one active
 promotion with an immutable owner-sequence watermark and a resumable cursor. New enrollment and
 credential issuance are fenced while it is active. The coordinator scans the durable LocalOwner
-cohort in bounded pages, creates an exact new owner bundle/PSS1, updates the latest predecessor and
+cohort in bounded pages, prepares an exact publication target, updates the latest predecessor and
 inserts immutable PMC1 publication targets in the same serializable transaction. PMP1 timestamp,
 nonce and signature are renewable attempts; ACK binds the immutable target and PMC1 hash plus the
 latest attempt hash. A background drainer can resume after process or network failure. The active
-PMA1/PMR1/PMT1 pointer changes only after every cohort publication is acknowledged; a crash after
-provider cutover but before the final database marker remains fail-closed and idempotently
-reconcilable.
+PMA1/PMR1/PMT1 pointer is designed to change only after every cohort publication is acknowledged;
+a crash after provider cutover but before the final database marker remains fail-closed and
+idempotently reconcilable. This ordering does not waive the route-activation gate above.
 
-This sweep/ACK implementation is not yet the node-capacity reservation gate. Until XNode exposes an
-authenticated bounded cohort reservation for exact count/bytes/expiry, a rotation can safely stop
-as a resumable unpublished partial sweep when a node rejects capacity, but cannot claim a
-production-wide preflight reservation. Survival Beta remains blocked on that separate API and its
-capacity-pressure E2E; partial progress is never reported as a published artifact generation.
+Before the owner cursor can advance, a separate durable planning cursor scans the complete frozen
+owner watermark and aggregates a conservative per-XNode reservation: one closure count per owner
+ticket and the canonical PMC1 bytes plus PCS1 framing and configured filesystem-accounting
+overhead. Registry signs exact PMB1 reserve/renew/release commands; every required XNode returns a
+node-signed PMB2 receipt binding the cohort, target, command hash, revision, count, bytes and expiry.
+Commands are stored before the HTTP attempt and replayed byte-for-byte after a lost response.
+Registry verifies the receipt signature and commits it only against that pending command.
+
+The owner update/outbox transaction independently evaluates `clock_timestamp()` plus
+`CapacityReservationRenewalMarginSeconds` both before mutation and in the final cursor CAS, and
+refuses to advance unless every target receipt is still live, exact, not released and has no
+ambiguous pending attempt. PostgreSQL statement, lock and idle-transaction timeouts are strictly
+shorter than the renewal margin. A partial reserve or renewal failure therefore freezes the
+unpublished promotion before the next owner commit. Only after the artifact-provider cutover and
+the authoritative database publication marker are durable does Registry enter its persisted
+capacity-release cleanup phase. It sends revision-successor releases without ever returning to
+Reserve; after a crash each already released target is skipped and each pending exact Release is
+retried. XNode releases only unused headroom, while already written schedules remain charged as
+actual storage. Registry persists revisions as PostgreSQL `bigint`: Reserve/Renew is therefore
+bounded to `long.MaxValue - 1`, leaving exact `long.MaxValue` for the terminal Release; receipts or
+attempts outside that storage domain fail before conversion. The defaults are a
+3600-second reservation lifetime, 300-second safe-renewal margin and 1024-byte per-schedule
+filesystem allowance; the filesystem allowance must equal the XNode setting.
+
+If a terminal XNode capacity floor has already passed its bounded retention window, Registry does
+not mark cleanup complete locally. It sends a fresh publisher-signed PMB3 reconciliation command
+containing the exact last node-signed PMB2 receipt and its command/receipt hashes. PMB3 is capped at
+300 seconds. Under its store and process locks the XNode returns a node-signed PMB4
+`AbsentTerminal` receipt only when no live floor or transfer exists and its complete schedule scan
+matches authoritative accounting. PMB4 is read-only: it cannot release, reserve or resurrect
+capacity. Registry atomically binds PMB4 to the durable predecessor and pending Release command,
+retains it for audit, marks only that target released, and can then finish cleanup and admit the
+next promotion. A PostgreSQL/real-XNode test advances beyond floor retention, restarts both sides,
+reconciles every target and proves the next promotion is no longer blocked.
+
+This capacity barrier does not by itself promise an unlimited control-plane outage. The usable
+Registry-offline horizon is the configured XNode multi-version schedule horizon (each live
+selection/route activation is at
+most 24 hours), not the 365-day historical-anchor age. Survival Beta additionally requires the
+client/XNode +25-hour outage E2E and the owner-authenticated fresh-checkpoint lane for a client whose
+exact durable old PMS predates the retained live node schedule. Expired PSS1 is never accepted and
+retired issuer keys are never retained for refresh.
 
 Internal reload, holder revocation, and sanitized runtime counters are under
 `/api/internal/production-mailbox`. They fail closed unless the connection has the configured
@@ -152,5 +196,10 @@ client-certificate pin. Mount artifacts and membership
 proofs read-only. Do not put Mr. X or issuer private material in configuration or environment
 variables. `UseDevelopmentInMemoryState` and `DevelopmentSoftwareSignerSeedPath` must remain unset.
 
+Set `CapacityReservationLifetimeSeconds`, `CapacityReservationRenewalMarginSeconds`,
+`ClosureScheduleAccountingOverheadBytes`, and `MaximumCapacityPlanTargets` consistently with the
+XNode fleet. A configuration mismatch fails closed during reservation; it must not be handled by
+lowering the signed reservation after planning.
+
 The exact local protocol closure is recorded in `vendor/pma/package-manifest.json`; it is built
-reproducibly from protocol commit `20249077913abfd9ad69f957aa07e57ff55b5e24` and is not published.
+reproducibly from protocol commit `105918421eb5621bec86aeaac56013b269472aa7` and is not published.

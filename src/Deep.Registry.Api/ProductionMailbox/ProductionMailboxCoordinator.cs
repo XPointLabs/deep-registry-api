@@ -222,7 +222,7 @@ public sealed class ProductionMailboxCoordinator
                     idempotencyKey, limits, previousOwnerBundle, routeCertificate,
                     routeAdvertisement,
                     request.Intent == ProductionMailboxIssuanceIntent.LocalOwner
-                        ? routeStateKey : [], token), cancellationToken);
+                        ? routeStateKey : [], null, token), cancellationToken);
             if (issued.Status == ProductionMailboxIssueCommitStatus.InvalidChallenge)
                 throw Error(ProductionMailboxIssueError.InvalidChallenge,
                     "Challenge is expired, mismatched or already consumed.");
@@ -502,6 +502,7 @@ public sealed class ProductionMailboxCoordinator
         ProductionMailboxCanonicalEnvelope? routeCertificate,
         ProductionMailboxCanonicalEnvelope? routeAdvertisement,
         byte[] ownerRouteStateKey,
+        byte[]? reservationCohortId,
         CancellationToken cancellationToken)
     {
         var response = await CreateBundleBytesAsync(
@@ -512,7 +513,8 @@ public sealed class ProductionMailboxCoordinator
             "Deep/production-mailbox/publication-state/v1", idempotencyKey);
         var publicationItems = intent == ProductionMailboxIssuanceIntent.LocalOwner
             ? CreatePublicationItems(
-                response, previousOwnerBundleBytes, publicationStateKey)
+                response, previousOwnerBundleBytes, publicationStateKey,
+                reservationCohortId)
             : [];
         return new(response, ownerRouteStateKey, publicationStateKey, publicationItems);
     }
@@ -520,7 +522,8 @@ public sealed class ProductionMailboxCoordinator
     private IReadOnlyList<ProductionMailboxPublicationItem> CreatePublicationItems(
             byte[] canonicalResponse,
             byte[]? previousOwnerBundleBytes,
-            byte[] publicationStateKey)
+            byte[] publicationStateKey,
+            byte[]? reservationCohortId)
     {
         if (previousOwnerBundleBytes is null) return [];
         var current = JsonSerializer.Deserialize<ProductionMailboxCredentialBundle>(
@@ -584,7 +587,8 @@ public sealed class ProductionMailboxCoordinator
                     publicationStateKey, target.ReplicaId),
                 target.ReplicaId, target.HttpsOrigin,
                 target.CurrentSpkiSha256, target.NextSpkiSha256,
-                legacyIds, envelope, SHA256.HashData(envelope)));
+                legacyIds, envelope, SHA256.HashData(envelope),
+                reservationCohortId?.ToArray() ?? new byte[32]));
         }
         return items;
     }
@@ -623,7 +627,8 @@ public sealed class ProductionMailboxCoordinator
             var attemptedAt = Now();
             var command = await ProductionMailboxPublicationCodec.CreateCommandAsync(
                 attemptedAt, target, item.AuthorizedLegacyReplicaIds,
-                item.CanonicalEnvelope, closurePublisherPublicKey,
+                item.ReservationCohortId, item.CanonicalEnvelope,
+                closurePublisherPublicKey,
                 closurePublisherSigner, cancellationToken);
             var attemptHash = SHA256.HashData(command);
             if (!await state.RecordPublicationAttemptAsync(
@@ -673,6 +678,288 @@ public sealed class ProductionMailboxCoordinator
         return completed;
     }
 
+    private async ValueTask<ProductionMailboxPreparedIssue>
+        PreparePromotedOwnerAsync(
+            ProductionMailboxCoordinator successor,
+            ReadOnlyMemory<byte> promotionStateKey,
+            ProductionMailboxOwnerBundleRecord ownerRecord,
+            CancellationToken cancellationToken)
+    {
+        var previous = JsonSerializer.Deserialize<ProductionMailboxCredentialBundle>(
+            ownerRecord.CanonicalBundle, JsonOptions)
+            ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Durable owner bundle is invalid during artifact promotion.");
+        if (previous.Intent != ProductionMailboxIssuanceIntent.LocalOwner
+            || previous.RouteCertificate is null
+            || previous.RouteAdvertisement is null)
+            throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion cohort contains a non-owner or unbound route.");
+        var holder = Decode(previous.HolderEd25519PublicKey, 32,
+            "promoted holder key");
+        var owner = Decode(previous.MailboxOwnerEd25519PublicKey, 32,
+            "promoted owner key");
+        var mailbox = Decode(previous.BlindedMailboxId, 32,
+            "promoted mailbox ID");
+        var placement = Decode(previous.BlindedPlacementId, 32,
+            "promoted placement ID");
+        var selection = Decode(previous.SelectionInputCommitment, 32,
+            "promoted selection commitment");
+        var routeStateKey = StateHmac(
+            "Deep/production-mailbox/owner-route-state/v1", owner,
+            mailbox, placement, selection);
+        RequireFixed(routeStateKey, ownerRecord.RouteStateKey,
+            ProductionMailboxIssueError.IssuerUnavailable,
+            "Artifact promotion owner route state binding mismatched.");
+        var promotionIdempotencyKey = StateHmac(
+            "Deep/production-mailbox/artifact-promotion-issuance/v1",
+            promotionStateKey.ToArray(), ownerRecord.RouteStateKey,
+            SHA256.HashData(ownerRecord.CanonicalBundle));
+        return await successor.CreatePreparedIssueAsync(
+            holder, owner, ProductionMailboxIssuanceIntent.LocalOwner,
+            mailbox, new BlindedPlacementId(placement), selection,
+            promotionIdempotencyKey, BaseLimits(),
+            ownerRecord.CanonicalBundle, previous.RouteCertificate,
+            previous.RouteAdvertisement, ownerRecord.RouteStateKey,
+            promotionStateKey.ToArray(), cancellationToken);
+    }
+
+    private async ValueTask<ProductionMailboxCapacityPlanState>
+        EnsureCapacityReservationsAsync(
+            ReadOnlyMemory<byte> promotionStateKey,
+            bool release,
+            CancellationToken cancellationToken)
+    {
+        var plan = await state.GetCapacityPlanAsync(
+            promotionStateKey, cancellationToken)
+            ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion capacity plan is missing.");
+        if (!plan.Completed || plan.Targets.Count > options.MaximumCapacityPlanTargets)
+            throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion capacity plan is incomplete or outside bounds.");
+        var safeUntil = checked(Now()
+            + options.CapacityReservationRenewalMarginSeconds);
+        foreach (var targetState in plan.Targets)
+        {
+            if (!release && CapacityReceiptIsSafe(
+                    targetState, promotionStateKey.Span, safeUntil))
+                continue;
+            if (release && targetState.Released) continue;
+            var operation = release
+                ? ProductionMailboxCapacityOperation.Release
+                : ProductionMailboxCapacityOperation.ReserveOrRenew;
+            if (!ProductionMailboxCapacityRevisionPolicy.CanIssueSuccessor(
+                    targetState.Revision, operation))
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "Artifact promotion capacity revision is terminal.");
+            var target = new ProductionMailboxPrepositionTarget(
+                targetState.TargetReplicaId, targetState.Endpoint,
+                targetState.CurrentSpkiSha256, targetState.NextSpkiSha256);
+            var now = Now();
+            var expires = checked(now
+                + options.CapacityReservationLifetimeSeconds);
+            var candidateCommand = await ProductionMailboxCapacityCommandCodec.CreateAsync(
+                operation, now, expires, promotionStateKey, target,
+                release ? 0 : targetState.ReservedClosureCount,
+                release ? 0 : targetState.ReservedBytes,
+                checked(targetState.Revision + 1), closurePublisherPublicKey,
+                closurePublisherSigner, cancellationToken);
+            var command = await state.GetOrRecordCapacityAttemptAsync(
+                promotionStateKey, targetState.TargetReplicaId,
+                targetState.Revision, checked(targetState.Revision + 1),
+                candidateCommand, cancellationToken)
+                ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "The XNode capacity attempt conflicted with durable state.");
+            ProductionMailboxCapacityCommand durableCommand;
+            try
+            {
+                durableCommand = ProductionMailboxCapacityCommandCodec.DecodeAndVerify(
+                    command, closurePublisherPublicKey);
+            }
+            catch (InvalidDataException)
+            {
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "The durable XNode capacity attempt is invalid.");
+            }
+            if (durableCommand.Operation != operation
+                || durableCommand.Revision != targetState.Revision + 1
+                || !Fixed(durableCommand.CohortId, promotionStateKey.Span)
+                || !Fixed(durableCommand.TargetReplicaId,
+                    targetState.TargetReplicaId)
+                || !release && (durableCommand.ReservedClosureCount
+                        != targetState.ReservedClosureCount
+                    || durableCommand.ReservedBytes != targetState.ReservedBytes))
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "The durable XNode capacity attempt binding mismatched.");
+            var canonicalReceipt = await closureTransport.ReserveCapacityAsync(
+                target, command, cancellationToken);
+            if (canonicalReceipt is null && release)
+            {
+                if (targetState.CanonicalReceipt is null
+                    || targetState.LastCommandSha256 is null)
+                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "The XNode capacity reconciliation predecessor is unavailable.");
+                var reconcileNow = Now();
+                var reconcileCommand = await
+                    ProductionMailboxCapacityReconciliationCommandCodec.CreateAsync(
+                        reconcileNow,
+                        checked(reconcileNow
+                            + Math.Min(300U,
+                                options.CapacityReservationLifetimeSeconds)),
+                        promotionStateKey, target, targetState.Revision,
+                        targetState.CanonicalReceipt, closurePublisherPublicKey,
+                        closurePublisherSigner, cancellationToken);
+                var canonicalReconciliationReceipt = await
+                    closureTransport.ReconcileCapacityAsync(
+                        target, reconcileCommand, cancellationToken)
+                    ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "A required XNode capacity reconciliation receipt is unavailable.");
+                ProductionMailboxCapacityReconciliationReceipt reconciliationReceipt;
+                ProductionMailboxCapacityReconciliationCommand durableReconciliation;
+                try
+                {
+                    durableReconciliation =
+                        ProductionMailboxCapacityReconciliationCommandCodec.DecodeAndVerify(
+                            reconcileCommand, closurePublisherPublicKey);
+                    reconciliationReceipt =
+                        ProductionMailboxCapacityReconciliationReceiptCodec.DecodeAndVerify(
+                            canonicalReconciliationReceipt, targetState.TargetReplicaId);
+                }
+                catch (InvalidDataException)
+                {
+                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "A required XNode capacity reconciliation receipt is invalid.");
+                }
+                var reconciliationNow = Now();
+                var earliestReconciliationTimestamp =
+                    durableReconciliation.TimestampUnixSeconds > options.ClockSkewSeconds
+                        ? durableReconciliation.TimestampUnixSeconds
+                            - options.ClockSkewSeconds
+                        : 0;
+                var latestReconciliationTimestamp =
+                    ulong.MaxValue - reconciliationNow < options.ClockSkewSeconds
+                        ? ulong.MaxValue
+                        : reconciliationNow + options.ClockSkewSeconds;
+                if (reconciliationReceipt.Status
+                        != ProductionMailboxCapacityReconciliationStatus.AbsentTerminal
+                    || reconciliationReceipt.TimestampUnixSeconds
+                        < earliestReconciliationTimestamp
+                    || reconciliationReceipt.TimestampUnixSeconds
+                        >= durableReconciliation.ExpiresAtUnixSeconds
+                    || reconciliationReceipt.TimestampUnixSeconds
+                        > latestReconciliationTimestamp
+                    || reconciliationReceipt.ExpiresAtUnixSeconds
+                        != durableReconciliation.ExpiresAtUnixSeconds
+                    || reconciliationReceipt.LastKnownRevision != targetState.Revision
+                    || !Fixed(reconciliationReceipt.CohortId,
+                        promotionStateKey.Span)
+                    || !Fixed(reconciliationReceipt.TargetReplicaId,
+                        targetState.TargetReplicaId)
+                    || !Fixed(reconciliationReceipt.LastReceiptSha256,
+                        SHA256.HashData(targetState.CanonicalReceipt))
+                    || !Fixed(reconciliationReceipt.LastCommandSha256,
+                        targetState.LastCommandSha256))
+                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "A required XNode capacity reconciliation receipt binding mismatched.");
+                if (!await state.RecordCapacityReconciliationReceiptAsync(
+                        promotionStateKey, targetState.TargetReplicaId,
+                        targetState.Revision, command, reconciliationReceipt,
+                        canonicalReconciliationReceipt, cancellationToken))
+                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "The XNode capacity reconciliation receipt conflicted with durable state.");
+                continue;
+            }
+            if (canonicalReceipt is null)
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "A required XNode capacity receipt is unavailable.");
+            ProductionMailboxCapacityReceipt receipt;
+            try
+            {
+                receipt = ProductionMailboxCapacityReceiptCodec.DecodeAndVerify(
+                    canonicalReceipt, targetState.TargetReplicaId);
+            }
+            catch (InvalidDataException)
+            {
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "A required XNode capacity receipt is invalid.");
+            }
+            var commandHash = SHA256.HashData(command);
+            var receiptNow = Now();
+            var earliestReceiptTimestamp =
+                durableCommand.TimestampUnixSeconds > options.ClockSkewSeconds
+                    ? durableCommand.TimestampUnixSeconds - options.ClockSkewSeconds
+                    : 0;
+            var latestReceiptTimestamp =
+                ulong.MaxValue - receiptNow < options.ClockSkewSeconds
+                    ? ulong.MaxValue
+                    : receiptNow + options.ClockSkewSeconds;
+            if (receipt.Operation != operation
+                || receipt.TimestampUnixSeconds < earliestReceiptTimestamp
+                || receipt.TimestampUnixSeconds >= durableCommand.ExpiresAtUnixSeconds
+                || receipt.TimestampUnixSeconds > latestReceiptTimestamp
+                || receipt.ExpiresAtUnixSeconds
+                    != durableCommand.ExpiresAtUnixSeconds
+                || receipt.Revision != targetState.Revision + 1
+                || !Fixed(receipt.CohortId, promotionStateKey.Span)
+                || !Fixed(receipt.TargetReplicaId, targetState.TargetReplicaId)
+                || !Fixed(receipt.CommandSha256, commandHash)
+                || !release && (receipt.ReservedClosureCount
+                        != targetState.ReservedClosureCount
+                    || receipt.ReservedBytes != targetState.ReservedBytes))
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "A required XNode capacity receipt binding mismatched.");
+            if (!await state.RecordCapacityReceiptAsync(
+                    promotionStateKey, targetState.TargetReplicaId,
+                    targetState.Revision, receipt, canonicalReceipt,
+                    cancellationToken))
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "The XNode capacity receipt conflicted with durable state.");
+        }
+        plan = await state.GetCapacityPlanAsync(promotionStateKey, cancellationToken)
+            ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion capacity plan disappeared.");
+        var finalSafeUntil = checked(Now()
+            + options.CapacityReservationRenewalMarginSeconds);
+        if ((!release && plan.Targets.Any(target =>
+                    !CapacityReceiptIsSafe(
+                        target, promotionStateKey.Span, finalSafeUntil)))
+            || release && plan.Targets.Any(static target => !target.Released))
+            throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion capacity receipt barrier is incomplete.");
+        return plan;
+    }
+
+    private static bool CapacityReceiptIsSafe(
+        ProductionMailboxCapacityTargetState target,
+        ReadOnlySpan<byte> expectedCohortId,
+        ulong safeUntil)
+    {
+        if (target.Released || target.CanonicalReceipt is null
+            || target.LastCommandSha256 is null
+            || target.PendingCanonicalCommand is not null
+            || target.PendingRevision is not null
+            || target.ReceiptExpiresAtUnixSeconds is null
+            || target.ReceiptExpiresAtUnixSeconds.Value < safeUntil)
+            return false;
+        try
+        {
+            var receipt = ProductionMailboxCapacityReceiptCodec.DecodeAndVerify(
+                target.CanonicalReceipt, target.TargetReplicaId);
+            return receipt.Operation
+                    == ProductionMailboxCapacityOperation.ReserveOrRenew
+                && receipt.Revision == target.Revision
+                && receipt.ReservedClosureCount == target.ReservedClosureCount
+                && receipt.ReservedBytes == target.ReservedBytes
+                && receipt.ExpiresAtUnixSeconds
+                    == target.ReceiptExpiresAtUnixSeconds.Value
+                && Fixed(receipt.CohortId, expectedCohortId)
+                && Fixed(receipt.CommandSha256, target.LastCommandSha256);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+    }
+
     internal async ValueTask<ProductionMailboxArtifacts> PromoteArtifactsAsync(
         ProductionMailboxArtifactProvider provider,
         ProductionMailboxArtifacts replacement,
@@ -685,18 +972,30 @@ public sealed class ProductionMailboxCoordinator
         if (activePromotion is not null
             && Fixed(activePromotion.NewArtifactClosureHash, oldClosureHash))
         {
-            if (!activePromotion.SweepCompleted
-                || !await state.MarkArtifactPromotionPublishedAsync(
+            if (!activePromotion.SweepCompleted)
+                throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "Active artifact promotion cutover could not be reconciled.");
+            if (!activePromotion.Published
+                && !await state.MarkArtifactPromotionPublishedAsync(
                     activePromotion.PromotionStateKey, cancellationToken))
                 throw Error(ProductionMailboxIssueError.IssuerUnavailable,
                     "Active artifact promotion cutover could not be reconciled.");
+            if (!activePromotion.CapacityReleaseCompleted)
+            {
+                _ = await EnsureCapacityReservationsAsync(
+                    activePromotion.PromotionStateKey, true, cancellationToken);
+                if (!await state.MarkArtifactPromotionCapacityReleasedAsync(
+                        activePromotion.PromotionStateKey, cancellationToken))
+                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "Artifact promotion capacity release marker was not committed.");
+            }
             return provider.Current;
         }
+        var replacementClosureHash = ArtifactClosureHash(replacement);
+        if (Fixed(oldClosureHash, replacementClosureHash)) return provider.Current;
         if (!Fixed(oldClosureHash, ArtifactClosureHash()))
             throw Error(ProductionMailboxIssueError.IssuerUnavailable,
                 "Artifact promotion coordinator snapshot is stale.");
-        var replacementClosureHash = ArtifactClosureHash(replacement);
-        if (Fixed(oldClosureHash, replacementClosureHash)) return provider.Current;
         if (activePromotion is not null
             && (!Fixed(activePromotion.OldArtifactClosureHash, oldClosureHash)
                 || !Fixed(activePromotion.NewArtifactClosureHash,
@@ -723,6 +1022,45 @@ public sealed class ProductionMailboxCoordinator
             return provider.Current;
         }
 
+        var capacityPlan = await state.GetCapacityPlanAsync(
+            promotionStateKey, cancellationToken)
+            ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion capacity plan is missing.");
+        while (!capacityPlan.Completed)
+        {
+            var planningOwners = await state.ListOwnerBundlesForCapacityPlanningAsync(
+                promotionStateKey, 64, cancellationToken);
+            if (planningOwners.Count == 0)
+            {
+                if (!await state.CompleteCapacityPlanAsync(
+                        promotionStateKey, cancellationToken))
+                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                        "Artifact promotion capacity plan could not be completed.");
+            }
+            else
+            {
+                foreach (var ownerRecord in planningOwners)
+                {
+                    var prepared = await PreparePromotedOwnerAsync(
+                        successor, promotionStateKey, ownerRecord,
+                        cancellationToken);
+                    if (!await state.CommitCapacityPlannedOwnerAsync(
+                            promotionStateKey, ownerRecord,
+                            prepared.PublicationItems,
+                            options.ClosureScheduleAccountingOverheadBytes,
+                            cancellationToken))
+                        throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                            "Artifact promotion capacity planning conflicted.");
+                }
+            }
+            capacityPlan = await state.GetCapacityPlanAsync(
+                    promotionStateKey, cancellationToken)
+                ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "Artifact promotion capacity plan disappeared.");
+        }
+        _ = await EnsureCapacityReservationsAsync(
+            promotionStateKey, false, cancellationToken);
+
         while (!promotion.SweepCompleted)
         {
             var owners = await state.ListOwnerBundlesForPromotionAsync(
@@ -730,44 +1068,13 @@ public sealed class ProductionMailboxCoordinator
             if (owners.Count == 0) break;
             foreach (var ownerRecord in owners)
             {
-                var previous = JsonSerializer.Deserialize<ProductionMailboxCredentialBundle>(
-                    ownerRecord.CanonicalBundle, JsonOptions)
-                    ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
-                        "Durable owner bundle is invalid during artifact promotion.");
-                if (previous.Intent != ProductionMailboxIssuanceIntent.LocalOwner
-                    || previous.RouteCertificate is null
-                    || previous.RouteAdvertisement is null)
-                    throw Error(ProductionMailboxIssueError.IssuerUnavailable,
-                        "Artifact promotion cohort contains a non-owner or unbound route.");
-                var holder = Decode(previous.HolderEd25519PublicKey, 32,
-                    "promoted holder key");
-                var owner = Decode(previous.MailboxOwnerEd25519PublicKey, 32,
-                    "promoted owner key");
-                var mailbox = Decode(previous.BlindedMailboxId, 32,
-                    "promoted mailbox ID");
-                var placement = Decode(previous.BlindedPlacementId, 32,
-                    "promoted placement ID");
-                var selection = Decode(previous.SelectionInputCommitment, 32,
-                    "promoted selection commitment");
-                var routeStateKey = StateHmac(
-                    "Deep/production-mailbox/owner-route-state/v1", owner,
-                    mailbox, placement, selection);
-                RequireFixed(routeStateKey, ownerRecord.RouteStateKey,
-                    ProductionMailboxIssueError.IssuerUnavailable,
-                    "Artifact promotion owner route state binding mismatched.");
-                var promotionIdempotencyKey = StateHmac(
-                    "Deep/production-mailbox/artifact-promotion-issuance/v1",
-                    promotionStateKey, ownerRecord.RouteStateKey,
-                    SHA256.HashData(ownerRecord.CanonicalBundle));
-                var prepared = await successor.CreatePreparedIssueAsync(
-                    holder, owner, ProductionMailboxIssuanceIntent.LocalOwner,
-                    mailbox, new BlindedPlacementId(placement), selection,
-                    promotionIdempotencyKey, BaseLimits(),
-                    ownerRecord.CanonicalBundle, previous.RouteCertificate,
-                    previous.RouteAdvertisement, ownerRecord.RouteStateKey,
-                    cancellationToken);
+                var prepared = await PreparePromotedOwnerAsync(
+                    successor, promotionStateKey, ownerRecord, cancellationToken);
+                _ = await EnsureCapacityReservationsAsync(
+                    promotionStateKey, false, cancellationToken);
                 if (!await state.CommitPromotedOwnerAsync(
                         promotionStateKey, ownerRecord, prepared, successor.Now(),
+                        options.CapacityReservationRenewalMarginSeconds,
                         cancellationToken))
                     throw Error(ProductionMailboxIssueError.IssuerUnavailable,
                         "Artifact promotion owner transaction conflicted.");
@@ -798,6 +1105,12 @@ public sealed class ProductionMailboxCoordinator
                 promotionStateKey, cancellationToken))
             throw Error(ProductionMailboxIssueError.IssuerUnavailable,
                 "Artifact promotion publication marker was not committed.");
+        _ = await EnsureCapacityReservationsAsync(
+            promotionStateKey, true, cancellationToken);
+        if (!await state.MarkArtifactPromotionCapacityReleasedAsync(
+                promotionStateKey, cancellationToken))
+            throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                "Artifact promotion capacity release marker was not committed.");
         return replacement;
     }
 
@@ -1417,6 +1730,12 @@ public sealed class ProductionMailboxCoordinator
             options.ExternalSignerTimeoutSeconds is 0 or > 30 ||
             options.ClosurePublisherSignerTimeoutSeconds is 0 or > 30 ||
             options.MaximumRetainedArtifactClosures is < 1 or > 64 ||
+            options.CapacityReservationLifetimeSeconds is < 600 or > 86_400 ||
+            options.CapacityReservationRenewalMarginSeconds is 0 or > 3600 ||
+            options.CapacityReservationRenewalMarginSeconds
+                >= options.CapacityReservationLifetimeSeconds ||
+            options.ClosureScheduleAccountingOverheadBytes is < 256 or > 65_536 ||
+            options.MaximumCapacityPlanTargets is < 1 or > 4096 ||
             options.ProofOfWorkLeadingZeroBits is < 8 or > 22 ||
             options.MaximumChallengesPerWindow is < 1 or > 1_000_000 ||
             options.ChallengeWindowSeconds is 0 or > 3600)

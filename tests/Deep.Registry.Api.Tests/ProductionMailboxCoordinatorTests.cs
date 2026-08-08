@@ -1,3 +1,5 @@
+extern alias xnode;
+
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,6 +17,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
+using Npgsql;
 using Sodium;
 
 namespace Deep.Registry.Api.Tests;
@@ -523,7 +526,8 @@ public sealed class ProductionMailboxCoordinatorTests
         var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
         if (string.IsNullOrWhiteSpace(connectionString)) return;
 
-        var state = new PostgreSqlProductionMailboxStateStore(connectionString);
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
         var prefix = RandomNumberGenerator.GetBytes(16);
         byte[] Key(byte suffix) => SHA256.HashData([.. prefix, suffix]);
         const ulong firstNow = 1_000_000;
@@ -662,6 +666,285 @@ public sealed class ProductionMailboxCoordinatorTests
             CancellationToken.None);
         Assert.Equal(ProductionMailboxIssueCommitStatus.AdvertisementConflict,
             routeFork.Status);
+    }
+
+    [Fact]
+    public async Task PostgreSqlCapacityPlan_PersistsExactAttemptReceiptAndAtomicBarrier()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+        var prefix = RandomNumberGenerator.GetBytes(16);
+        byte[] Key(byte suffix) => SHA256.HashData([.. prefix, suffix]);
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var routeKey = Key(1);
+        await state.StoreLatestOwnerBundleAsync(
+            routeKey, Key(2), now, CancellationToken.None);
+        var promotionKey = Key(3);
+        _ = await state.BeginArtifactPromotionAsync(
+            promotionKey, Key(4), Key(5), CancellationToken.None);
+        var owner = Assert.Single(await state.ListOwnerBundlesForCapacityPlanningAsync(
+            promotionKey, 8, CancellationToken.None));
+        var node = PublicKeyAuth.GenerateKeyPair(Key(6));
+        var envelope = Fixture.Bytes(0xA7, 80);
+        var item = new ProductionMailboxPublicationItem(
+            Key(7), node.PublicKey, "https://pg-capacity.example/", Key(8), Key(9),
+            [], envelope, SHA256.HashData(envelope), promotionKey);
+        Assert.True(await state.CommitCapacityPlannedOwnerAsync(
+            promotionKey, owner, [item], 1024, CancellationToken.None));
+        Assert.True(await state.CompleteCapacityPlanAsync(
+            promotionKey, CancellationToken.None));
+        var target = Assert.Single((await state.GetCapacityPlanAsync(
+            promotionKey, CancellationToken.None))!.Targets);
+        var command = Fixture.Bytes(0xAA,
+            ProductionMailboxCapacityCommandCodec.EncodedLength);
+        Assert.Equal(command, await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 0, 1, command,
+            CancellationToken.None));
+        Assert.Equal(command, await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 0, 1,
+            Fixture.Bytes(0xAB, command.Length), CancellationToken.None));
+        var unsigned = new ProductionMailboxCapacityReceipt(
+            ProductionMailboxCapacityOperation.ReserveOrRenew,
+            now, now + 1_000, promotionKey, target.TargetReplicaId,
+            target.ReservedClosureCount, target.ReservedBytes, 0, 0, 1,
+            SHA256.HashData(command), new byte[64]);
+        var receipt = unsigned with
+        {
+            NodeSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxCapacityReceiptCodec.GetSigningBytes(unsigned),
+                node.PrivateKey)
+        };
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 0, receipt,
+            ProductionMailboxCapacityReceiptCodec.Encode(receipt),
+            CancellationToken.None));
+        var prepared = new ProductionMailboxPreparedIssue(
+            Key(10), routeKey, Key(11), [item]);
+        Assert.True(await state.CommitPromotedOwnerAsync(
+            promotionKey, owner, prepared, now, 300, CancellationToken.None));
+        var durable = await state.GetCapacityPlanAsync(
+            promotionKey, CancellationToken.None);
+        Assert.Equal(1UL, Assert.Single(durable!.Targets).Revision);
+        Assert.Null(Assert.Single(durable.Targets).PendingCanonicalCommand);
+
+        var attemptHash = Key(12);
+        Assert.True(await state.RecordPublicationAttemptAsync(
+            prepared.PublicationStateKey, item.TargetStateKey,
+            item.EnvelopeSha256, attemptHash, now, CancellationToken.None));
+        Assert.True(await state.AcknowledgePublicationAsync(
+            prepared.PublicationStateKey, item.TargetStateKey,
+            item.EnvelopeSha256, attemptHash, CancellationToken.None));
+        Assert.True(await state.CompleteArtifactPromotionSweepAsync(
+            promotionKey, CancellationToken.None));
+        Assert.True(await state.MarkArtifactPromotionPublishedAsync(
+            promotionKey, CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            state.BeginArtifactPromotionAsync(
+                Key(13), Key(5), Key(14), CancellationToken.None).AsTask());
+
+        var releaseCommand = Fixture.Bytes(0xAC,
+            ProductionMailboxCapacityCommandCodec.EncodedLength);
+        Assert.Equal(releaseCommand, await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 1, 2, releaseCommand,
+            CancellationToken.None));
+        var unsignedRelease = new ProductionMailboxCapacityReceipt(
+            ProductionMailboxCapacityOperation.Release,
+            now, now + 1_000, promotionKey, target.TargetReplicaId,
+            0, 0, 0, 0, 2, SHA256.HashData(releaseCommand), new byte[64]);
+        var release = unsignedRelease with
+        {
+            NodeSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxCapacityReceiptCodec.GetSigningBytes(unsignedRelease),
+                node.PrivateKey)
+        };
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 1, release,
+            ProductionMailboxCapacityReceiptCodec.Encode(release),
+            CancellationToken.None));
+        Assert.True(await state.MarkArtifactPromotionCapacityReleasedAsync(
+            promotionKey, CancellationToken.None));
+        var nextPromotion = await state.BeginArtifactPromotionAsync(
+            Key(13), Key(5), Key(14), CancellationToken.None);
+        Assert.False(nextPromotion.Published);
+    }
+
+    [Fact]
+    public async Task PostgreSqlPromotionCommit_RechecksCapacityAtFinalCursorBoundary()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString)
+        {
+            CommitPromotedOwnerDelayBeforeFinalCapacityCheck =
+                TimeSpan.FromMilliseconds(2_100)
+        };
+        var prefix = RandomNumberGenerator.GetBytes(16);
+        byte[] Key(byte suffix) => SHA256.HashData([.. prefix, suffix]);
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var routeKey = Key(1);
+        var originalBundle = Key(2);
+        await state.StoreLatestOwnerBundleAsync(
+            routeKey, originalBundle, now, CancellationToken.None);
+        var promotionKey = Key(3);
+        _ = await state.BeginArtifactPromotionAsync(
+            promotionKey, Key(4), Key(5), CancellationToken.None);
+        var owner = Assert.Single(await state.ListOwnerBundlesForCapacityPlanningAsync(
+            promotionKey, 8, CancellationToken.None));
+        var node = PublicKeyAuth.GenerateKeyPair(Key(6));
+        var envelope = Fixture.Bytes(0xB7, 80);
+        var item = new ProductionMailboxPublicationItem(
+            Key(7), node.PublicKey, "https://pg-capacity-delay.example/",
+            Key(8), Key(9), [], envelope, SHA256.HashData(envelope), promotionKey);
+        Assert.True(await state.CommitCapacityPlannedOwnerAsync(
+            promotionKey, owner, [item], 1024, CancellationToken.None));
+        Assert.True(await state.CompleteCapacityPlanAsync(
+            promotionKey, CancellationToken.None));
+        var target = Assert.Single((await state.GetCapacityPlanAsync(
+            promotionKey, CancellationToken.None))!.Targets);
+        var command = Fixture.Bytes(0xBA,
+            ProductionMailboxCapacityCommandCodec.EncodedLength);
+        Assert.Equal(command, await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 0, 1, command,
+            CancellationToken.None));
+        var unsigned = new ProductionMailboxCapacityReceipt(
+            ProductionMailboxCapacityOperation.ReserveOrRenew,
+            now, now + 5, promotionKey, target.TargetReplicaId,
+            target.ReservedClosureCount, target.ReservedBytes, 0, 0, 1,
+            SHA256.HashData(command), new byte[64]);
+        var receipt = unsigned with
+        {
+            NodeSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxCapacityReceiptCodec.GetSigningBytes(unsigned),
+                node.PrivateKey)
+        };
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 0, receipt,
+            ProductionMailboxCapacityReceiptCodec.Encode(receipt),
+            CancellationToken.None));
+        var prepared = new ProductionMailboxPreparedIssue(
+            Key(10), routeKey, Key(11), [item]);
+
+        Assert.False(await state.CommitPromotedOwnerAsync(
+            promotionKey, owner, prepared, now, 4, CancellationToken.None));
+
+        var pendingOwner = Assert.Single(await state.ListOwnerBundlesForPromotionAsync(
+            promotionKey, 8, CancellationToken.None));
+        Assert.Equal(originalBundle, pendingOwner.CanonicalBundle);
+        Assert.Null(await state.GetPublicationAsync(
+            prepared.PublicationStateKey, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PostgreSqlCapacityRevisionCap_LeavesExactTerminalReleaseSlot()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+        var prefix = RandomNumberGenerator.GetBytes(16);
+        byte[] Key(byte suffix) => SHA256.HashData([.. prefix, suffix]);
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var routeKey = Key(1);
+        await state.StoreLatestOwnerBundleAsync(
+            routeKey, Key(2), now, CancellationToken.None);
+        var promotionKey = Key(3);
+        _ = await state.BeginArtifactPromotionAsync(
+            promotionKey, Key(4), Key(5), CancellationToken.None);
+        var owner = Assert.Single(await state.ListOwnerBundlesForCapacityPlanningAsync(
+            promotionKey, 8, CancellationToken.None));
+        var node = PublicKeyAuth.GenerateKeyPair(Key(6));
+        var envelope = Fixture.Bytes(0xC1, 80);
+        var item = new ProductionMailboxPublicationItem(
+            Key(7), node.PublicKey, "https://pg-capacity-max.example/",
+            Key(8), Key(9), [], envelope, SHA256.HashData(envelope), promotionKey);
+        Assert.True(await state.CommitCapacityPlannedOwnerAsync(
+            promotionKey, owner, [item], 1024, CancellationToken.None));
+        Assert.True(await state.CompleteCapacityPlanAsync(
+            promotionKey, CancellationToken.None));
+        await using (var connection = new NpgsqlConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(
+                "UPDATE production_mailbox_capacity_targets SET revision=@revision WHERE promotion_state_key=@key",
+                connection);
+            command.Parameters.AddWithValue("revision", long.MaxValue - 1);
+            command.Parameters.AddWithValue("key", promotionKey);
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+        var target = Assert.Single((await state.GetCapacityPlanAsync(
+            promotionKey, CancellationToken.None))!.Targets);
+        var terminalRevision = (ulong)long.MaxValue;
+        var releaseCommand = Fixture.Bytes(0xC2,
+            ProductionMailboxCapacityCommandCodec.EncodedLength);
+        Assert.Equal(releaseCommand, await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, terminalRevision - 1,
+            terminalRevision, releaseCommand, CancellationToken.None));
+
+        ProductionMailboxCapacityReceipt Receipt(
+            ProductionMailboxCapacityOperation operation)
+        {
+            var unsigned = new ProductionMailboxCapacityReceipt(
+                operation, now, now + 1_000, promotionKey,
+                target.TargetReplicaId,
+                operation == ProductionMailboxCapacityOperation.Release
+                    ? 0 : target.ReservedClosureCount,
+                operation == ProductionMailboxCapacityOperation.Release
+                    ? 0 : target.ReservedBytes,
+                0, 0, terminalRevision, SHA256.HashData(releaseCommand),
+                new byte[64]);
+            return unsigned with
+            {
+                NodeSignature = PublicKeyAuth.SignDetached(
+                    ProductionMailboxCapacityReceiptCodec.GetSigningBytes(unsigned),
+                    node.PrivateKey)
+            };
+        }
+
+        var nonterminal = Receipt(ProductionMailboxCapacityOperation.ReserveOrRenew);
+        Assert.False(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, terminalRevision - 1,
+            nonterminal, ProductionMailboxCapacityReceiptCodec.Encode(nonterminal),
+            CancellationToken.None));
+        var release = Receipt(ProductionMailboxCapacityOperation.Release);
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, terminalRevision - 1,
+            release, ProductionMailboxCapacityReceiptCodec.Encode(release),
+            CancellationToken.None));
+        Assert.Null(await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, terminalRevision,
+            terminalRevision + 1, Fixture.Bytes(0xC3,
+                ProductionMailboxCapacityCommandCodec.EncodedLength),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public void CapacityRevisionPolicy_ReservesTerminalSlotForRelease()
+    {
+        var maximum = ProductionMailboxCapacityRevisionPolicy.MaximumStoredRevision;
+        Assert.True(ProductionMailboxCapacityRevisionPolicy.CanIssueSuccessor(
+            maximum - 2, ProductionMailboxCapacityOperation.ReserveOrRenew));
+        Assert.False(ProductionMailboxCapacityRevisionPolicy.CanIssueSuccessor(
+            maximum - 1, ProductionMailboxCapacityOperation.ReserveOrRenew));
+        Assert.True(ProductionMailboxCapacityRevisionPolicy.CanIssueSuccessor(
+            maximum - 1, ProductionMailboxCapacityOperation.Release));
+        Assert.False(ProductionMailboxCapacityRevisionPolicy.CanIssueSuccessor(
+            maximum, ProductionMailboxCapacityOperation.Release));
+
+        ProductionMailboxCapacityReceipt Receipt(
+            ProductionMailboxCapacityOperation operation, ulong revision) => new(
+                operation, 1, 2, Fixture.Bytes(1, 32), Fixture.Bytes(2, 32),
+                0, 0, 0, 0, revision, Fixture.Bytes(3, 32), new byte[64]);
+        Assert.True(ProductionMailboxCapacityRevisionPolicy.IsStorableReceipt(
+            Receipt(ProductionMailboxCapacityOperation.ReserveOrRenew, maximum - 1)));
+        Assert.False(ProductionMailboxCapacityRevisionPolicy.IsStorableReceipt(
+            Receipt(ProductionMailboxCapacityOperation.ReserveOrRenew, maximum)));
+        Assert.True(ProductionMailboxCapacityRevisionPolicy.IsStorableReceipt(
+            Receipt(ProductionMailboxCapacityOperation.Release, maximum)));
+        Assert.False(ProductionMailboxCapacityRevisionPolicy.IsStorableReceipt(
+            Receipt(ProductionMailboxCapacityOperation.Release, maximum + 1)));
     }
 
     [Fact]
@@ -979,6 +1262,350 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     [Fact]
+    public async Task Promotion_ReservesEveryTargetBeforeFirstOwnerAndReleasesUnusedCapacity()
+    {
+        using var first = Fixture.Create();
+        first.Options.ClockSkewSeconds = 60;
+        var state = new InMemoryProductionMailboxStateStore(first.TimeProvider);
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new AcceptingClosureTransport
+        {
+            ReceiptTimestampOffsetSeconds = 1
+        };
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        _ = await coordinator.PromoteArtifactsAsync(
+            provider, second.Artifacts, CancellationToken.None);
+
+        var firstPmp = transport.Events.IndexOf("PMP");
+        Assert.True(firstPmp > 0);
+        Assert.All(transport.Events.Take(firstPmp),
+            static value => Assert.Equal("RESERVE", value));
+        var reserves = transport.CapacityCommands.Where(command =>
+            command[5] == (byte)ProductionMailboxCapacityOperation.ReserveOrRenew)
+            .ToArray();
+        var releases = transport.CapacityCommands.Where(command =>
+            command[5] == (byte)ProductionMailboxCapacityOperation.Release)
+            .ToArray();
+        Assert.Equal(firstPmp, reserves.Length);
+        Assert.Equal(reserves.Length, releases.Length);
+        var cohort = reserves[0].AsSpan(56, 32).ToArray();
+        Assert.True(cohort.AsSpan().IndexOfAnyExcept((byte)0) >= 0);
+        Assert.All(reserves, command =>
+        {
+            Assert.Equal(cohort, command.AsSpan(56, 32).ToArray());
+            Assert.Equal(1UL, BinaryPrimitives.ReadUInt64BigEndian(command.AsSpan(132)));
+        });
+        Assert.All(releases, command =>
+        {
+            Assert.Equal(cohort, command.AsSpan(56, 32).ToArray());
+            Assert.Equal(2UL, BinaryPrimitives.ReadUInt64BigEndian(command.AsSpan(132)));
+        });
+        var plan = await state.GetCapacityPlanAsync(
+            cohort, CancellationToken.None);
+        Assert.NotNull(plan);
+        Assert.True(plan.Completed);
+        Assert.All(plan.Targets, static target => Assert.True(target.Released));
+        var commandCount = transport.CapacityCommands.Count;
+
+        var replay = await coordinator.PromoteArtifactsAsync(
+            provider, second.Artifacts, CancellationToken.None);
+
+        Assert.Equal(second.Artifacts.AuthoritySha256, replay.AuthoritySha256);
+        Assert.Equal(commandCount, transport.CapacityCommands.Count);
+    }
+
+    [Fact]
+    public async Task Promotion_CompletesNodeSignedReleaseAfterReservationAutoExpiry()
+    {
+        using var first = Fixture.Create();
+        first.Options.CapacityReservationLifetimeSeconds = 600;
+        first.Options.CapacityReservationRenewalMarginSeconds = 30;
+        var state = new InMemoryProductionMailboxStateStore(first.TimeProvider)
+        {
+            AfterPromotionPublishedForTests = () =>
+                first.TimeProvider.Set(Fixture.Now + 601)
+        };
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new AcceptingClosureTransport();
+        transport.ForceReconciliationForRelease = true;
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        _ = await coordinator.PromoteArtifactsAsync(
+            provider, second.Artifacts, CancellationToken.None);
+
+        var reserves = transport.CapacityCommands.Where(command =>
+            command[5] == (byte)ProductionMailboxCapacityOperation.ReserveOrRenew)
+            .ToArray();
+        var releases = transport.CapacityCommands.Where(command =>
+            command[5] == (byte)ProductionMailboxCapacityOperation.Release)
+            .ToArray();
+        Assert.Equal(3, reserves.Length);
+        Assert.Equal(3, releases.Length);
+        Assert.Equal(3, transport.ReconciliationCommands.Count);
+        var reserveExpiry = reserves.Max(command =>
+            BinaryPrimitives.ReadUInt64BigEndian(command.AsSpan(16)));
+        Assert.All(releases, command => Assert.True(
+            BinaryPrimitives.ReadUInt64BigEndian(command.AsSpan(8))
+                > reserveExpiry));
+        Assert.Null(await state.GetActiveArtifactPromotionAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PostgreSqlPromotion_ReconcilesRealXNodeAfterRetentionAndBothRestart()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        using var first = Fixture.Create();
+        first.Options.ClockSkewSeconds = 0;
+        first.Options.CapacityReservationLifetimeSeconds = 600;
+        first.Options.CapacityReservationRenewalMarginSeconds = 30;
+        var state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        using var transport = new RealXNodeClosureTransport(
+            first.Options.ClosurePublisherEd25519PublicKey,
+            first.Options.ExpectedNetworkId,
+            first.Options.PinnedMrXPublicKeySha256,
+            first.TimeProvider,
+            maximumReservationLifetimeSeconds: 600)
+        {
+            DropReleaseAndReconciliation = true
+        };
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        var interrupted = await Assert.ThrowsAsync<ProductionMailboxIssueException>(async () =>
+            await coordinator.PromoteArtifactsAsync(
+                provider, second.Artifacts, CancellationToken.None));
+        var active = await state.GetActiveArtifactPromotionAsync(CancellationToken.None);
+        Assert.NotNull(active);
+        Assert.True(active.Published,
+            interrupted.Message + Environment.NewLine + transport.LastFailure);
+        Assert.False(active.CapacityReleaseCompleted);
+
+        first.TimeProvider.Set(Fixture.Now + 1_261);
+        transport.DropReleaseAndReconciliation = false;
+        transport.Restart();
+        var restartedState = new PostgreSqlProductionMailboxStateStore(
+            database.ConnectionString);
+        var restartedCoordinator = first.Coordinator(
+            restartedState, secondSigner, transport);
+
+        var resumeError = await Record.ExceptionAsync(async () =>
+            _ = await restartedCoordinator.PromoteArtifactsAsync(
+                provider, second.Artifacts, CancellationToken.None));
+        if (resumeError is not null)
+            throw new Xunit.Sdk.XunitException(
+                resumeError + Environment.NewLine + transport.LastFailure);
+
+        Assert.True(transport.ReconciliationCount > 0);
+        Assert.Null(await restartedState.GetActiveArtifactPromotionAsync(
+            CancellationToken.None));
+        var publishedClosure = await restartedState
+            .GetOrInitializePublishedArtifactClosureAsync(
+                Fixture.Bytes(243, 32), CancellationToken.None);
+        var next = await restartedState.BeginArtifactPromotionAsync(
+            Fixture.Bytes(242, 32), publishedClosure, Fixture.Bytes(244, 32),
+            CancellationToken.None);
+        Assert.False(next.Published);
+    }
+
+    [Theory]
+    [InlineData(-61)]
+    [InlineData(61)]
+    public async Task Promotion_RejectsCapacityReceiptTimestampOutsideClockWindow(
+        long receiptTimestampOffsetSeconds)
+    {
+        using var first = Fixture.Create();
+        first.Options.ClockSkewSeconds = 60;
+        var state = new InMemoryProductionMailboxStateStore(first.TimeProvider);
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new AcceptingClosureTransport
+        {
+            ReceiptTimestampOffsetSeconds = receiptTimestampOffsetSeconds
+        };
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        var error = await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+            coordinator.PromoteArtifactsAsync(provider, second.Artifacts,
+                CancellationToken.None).AsTask());
+
+        Assert.Equal(ProductionMailboxIssueError.IssuerUnavailable, error.Error);
+        Assert.Empty(transport.Received);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Promotion_ResumesTerminalReleaseAfterLostResponseWithoutReserve(
+        int failReleaseOrdinal)
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore(first.TimeProvider);
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new AcceptingClosureTransport
+        {
+            FailReleaseOrdinalOnce = failReleaseOrdinal
+        };
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+            coordinator.PromoteArtifactsAsync(provider, second.Artifacts,
+                CancellationToken.None).AsTask());
+
+        Assert.Equal(second.Artifacts.AuthoritySha256,
+            provider.Current.AuthoritySha256);
+        var active = await state.GetActiveArtifactPromotionAsync(CancellationToken.None);
+        Assert.NotNull(active);
+        Assert.True(active.Published);
+        Assert.False(active.CapacityReleaseCompleted);
+        var firstReleaseEvent = transport.Events.IndexOf("RELEASE");
+        Assert.True(firstReleaseEvent >= 0);
+        var failedCommand = transport.CapacityCommands.Last().ToArray();
+
+        var restartedProvider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        var restartedCoordinator = first.Coordinator(
+            state, secondSigner, transport);
+        _ = await restartedCoordinator.PromoteArtifactsAsync(
+            restartedProvider, second.Artifacts, CancellationToken.None);
+
+        Assert.Equal(second.Artifacts.AuthoritySha256,
+            restartedProvider.Current.AuthoritySha256);
+        Assert.DoesNotContain("RESERVE", transport.Events.Skip(firstReleaseEvent));
+        Assert.Contains(transport.CapacityCommands.Skip(failReleaseOrdinal),
+            command => command.AsSpan().SequenceEqual(failedCommand));
+        Assert.Null(await state.GetActiveArtifactPromotionAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Promotion_ResumesAfterAllTerminalReleasesBeforeCleanupMarker()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore(first.TimeProvider)
+        {
+            ThrowBeforeCapacityReleasedOnce = true
+        };
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new AcceptingClosureTransport();
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        await Assert.ThrowsAsync<IOException>(() => coordinator.PromoteArtifactsAsync(
+            provider, second.Artifacts, CancellationToken.None).AsTask());
+        var commandCount = transport.CapacityCommands.Count;
+        var active = await state.GetActiveArtifactPromotionAsync(CancellationToken.None);
+        Assert.NotNull(active);
+        Assert.True(active.Published);
+        Assert.False(active.CapacityReleaseCompleted);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            state.BeginArtifactPromotionAsync(
+                Fixture.Bytes(0xE1, 32), active.NewArtifactClosureHash,
+                Fixture.Bytes(0xE2, 32), CancellationToken.None).AsTask());
+
+        var restartedProvider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        var restartedCoordinator = first.Coordinator(
+            state, secondSigner, transport);
+        _ = await restartedCoordinator.PromoteArtifactsAsync(
+            restartedProvider, second.Artifacts, CancellationToken.None);
+
+        Assert.Equal(commandCount, transport.CapacityCommands.Count);
+        Assert.Null(await state.GetActiveArtifactPromotionAsync(CancellationToken.None));
+        var nextPromotion = await state.BeginArtifactPromotionAsync(
+            Fixture.Bytes(0xE1, 32), active.NewArtifactClosureHash,
+            Fixture.Bytes(0xE2, 32), CancellationToken.None);
+        Assert.False(nextPromotion.Published);
+    }
+
+    [Fact]
+    public async Task Promotion_CapacityFailureFreezesBeforeOwnerCommitAndRetryResumes()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore(first.TimeProvider);
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        var oldBundle = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var ownerStateKey = Assert.Single(state.SnapshotOwnerRouteStateKeys());
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new AcceptingClosureTransport
+        {
+            AcceptCapacity = static (_, _) => false
+        };
+        var coordinator = first.Coordinator(state, secondSigner, transport);
+
+        var failure = await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+            coordinator.PromoteArtifactsAsync(
+                provider, second.Artifacts, CancellationToken.None).AsTask());
+        Assert.Equal(ProductionMailboxIssueError.IssuerUnavailable, failure.Error);
+        Assert.Equal(first.Artifacts.AuthoritySha256, provider.Current.AuthoritySha256);
+        Assert.Empty(await state.ListPendingPublicationKeysAsync(
+            8, CancellationToken.None));
+        var stillOld = await state.GetLatestOwnerBundleAsync(
+            ownerStateKey, CancellationToken.None);
+        Assert.Equal(oldBundle.Authority.Sha256,
+            System.Text.Json.JsonSerializer.Deserialize<ProductionMailboxCredentialBundle>(
+                stillOld!, new System.Text.Json.JsonSerializerOptions(
+                    System.Text.Json.JsonSerializerDefaults.Web))!
+                .Authority.Sha256);
+
+        transport.AcceptCapacity = static (_, _) => true;
+        _ = await coordinator.PromoteArtifactsAsync(
+            provider, second.Artifacts, CancellationToken.None);
+        Assert.True(transport.CapacityCommands.Count >= 2);
+        Assert.Equal(transport.CapacityCommands[0], transport.CapacityCommands[1]);
+        Assert.Equal(second.Artifacts.AuthoritySha256, provider.Current.AuthoritySha256);
+        Assert.Contains("PMP", transport.Events);
+        Assert.Contains("RELEASE", transport.Events);
+    }
+
+    [Fact]
     public async Task PromotionState_PaginatesImmutableWatermarkAndRequiresEveryAck()
     {
         var state = new InMemoryProductionMailboxStateStore();
@@ -995,6 +1622,68 @@ public sealed class ProductionMailboxCoordinatorTests
             Fixture.Bytes(0xD3, 32), Fixture.Bytes(0xD4, 48), Fixture.Now,
             CancellationToken.None);
 
+        static (ProductionMailboxPublicationItem Item,
+            ProductionMailboxPreparedIssue Prepared) Work(
+                ProductionMailboxOwnerBundleRecord owner, byte[] promotionStateKey)
+        {
+            var marker = checked((byte)owner.Sequence);
+            var envelope = Fixture.Bytes(marker, 64);
+            var publicationKey = SHA256.HashData(
+                Encoding.UTF8.GetBytes($"promotion-{owner.Sequence}"));
+            var targetKey = SHA256.HashData(
+                Encoding.UTF8.GetBytes($"target-{owner.Sequence}"));
+            var capacityNode = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(0xE1, 32));
+            var item = new ProductionMailboxPublicationItem(
+                targetKey, capacityNode.PublicKey, "https://node.example/",
+                Fixture.Bytes(0xE2, 32), Fixture.Bytes(0xE3, 32), [],
+                envelope, SHA256.HashData(envelope), promotionStateKey);
+            return (item, new ProductionMailboxPreparedIssue(
+                Fixture.Bytes((byte)(marker + 1), 96), owner.RouteStateKey,
+                publicationKey, [item]));
+        }
+
+        while (true)
+        {
+            var owners = await state.ListOwnerBundlesForCapacityPlanningAsync(
+                promotionKey, 64, CancellationToken.None);
+            if (owners.Count == 0) break;
+            foreach (var owner in owners)
+            {
+                var work = Work(owner, promotionKey);
+                Assert.True(await state.CommitCapacityPlannedOwnerAsync(
+                    promotionKey, owner, [work.Item], 1024,
+                    CancellationToken.None));
+            }
+        }
+        Assert.True(await state.CompleteCapacityPlanAsync(
+            promotionKey, CancellationToken.None));
+        var capacityPlan = await state.GetCapacityPlanAsync(
+            promotionKey, CancellationToken.None);
+        var capacityTarget = Assert.Single(capacityPlan!.Targets);
+        Assert.Equal(70U, capacityTarget.ReservedClosureCount);
+        var capacityCommand = Fixture.Bytes(0xEA,
+            ProductionMailboxCapacityCommandCodec.EncodedLength);
+        var unsignedCapacityReceipt = new ProductionMailboxCapacityReceipt(
+            ProductionMailboxCapacityOperation.ReserveOrRenew,
+            Fixture.Now, Fixture.Now + 1_000, promotionKey,
+            capacityTarget.TargetReplicaId, capacityTarget.ReservedClosureCount,
+            capacityTarget.ReservedBytes, 0, 0, 1,
+            SHA256.HashData(capacityCommand), new byte[64]);
+        var capacityNode = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(0xE1, 32));
+        var capacityReceipt = unsignedCapacityReceipt with
+        {
+            NodeSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxCapacityReceiptCodec.GetSigningBytes(
+                    unsignedCapacityReceipt), capacityNode.PrivateKey)
+        };
+        Assert.Equal(capacityCommand, await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, capacityTarget.TargetReplicaId, 0, 1,
+            capacityCommand, CancellationToken.None));
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, capacityTarget.TargetReplicaId, 0, capacityReceipt,
+            ProductionMailboxCapacityReceiptCodec.Encode(capacityReceipt),
+            CancellationToken.None));
+
         var processed = 0;
         while (true)
         {
@@ -1004,28 +1693,19 @@ public sealed class ProductionMailboxCoordinatorTests
             Assert.InRange(owners.Count, 1, 64);
             foreach (var owner in owners)
             {
-                var marker = checked((byte)owner.Sequence);
-                var envelope = Fixture.Bytes(marker, 64);
-                var publicationKey = SHA256.HashData(
-                    Encoding.UTF8.GetBytes($"promotion-{owner.Sequence}"));
-                var targetKey = SHA256.HashData(
-                    Encoding.UTF8.GetBytes($"target-{owner.Sequence}"));
-                var item = new ProductionMailboxPublicationItem(
-                    targetKey, Fixture.Bytes(0xE1, 32), "https://node.example/",
-                    Fixture.Bytes(0xE2, 32), Fixture.Bytes(0xE3, 32), [],
-                    envelope, SHA256.HashData(envelope));
-                var prepared = new ProductionMailboxPreparedIssue(
-                    Fixture.Bytes((byte)(marker + 1), 96), owner.RouteStateKey,
-                    publicationKey, [item]);
+                var work = Work(owner, promotionKey);
                 Assert.True(await state.CommitPromotedOwnerAsync(
-                    promotionKey, owner, prepared, Fixture.Now,
+                    promotionKey, owner, work.Prepared, Fixture.Now,
+                    300,
                     CancellationToken.None));
                 var attempt = Fixture.Bytes(0xE4, 32);
                 Assert.True(await state.RecordPublicationAttemptAsync(
-                    publicationKey, targetKey, item.EnvelopeSha256, attempt,
+                    work.Prepared.PublicationStateKey, work.Item.TargetStateKey,
+                    work.Item.EnvelopeSha256, attempt,
                     Fixture.Now, CancellationToken.None));
                 Assert.True(await state.AcknowledgePublicationAsync(
-                    publicationKey, targetKey, item.EnvelopeSha256, attempt,
+                    work.Prepared.PublicationStateKey, work.Item.TargetStateKey,
+                    work.Item.EnvelopeSha256, attempt,
                     CancellationToken.None));
                 processed++;
             }
@@ -1038,6 +1718,118 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.Equal(Fixture.Bytes(0xD4, 48),
             await state.GetLatestOwnerBundleAsync(
                 Fixture.Bytes(0xD3, 32), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PromotionCommit_UsesLockedAuthoritativeTimeAndRejectsReleasedReceipt()
+    {
+        var time = new FixedTimeProvider(
+            DateTimeOffset.FromUnixTimeSeconds(checked((long)Fixture.Now)));
+        var state = new InMemoryProductionMailboxStateStore(time);
+        var routeKey = Fixture.Bytes(0xC0, 32);
+        await state.StoreLatestOwnerBundleAsync(
+            routeKey, Fixture.Bytes(0xC1, 64), Fixture.Now,
+            CancellationToken.None);
+        var promotionKey = Fixture.Bytes(0xC2, 32);
+        _ = await state.BeginArtifactPromotionAsync(
+            promotionKey, Fixture.Bytes(0xC3, 32), Fixture.Bytes(0xC4, 32),
+            CancellationToken.None);
+        var owner = Assert.Single(await state.ListOwnerBundlesForCapacityPlanningAsync(
+            promotionKey, 8, CancellationToken.None));
+        var envelope = Fixture.Bytes(0xC5, 64);
+        var capacityNode = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(0xC7, 32));
+        var item = new ProductionMailboxPublicationItem(
+            Fixture.Bytes(0xC6, 32), capacityNode.PublicKey,
+            "https://capacity.example/", Fixture.Bytes(0xC8, 32),
+            Fixture.Bytes(0xC9, 32), [], envelope, SHA256.HashData(envelope),
+            promotionKey);
+        Assert.True(await state.CommitCapacityPlannedOwnerAsync(
+            promotionKey, owner, [item], 1024, CancellationToken.None));
+        Assert.True(await state.CompleteCapacityPlanAsync(
+            promotionKey, CancellationToken.None));
+        var target = Assert.Single((await state.GetCapacityPlanAsync(
+            promotionKey, CancellationToken.None))!.Targets);
+        var prepared = new ProductionMailboxPreparedIssue(
+            Fixture.Bytes(0xCA, 96), routeKey, Fixture.Bytes(0xCB, 32), [item]);
+
+        ProductionMailboxCapacityReceipt Receipt(
+            ProductionMailboxCapacityOperation operation,
+            ulong revision, ulong expires)
+        {
+            var release = operation == ProductionMailboxCapacityOperation.Release;
+            var unsigned = new ProductionMailboxCapacityReceipt(
+                operation, Fixture.Now, expires, promotionKey,
+                target.TargetReplicaId,
+                release ? 0 : target.ReservedClosureCount,
+                release ? 0 : target.ReservedBytes, 0, 0, revision,
+                SHA256.HashData(Fixture.Bytes(
+                    checked((byte)(0xD0 + revision)),
+                    ProductionMailboxCapacityCommandCodec.EncodedLength)),
+                new byte[64]);
+            return unsigned with
+            {
+                NodeSignature = PublicKeyAuth.SignDetached(
+                    ProductionMailboxCapacityReceiptCodec.GetSigningBytes(unsigned),
+                    capacityNode.PrivateKey)
+            };
+        }
+
+        var expiring = Receipt(
+            ProductionMailboxCapacityOperation.ReserveOrRenew, 1,
+            Fixture.Now + 300);
+        _ = await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 0, 1,
+            Fixture.Bytes(0xD1, ProductionMailboxCapacityCommandCodec.EncodedLength),
+            CancellationToken.None);
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 0, expiring,
+            ProductionMailboxCapacityReceiptCodec.Encode(expiring),
+            CancellationToken.None));
+        time.Set(Fixture.Now + 1);
+        Assert.False(await state.CommitPromotedOwnerAsync(
+            promotionKey, owner, prepared, Fixture.Now + 1, 300,
+            CancellationToken.None));
+
+        var renewed = Receipt(
+            ProductionMailboxCapacityOperation.ReserveOrRenew, 2,
+            Fixture.Now + 1_000);
+        _ = await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 1, 2,
+            Fixture.Bytes(0xD2, ProductionMailboxCapacityCommandCodec.EncodedLength),
+            CancellationToken.None);
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 1, renewed,
+            ProductionMailboxCapacityReceiptCodec.Encode(renewed),
+            CancellationToken.None));
+        var released = Receipt(
+            ProductionMailboxCapacityOperation.Release, 3,
+            Fixture.Now + 1_000);
+        _ = await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 2, 3,
+            Fixture.Bytes(0xD3, ProductionMailboxCapacityCommandCodec.EncodedLength),
+            CancellationToken.None);
+        Assert.True(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 2, released,
+            ProductionMailboxCapacityReceiptCodec.Encode(released),
+            CancellationToken.None));
+        Assert.False(await state.CommitPromotedOwnerAsync(
+            promotionKey, owner, prepared, Fixture.Now + 1, 300,
+            CancellationToken.None));
+
+        var resumed = Receipt(
+            ProductionMailboxCapacityOperation.ReserveOrRenew, 4,
+            Fixture.Now + 1_000);
+        Assert.Null(await state.GetOrRecordCapacityAttemptAsync(
+            promotionKey, target.TargetReplicaId, 3, 4,
+            Fixture.Bytes(0xD4, ProductionMailboxCapacityCommandCodec.EncodedLength),
+            CancellationToken.None));
+        Assert.False(await state.RecordCapacityReceiptAsync(
+            promotionKey, target.TargetReplicaId, 3, resumed,
+            ProductionMailboxCapacityReceiptCodec.Encode(resumed),
+            CancellationToken.None));
+        Assert.False(await state.CommitPromotedOwnerAsync(
+            promotionKey, owner, prepared, Fixture.Now + 1, 300,
+            CancellationToken.None));
     }
 
     [Fact]
@@ -1160,28 +1952,56 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.NotNull(currentBundle.SelectionSuccessor);
         var oldNext = oldBundle.Selections.Single(value =>
             value.Epoch == first.Artifacts.Topology.Snapshot.NextEpoch.Epoch);
-        var verified = ProductionMailboxSelectionSuccessorVerifier.VerifyOfflineCheckpoint(
+        var current = currentBundle.Selections.Single(value =>
+            value.Epoch == third.Artifacts.Topology.Snapshot.CurrentEpoch.Epoch);
+        var next = currentBundle.Selections.Single(value =>
+            value.Epoch == third.Artifacts.Topology.Snapshot.NextEpoch.Epoch);
+        var oldSelectionBytes = Decode(oldNext.CanonicalBase64Url);
+        var oldSelection = ProductionMailboxTopologyCodec.DecodeSelection(
+            oldSelectionBytes);
+        var verified = ProductionMailboxSelectionSuccessorVerifier
+            .VerifyOfflineCheckpointClosure(
             Decode(currentBundle.SelectionSuccessor.CanonicalBase64Url),
-            first.Artifacts.Authority, first.Artifacts.Topology,
+            third.Artifacts.AuthorityBytes,
+            third.Artifacts.RevocationBytes,
             third.Artifacts.TopologyBytes,
-            new ProductionMailboxSelectionSuccessorVerificationContext
+            oldSelectionBytes,
+            Decode(current.CanonicalBase64Url),
+            Decode(next.CanonicalBase64Url),
+            first.Artifacts.Authority,
+            first.Artifacts.Topology,
+            new ProductionMailboxOfflineCheckpointClosureVerificationContext
             {
                 ExpectedNetworkId = third.Artifacts.Authority.Authority.NetworkId,
                 ExpectedMailboxOwnerEd25519PublicKey = third.OwnerPublicKey,
                 ExpectedBlindedMailboxId = Decode(currentBundle.BlindedMailboxId),
                 ExpectedBlindedPlacementId = Decode(currentBundle.BlindedPlacementId),
+                ExpectedSelectionInputCommitment = oldSelection.SelectionInputCommitment,
                 PinnedMrXPublicKeySha256 = Convert.FromHexString(
                     third.Options.PinnedMrXPublicKeySha256),
+                ExpectedOldAuthorityGeneration =
+                    first.Artifacts.Authority.Authority.AuthorityGeneration,
+                ExpectedOldCanonicalAuthorityHash =
+                    first.Artifacts.Authority.CanonicalAuthorityHash,
+                ExpectedOldRevocationGeneration =
+                    first.Artifacts.Revocation.Snapshot.RevocationGeneration,
+                ExpectedOldRevocationHeadHash =
+                    first.Artifacts.Revocation.Snapshot.RevocationHeadHash,
+                ExpectedOldRevocationSnapshotHash =
+                    first.Artifacts.Revocation.CanonicalSnapshotHash,
+                ExpectedOldTopologyGeneration =
+                    first.Artifacts.Topology.Snapshot.TopologyGeneration,
+                ExpectedOldCanonicalTopologyHash =
+                    first.Artifacts.Topology.CanonicalTopologyHash,
                 ExpectedOldCanonicalSelectionHash = SHA256.HashData(
-                    Decode(oldNext.CanonicalBase64Url)),
-                NowUnixSeconds = Fixture.Now,
+                    oldSelectionBytes),
+                VerifiedAtUnixSeconds = Fixture.Now,
                 ClockSkewSeconds = 0
-            }, new SodiumProductionMailboxAuthoritySignatureVerifier(),
-            new SodiumProductionMailboxTopologySignatureVerifier(),
-            new SodiumProductionMailboxSelectionSuccessorSignatureVerifier());
+            });
         Assert.Equal(ProductionMailboxSelectionSuccessorMode.OfflineCheckpoint,
-            verified.Proof.Mode);
-        Assert.All(verified.Proof.OldIssuerSignature.ToArray(), value => Assert.Equal(0, value));
+            verified.Successor.Proof.Mode);
+        Assert.All(verified.Successor.Proof.OldIssuerSignature.ToArray(),
+            value => Assert.Equal(0, value));
     }
 
     [Fact]
@@ -1553,6 +2373,15 @@ public sealed class ProductionMailboxCoordinatorTests
     private sealed class AcceptingClosureTransport : IProductionMailboxClosureTransport
     {
         public List<ProductionMailboxPublicationItem> Received { get; } = [];
+        public List<byte[]> CapacityCommands { get; } = [];
+        public List<byte[]> ReconciliationCommands { get; } = [];
+        public List<string> Events { get; } = [];
+        public Func<ProductionMailboxPrepositionTarget, int, bool> AcceptCapacity { get; set; }
+            = static (_, _) => true;
+        public long ReceiptTimestampOffsetSeconds { get; set; }
+        public int FailReleaseOrdinalOnce { get; set; }
+        public bool ForceReconciliationForRelease { get; set; }
+        private int releaseCalls;
 
         public ValueTask<bool> PrepositionAsync(
             ProductionMailboxPublicationItem item,
@@ -1560,11 +2389,47 @@ public sealed class ProductionMailboxCoordinatorTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Events.Add("PMP");
             Received.Add(item with
             {
                 LastAttemptSha256 = SHA256.HashData(canonicalCommand.Span)
             });
             return ValueTask.FromResult(true);
+        }
+
+        public ValueTask<byte[]?> ReserveCapacityAsync(
+            ProductionMailboxPrepositionTarget target,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var command = canonicalCommand.ToArray();
+            CapacityCommands.Add(command);
+            var isRelease = command[5]
+                == (byte)ProductionMailboxCapacityOperation.Release;
+            Events.Add(isRelease ? "RELEASE" : "RESERVE");
+            var releaseOrdinal = isRelease
+                ? Interlocked.Increment(ref releaseCalls) : 0;
+            var dropResponse = isRelease && (ForceReconciliationForRelease
+                || FailReleaseOrdinalOnce != 0
+                    && releaseOrdinal == FailReleaseOrdinalOnce);
+            return ValueTask.FromResult<byte[]?>(
+                !dropResponse && AcceptCapacity(target, CapacityCommands.Count)
+                    ? CreateCapacityReceipt(command, ReceiptTimestampOffsetSeconds) : null);
+        }
+
+        public ValueTask<byte[]?> ReconcileCapacityAsync(
+            ProductionMailboxPrepositionTarget target,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Events.Add("RECONCILE");
+            var command = canonicalCommand.ToArray();
+            ReconciliationCommands.Add(command);
+            return ValueTask.FromResult<byte[]?>(
+                ForceReconciliationForRelease
+                    ? CreateCapacityReconciliationReceipt(command) : null);
         }
     }
 
@@ -1582,6 +2447,263 @@ public sealed class ProductionMailboxCoordinatorTests
             CommandHashes.Add(Convert.ToHexString(SHA256.HashData(canonicalCommand.Span)));
             return ValueTask.FromResult(Accept);
         }
+
+        public ValueTask<byte[]?> ReserveCapacityAsync(
+            ProductionMailboxPrepositionTarget target,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken) => ValueTask.FromResult<byte[]?>(
+                Accept ? CreateCapacityReceipt(canonicalCommand.Span) : null);
+
+        public ValueTask<byte[]?> ReconcileCapacityAsync(
+            ProductionMailboxPrepositionTarget target,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken) => ValueTask.FromResult<byte[]?>(null);
+    }
+
+    private sealed class RealXNodeClosureTransport :
+        IProductionMailboxClosureTransport, IDisposable
+    {
+        private readonly string root = Path.Combine(
+            Path.GetTempPath(), "deep-registry-real-xnode", Guid.NewGuid().ToString("N"));
+        private readonly string publisherPublicKey;
+        private readonly string expectedNetworkId;
+        private readonly string pinnedMrXPublicKeySha256;
+        private readonly FixedTimeProvider timeProvider;
+        private readonly uint maximumReservationLifetimeSeconds;
+        private readonly Dictionary<string, NodeConfiguration> configurations =
+            new(StringComparer.Ordinal);
+        private readonly Dictionary<string,
+            xnode::XNode.ProductionMailboxClosureStore> stores =
+            new(StringComparer.Ordinal);
+
+        internal RealXNodeClosureTransport(
+            string publisherPublicKey,
+            string expectedNetworkId,
+            string pinnedMrXPublicKeySha256,
+            FixedTimeProvider timeProvider,
+            uint maximumReservationLifetimeSeconds)
+        {
+            this.publisherPublicKey = publisherPublicKey;
+            this.expectedNetworkId = expectedNetworkId;
+            this.pinnedMrXPublicKeySha256 = pinnedMrXPublicKeySha256;
+            this.timeProvider = timeProvider;
+            this.maximumReservationLifetimeSeconds = maximumReservationLifetimeSeconds;
+            Directory.CreateDirectory(root);
+        }
+
+        internal bool DropReleaseAndReconciliation { get; set; }
+        internal int ReconciliationCount { get; private set; }
+        internal string? LastFailure { get; private set; }
+
+        public async ValueTask<bool> PrepositionAsync(
+            ProductionMailboxPublicationItem item,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Store(item.TargetReplicaId).PrepositionAsync(
+                    canonicalCommand, cancellationToken);
+                return true;
+            }
+            catch (Exception exception) when (exception is InvalidDataException
+                or InvalidOperationException or IOException)
+            {
+                LastFailure = exception.ToString();
+                return false;
+            }
+        }
+
+        public async ValueTask<byte[]?> ReserveCapacityAsync(
+            ProductionMailboxPrepositionTarget target,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            if (DropReleaseAndReconciliation
+                && canonicalCommand.Span[5]
+                    == (byte)ProductionMailboxCapacityOperation.Release)
+                return null;
+            try
+            {
+                return await Store(target.ReplicaId).ReserveCapacityAsync(
+                    canonicalCommand, cancellationToken);
+            }
+            catch (Exception exception) when (exception is InvalidDataException
+                or InvalidOperationException or IOException)
+            {
+                LastFailure = exception.ToString();
+                return null;
+            }
+        }
+
+        public async ValueTask<byte[]?> ReconcileCapacityAsync(
+            ProductionMailboxPrepositionTarget target,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            if (DropReleaseAndReconciliation) return null;
+            try
+            {
+                var receipt = await Store(target.ReplicaId).ReconcileAbsentCapacityAsync(
+                    canonicalCommand, cancellationToken);
+                ReconciliationCount++;
+                return receipt;
+            }
+            catch (Exception exception) when (exception is InvalidDataException
+                or InvalidOperationException or IOException)
+            {
+                LastFailure = exception.ToString();
+                return null;
+            }
+        }
+
+        internal void Restart() => stores.Clear();
+
+        private xnode::XNode.ProductionMailboxClosureStore Store(byte[] targetReplicaId)
+        {
+            var key = Convert.ToHexString(targetReplicaId);
+            if (stores.TryGetValue(key, out var existing)) return existing;
+            if (!configurations.TryGetValue(key, out var configuration))
+            {
+                byte[]? seed = null;
+                for (var value = 0; value <= byte.MaxValue; value++)
+                {
+                    var candidate = Fixture.Bytes((byte)value, 32);
+                    if (!PublicKeyAuth.GenerateKeyPair(candidate).PublicKey.AsSpan()
+                            .SequenceEqual(targetReplicaId))
+                        continue;
+                    seed = candidate;
+                    break;
+                }
+                if (seed is null)
+                    throw new InvalidOperationException(
+                        "The integration fixture does not own the selected XNode key.");
+                var dataRoot = Path.Combine(root, key);
+                Directory.CreateDirectory(dataRoot);
+                var hmacKeyPath = Path.Combine(dataRoot, "closure-hmac.key");
+                File.WriteAllBytes(hmacKeyPath, Fixture.Bytes(245, 32));
+                var node = new XNode.Core.RouterNodeOptions
+                {
+                    DataDirectory = dataRoot,
+                    RouterId = key,
+                    Ed25519PrivateKey = Convert.ToHexString(seed)
+                };
+                var options = new xnode::XNode.ProductionMailboxAuthorityOptions
+                {
+                    ClosureDirectory = Path.Combine(dataRoot, "closures"),
+                    ClosureStateHmacKeyPath = hmacKeyPath,
+                    ClosurePublisherEd25519PublicKey = publisherPublicKey,
+                    ExpectedNetworkId = expectedNetworkId,
+                    PinnedMrXPublicKeySha256 = pinnedMrXPublicKeySha256,
+                    ClockSkewSeconds = 0,
+                    MaximumStoredClosures = 1_000,
+                    MaximumClosureStoreBytes = 1_073_741_824,
+                    MaximumClosureVersionsPerSelection = 4,
+                    MaximumClosureLineagesPerSelection = 4,
+                    MaximumClosureReservations = 32,
+                    MinimumClosureReservationLifetimeSeconds = 60,
+                    MaximumClosureReservationLifetimeSeconds =
+                        maximumReservationLifetimeSeconds,
+                    ClosureScheduleAccountingOverheadBytes = 1_024
+                };
+                configuration = new(options, node);
+                configurations.Add(key, configuration);
+            }
+            var store = new xnode::XNode.ProductionMailboxClosureStore(
+                configuration.Options, configuration.Node,
+                new XNodeTimeProviderClock(timeProvider),
+                new XNode.Core.Mailbox.MailboxStorageSecurity(),
+                new XNode.Core.Mailbox.MailboxDurabilityBarrier());
+            stores.Add(key, store);
+            return store;
+        }
+
+        public void Dispose()
+        {
+            stores.Clear();
+            configurations.Clear();
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+
+        private sealed record NodeConfiguration(
+            xnode::XNode.ProductionMailboxAuthorityOptions Options,
+            XNode.Core.RouterNodeOptions Node);
+    }
+
+    private sealed class XNodeTimeProviderClock(FixedTimeProvider timeProvider) :
+        XNode.Core.IClock
+    {
+        public DateTimeOffset UtcNow => timeProvider.GetUtcNow();
+    }
+
+    private static byte[] CreateCapacityReceipt(
+        ReadOnlySpan<byte> command,
+        long receiptTimestampOffsetSeconds = 0)
+    {
+        Assert.Equal(ProductionMailboxCapacityCommandCodec.EncodedLength,
+            command.Length);
+        var operation = (ProductionMailboxCapacityOperation)command[5];
+        var target = command.Slice(88, 32).ToArray();
+        byte[]? privateKey = null;
+        for (var seed = 0; seed <= byte.MaxValue; seed++)
+        {
+            var pair = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes((byte)seed, 32));
+            if (!pair.PublicKey.AsSpan().SequenceEqual(target)) continue;
+            privateKey = pair.PrivateKey;
+            break;
+        }
+        Assert.NotNull(privateKey);
+        var reservedCount = operation == ProductionMailboxCapacityOperation.Release
+            ? 0U : BinaryPrimitives.ReadUInt32BigEndian(command[120..]);
+        var reservedBytes = operation == ProductionMailboxCapacityOperation.Release
+            ? 0UL : BinaryPrimitives.ReadUInt64BigEndian(command[124..]);
+        var commandTimestamp = BinaryPrimitives.ReadUInt64BigEndian(command[8..]);
+        var receiptTimestamp = receiptTimestampOffsetSeconds >= 0
+            ? checked(commandTimestamp + (ulong)receiptTimestampOffsetSeconds)
+            : checked(commandTimestamp - (ulong)-receiptTimestampOffsetSeconds);
+        var unsigned = new ProductionMailboxCapacityReceipt(
+            operation,
+            receiptTimestamp,
+            BinaryPrimitives.ReadUInt64BigEndian(command[16..]),
+            command.Slice(56, 32).ToArray(), target,
+            reservedCount, reservedBytes, 0, 0,
+            BinaryPrimitives.ReadUInt64BigEndian(command[132..]),
+            SHA256.HashData(command), new byte[64]);
+        var signature = PublicKeyAuth.SignDetached(
+            ProductionMailboxCapacityReceiptCodec.GetSigningBytes(unsigned),
+            privateKey);
+        return ProductionMailboxCapacityReceiptCodec.Encode(
+            unsigned with { NodeSignature = signature });
+    }
+
+    private static byte[] CreateCapacityReconciliationReceipt(
+        ReadOnlySpan<byte> command)
+    {
+        Assert.Equal(ProductionMailboxCapacityReconciliationCommandCodec.EncodedLength,
+            command.Length);
+        var target = command.Slice(88, 32).ToArray();
+        byte[]? privateKey = null;
+        for (var seed = 0; seed <= byte.MaxValue; seed++)
+        {
+            var pair = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes((byte)seed, 32));
+            if (!pair.PublicKey.AsSpan().SequenceEqual(target)) continue;
+            privateKey = pair.PrivateKey;
+            break;
+        }
+        Assert.NotNull(privateKey);
+        var unsigned = new ProductionMailboxCapacityReconciliationReceipt(
+            ProductionMailboxCapacityReconciliationStatus.AbsentTerminal,
+            BinaryPrimitives.ReadUInt64BigEndian(command[8..]),
+            BinaryPrimitives.ReadUInt64BigEndian(command[16..]),
+            command.Slice(56, 32).ToArray(), target,
+            BinaryPrimitives.ReadUInt64BigEndian(command[120..]),
+            command.Slice(376, 32).ToArray(), command.Slice(408, 32).ToArray(),
+            0, 0, Fixture.Bytes(241, 32), new byte[64]);
+        var signature = PublicKeyAuth.SignDetached(
+            ProductionMailboxCapacityReconciliationReceiptCodec.GetSigningBytes(unsigned),
+            privateKey);
+        return ProductionMailboxCapacityReconciliationReceiptCodec.Encode(
+            unsigned with { NodeSignature = signature });
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
@@ -1590,6 +2712,57 @@ public sealed class ProductionMailboxCoordinatorTests
         public override DateTimeOffset GetUtcNow() =>
             DateTimeOffset.FromUnixTimeSeconds(Interlocked.Read(ref unixSeconds));
         public void Set(ulong value) => Interlocked.Exchange(ref unixSeconds, checked((long)value));
+    }
+
+    private sealed class PostgresTestDatabase : IAsyncDisposable
+    {
+        private readonly string administrativeConnectionString;
+        private readonly string schema;
+
+        private PostgresTestDatabase(
+            string administrativeConnectionString,
+            string schema,
+            string connectionString)
+        {
+            this.administrativeConnectionString = administrativeConnectionString;
+            this.schema = schema;
+            ConnectionString = connectionString;
+        }
+
+        public string ConnectionString { get; }
+
+        public static async ValueTask<PostgresTestDatabase> CreateAsync(
+            string connectionString)
+        {
+            var schema = "deep_registry_test_"
+                + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8));
+            var quotedSchema = new NpgsqlCommandBuilder().QuoteIdentifier(schema);
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync();
+                await using var command = new NpgsqlCommand(
+                    $"CREATE SCHEMA {quotedSchema}", connection);
+                await command.ExecuteNonQueryAsync();
+            }
+            var isolated = new NpgsqlConnectionStringBuilder(connectionString)
+            {
+                SearchPath = schema,
+                Pooling = false
+            };
+            return new PostgresTestDatabase(
+                connectionString, schema, isolated.ConnectionString);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            var quotedSchema = new NpgsqlCommandBuilder().QuoteIdentifier(schema);
+            await using var connection = new NpgsqlConnection(
+                administrativeConnectionString);
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(
+                $"DROP SCHEMA IF EXISTS {quotedSchema} CASCADE", connection);
+            await command.ExecuteNonQueryAsync();
+        }
     }
 
     private sealed class Fixture : IDisposable
@@ -2146,10 +3319,17 @@ public sealed class ProductionMailboxCoordinatorTests
         };
         private static MembershipRouteDescriptor[] Descriptors(
             ulong epoch, ulong from, ulong until, int variant = 0) =>
-            [Descriptor(0x10 + variant, epoch, from, until), Descriptor(0x40 + variant, epoch, from, until), Descriptor(0x70 + variant, epoch, from, until)];
+            new[]
+            {
+                Descriptor(0x10 + variant, epoch, from, until),
+                Descriptor(0x40 + variant, epoch, from, until),
+                Descriptor(0x70 + variant, epoch, from, until)
+            }.OrderBy(static descriptor => Convert.ToHexString(
+                    descriptor.RouterId.ToArray()),
+                StringComparer.Ordinal).ToArray();
         private static MembershipRouteDescriptor Descriptor(int start, ulong epoch, ulong from, ulong until) => new()
         {
-            RouterId = Range(start, 32),
+            RouterId = PublicKeyAuth.GenerateKeyPair(Bytes((byte)start, 32)).PublicKey,
             Ed25519PublicKey = Range(start + 32, 32),
             X25519PublicKey = Range(start + 64, 32),
             RpcEndpoint = $"https://route-{start}.example.net/",
