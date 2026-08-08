@@ -7,8 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Deep.Protocol" Version="[0.4.0-production.1059184]" />
-    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.4.0-production.1059184]" />
+    <PackageReference Include="Deep.Protocol" Version="[0.4.0-production.32b4d14]" />
+    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.4.0-production.32b4d14]" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Rebex.Elliptic.Ed25519" Version="1.2.2" />
     <PackageReference Include="Sodium.Core" Version="1.4.1" />
