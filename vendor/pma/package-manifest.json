@@ -1,33 +1,29 @@
 {
   "schema": "deep-local-package-manifest.v1",
-  "packageVersion": "0.4.0-production.eacaeb8",
-  "sourceCommit": "eacaeb831905d6508fa118ca80c78b4a22a987e6",
+  "packageVersion": "0.4.0-production.2024907",
+  "sourceCommit": "20249077913abfd9ad69f957aa07e57ff55b5e24",
+  "reproducibleNormalizedBuild": true,
   "publication": "local-only-not-published",
   "packages": [
     {
-      "file": "Deep.Protocol.0.4.0-production.eacaeb8.nupkg",
-      "bytes": 219720,
-      "sha256": "7e5f1139ab3b4669040bf5349cb56669de04cc281f2197b3184dc27145848e35"
+      "file": "Deep.Protocol.0.4.0-production.2024907.nupkg",
+      "bytes": 218744,
+      "sha256": "00bfaf36679fc905c9c83b644d717367ce1f2a3864f0009ef998da714f3fddfc"
     },
     {
-      "file": "Deep.Protocol.Abstractions.0.4.0-production.eacaeb8.nupkg",
-      "bytes": 25675,
-      "sha256": "e0446fae07a597088b7567bfe2a8a9c901503890e86eba568496bbaf06a030d4"
+      "file": "Deep.Protocol.Abstractions.0.4.0-production.2024907.nupkg",
+      "bytes": 24956,
+      "sha256": "b3790c2599be43ab593364dc57b558e97d36333a56c3b3b7cd6427e78629a9a2"
     },
     {
-      "file": "Deep.Protocol.MembershipRoutes.0.4.0-production.eacaeb8.nupkg",
-      "bytes": 31163,
-      "sha256": "be5345b5fca1f951d22f912f91daffe7061a5ff4cf38d19dfc3fdb230d58ccdf"
+      "file": "Deep.Protocol.MembershipRoutes.0.4.0-production.2024907.nupkg",
+      "bytes": 48182,
+      "sha256": "91698919918caba2e671dcef87d02f1fc6168d330fc852ab15e90cdb29c209d7"
     },
     {
-      "file": "Deep.Protocol.ProfileCarrier.0.4.0-production.eacaeb8.nupkg",
-      "bytes": 30364,
-      "sha256": "4f7095010d242be3142c0f93c94d72d544e7deef5aa5b790f999b876726a3460"
-    },
-    {
-      "file": "Deep.Protocol.Protobuf.0.4.0-production.eacaeb8.nupkg",
-      "bytes": 51186,
-      "sha256": "ab1109b269fe8422d7472bb4e724aca96097ee3f96b1815ea11b409d0c87586d"
+      "file": "Deep.Protocol.Protobuf.0.4.0-production.2024907.nupkg",
+      "bytes": 50210,
+      "sha256": "c42b0463013d98a9c5d5200db5c875a6d320a2b6c80e1062b8c76ac5aac205a2"
     }
   ]
 }

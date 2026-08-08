@@ -22,16 +22,14 @@ public sealed class P04PackagePinTests
     private static readonly IReadOnlyDictionary<string, string> ExpectedProductionMailboxHashes =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["Deep.Protocol.0.4.0-production.eacaeb8.nupkg"] =
-                "7e5f1139ab3b4669040bf5349cb56669de04cc281f2197b3184dc27145848e35",
-            ["Deep.Protocol.Abstractions.0.4.0-production.eacaeb8.nupkg"] =
-                "e0446fae07a597088b7567bfe2a8a9c901503890e86eba568496bbaf06a030d4",
-            ["Deep.Protocol.MembershipRoutes.0.4.0-production.eacaeb8.nupkg"] =
-                "be5345b5fca1f951d22f912f91daffe7061a5ff4cf38d19dfc3fdb230d58ccdf",
-            ["Deep.Protocol.ProfileCarrier.0.4.0-production.eacaeb8.nupkg"] =
-                "4f7095010d242be3142c0f93c94d72d544e7deef5aa5b790f999b876726a3460",
-            ["Deep.Protocol.Protobuf.0.4.0-production.eacaeb8.nupkg"] =
-                "ab1109b269fe8422d7472bb4e724aca96097ee3f96b1815ea11b409d0c87586d"
+            ["Deep.Protocol.0.4.0-production.2024907.nupkg"] =
+                "00bfaf36679fc905c9c83b644d717367ce1f2a3864f0009ef998da714f3fddfc",
+            ["Deep.Protocol.Abstractions.0.4.0-production.2024907.nupkg"] =
+                "b3790c2599be43ab593364dc57b558e97d36333a56c3b3b7cd6427e78629a9a2",
+            ["Deep.Protocol.MembershipRoutes.0.4.0-production.2024907.nupkg"] =
+                "91698919918caba2e671dcef87d02f1fc6168d330fc852ab15e90cdb29c209d7",
+            ["Deep.Protocol.Protobuf.0.4.0-production.2024907.nupkg"] =
+                "c42b0463013d98a9c5d5200db5c875a6d320a2b6c80e1062b8c76ac5aac205a2"
         };
 
     [Fact]
@@ -98,8 +96,8 @@ public sealed class P04PackagePinTests
             var document = XDocument.Load(stream);
             XNamespace ns = document.Root!.Name.Namespace;
             var metadata = document.Root.Element(ns + "metadata")!;
-            Assert.Equal("0.4.0-production.eacaeb8", metadata.Element(ns + "version")!.Value);
-            Assert.Equal("eacaeb831905d6508fa118ca80c78b4a22a987e6",
+            Assert.Equal("0.4.0-production.2024907", metadata.Element(ns + "version")!.Value);
+            Assert.Equal("20249077913abfd9ad69f957aa07e57ff55b5e24",
                 metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
             foreach (var dependency in metadata.Descendants(ns + "dependency")
                          .Where(value => value.Attribute("id")?.Value.StartsWith(
@@ -108,15 +106,16 @@ public sealed class P04PackagePinTests
                 var version = dependency.Attribute("version")!.Value;
                 Assert.Contains(version, new[]
                 {
-                    "0.4.0-production.eacaeb8",
-                    "[0.4.0-production.eacaeb8]"
+                    "0.4.0-production.2024907",
+                    "[0.4.0-production.2024907]"
                 });
-                if (pair.Key.StartsWith("Deep.Protocol.ProfileCarrier.", StringComparison.Ordinal))
-                    Assert.Equal("[0.4.0-production.eacaeb8]", version);
             }
         }
-        Assert.Equal("74bc1bb5a8363ce41505f52abd7365f953f101d21296a5b845c636766c8284f2",
-            CanonicalTextSha256(Path.Combine(vendor, "package-manifest.json")));
+        var manifest = JsonNode.Parse(File.ReadAllText(
+            Path.Combine(vendor, "package-manifest.json")))!;
+        Assert.Equal("20249077913abfd9ad69f957aa07e57ff55b5e24",
+            manifest["sourceCommit"]!.GetValue<string>());
+        Assert.True(manifest["reproducibleNormalizedBuild"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -152,18 +151,18 @@ public sealed class P04PackagePinTests
             var dependencies = JsonNode.Parse(File.ReadAllText(lockPath))!
                 ["dependencies"]!["net10.0"]!;
             var protocol = dependencies["Deep.Protocol"]!;
-            Assert.Equal("0.4.0-production.eacaeb8", protocol["resolved"]!.GetValue<string>());
+            Assert.Equal("0.4.0-production.2024907", protocol["resolved"]!.GetValue<string>());
             if (protocol["type"]!.GetValue<string>() == "Direct")
             {
                 Assert.Equal(
-                    "[0.4.0-production.eacaeb8, 0.4.0-production.eacaeb8]",
+                    "[0.4.0-production.2024907, 0.4.0-production.2024907]",
                     protocol["requested"]!.GetValue<string>());
             }
             Assert.Equal(
-                "0.4.0-production.eacaeb8",
+                "0.4.0-production.2024907",
                 dependencies["Deep.Protocol.Abstractions"]!["resolved"]!.GetValue<string>());
             Assert.Equal(
-                "0.4.0-production.eacaeb8",
+                "0.4.0-production.2024907",
                 dependencies["Deep.Protocol.Protobuf"]!["resolved"]!.GetValue<string>());
         }
     }

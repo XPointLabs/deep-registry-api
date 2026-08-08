@@ -21,8 +21,11 @@ public sealed class CertificateProductionMailboxInternalAuthorizer(
                 options.Value.InternalAdminAuthenticationType, StringComparison.Ordinal))
             return ValueTask.FromResult(false);
         byte[] expected;
-        try { expected = ProductionMailboxArtifacts.Hex(
-            options.Value.InternalAdminClientCertificateSha256, 32, false); }
+        try
+        {
+            expected = ProductionMailboxArtifacts.Hex(
+            options.Value.InternalAdminClientCertificateSha256, 32, false);
+        }
         catch (InvalidOperationException) { return ValueTask.FromResult(false); }
         return ValueTask.FromResult(CryptographicOperations.FixedTimeEquals(
             SHA256.HashData(certificate.RawData), expected));
@@ -47,6 +50,12 @@ public static class ProductionMailboxHostingExtensions
         services.AddHostedService<ProductionMailboxArtifactsStartupValidator>();
         services.AddSingleton<IEd25519ExternalSigner>(sp => ProductionMailboxSignerFactory.Create(
             sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value, environment));
+        services.AddSingleton<IProductionMailboxClosurePublisherSigner>(sp =>
+            ProductionMailboxClosurePublisherSignerFactory.Create(
+                sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value,
+                environment));
+        services.TryAddSingleton<IProductionMailboxClosureTransport,
+            HttpsProductionMailboxClosureTransport>();
         services.AddSingleton<IProductionMailboxStateStore>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value;
@@ -67,7 +76,10 @@ public static class ProductionMailboxHostingExtensions
             sp.GetRequiredService<IEd25519ExternalSigner>(),
             sp.GetRequiredService<IProductionMailboxStateStore>(),
             sp.GetRequiredService<TimeProvider>(),
-            sp.GetRequiredService<ProductionMailboxMetrics>()));
+            sp.GetRequiredService<ProductionMailboxMetrics>(),
+            sp.GetRequiredService<IProductionMailboxClosurePublisherSigner>(),
+            sp.GetRequiredService<IProductionMailboxClosureTransport>()));
+        services.AddHostedService<ProductionMailboxPublicationDrainer>();
         return true;
     }
 
@@ -123,19 +135,45 @@ public static class ProductionMailboxHostingExtensions
                 };
             }
         }).WithMetadata(new RequestSizeLimitAttribute(16 * 1024));
+        group.MapPost("/route-enrollments", async (
+            ProductionMailboxIssueRequest request,
+            ProductionMailboxCoordinator coordinator,
+            CancellationToken cancellationToken) =>
+        {
+            try { return Results.Ok(await coordinator.EnrollRouteAsync(request, cancellationToken)); }
+            catch (ProductionMailboxIssueException exception)
+            {
+                return exception.Error switch
+                {
+                    ProductionMailboxIssueError.InvalidChallenge => Results.BadRequest(),
+                    ProductionMailboxIssueError.InvalidRequest => Results.BadRequest(),
+                    ProductionMailboxIssueError.InvalidHolderProof =>
+                        Results.StatusCode(StatusCodes.Status403Forbidden),
+                    ProductionMailboxIssueError.InvalidEntitlement =>
+                        Results.StatusCode(StatusCodes.Status403Forbidden),
+                    ProductionMailboxIssueError.Revoked =>
+                        Results.StatusCode(StatusCodes.Status403Forbidden),
+                    ProductionMailboxIssueError.RateLimited =>
+                        Results.StatusCode(StatusCodes.Status429TooManyRequests),
+                    _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+                };
+            }
+        }).WithMetadata(new RequestSizeLimitAttribute(16 * 1024));
 
         var admin = app.MapGroup("/api/internal/production-mailbox");
         admin.MapPost("/artifacts/reload", async (
             HttpContext context,
             IProductionMailboxInternalAuthorizer authorizer,
             ProductionMailboxArtifactProvider provider,
+            ProductionMailboxCoordinator coordinator,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
             if (!await authorizer.IsAuthorizedAsync(context, cancellationToken)) return Results.Unauthorized();
             try
             {
-                var loaded = provider.Reload(timeProvider);
+                var loaded = await coordinator.PromoteConfiguredArtifactsAsync(
+                    provider, timeProvider, cancellationToken);
                 return Results.Ok(new
                 {
                     authoritySha256 = Convert.ToHexStringLower(loaded.AuthoritySha256),

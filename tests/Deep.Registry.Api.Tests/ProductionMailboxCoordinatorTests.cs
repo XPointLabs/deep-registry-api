@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 using Deep.Protocol.DeepExtension.MailboxAuthority;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.MailboxTopology;
@@ -20,6 +21,44 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class ProductionMailboxCoordinatorTests
 {
+    [Fact]
+    public async Task ChallengePublishesAndBindsExactArtifactClosure()
+    {
+        using var fixture = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var signer = new DevelopmentSoftwareEd25519Signer(fixture.IssuerSeedPath);
+        var coordinator = fixture.Coordinator(state, signer);
+
+        var challenge = await coordinator.CreateChallengeAsync(CancellationToken.None);
+        foreach (var pair in new[]
+                 {
+                     (challenge.Authority, fixture.Artifacts.AuthorityBytes),
+                     (challenge.Revocation, fixture.Artifacts.RevocationBytes),
+                     (challenge.Topology, fixture.Artifacts.TopologyBytes)
+                 })
+        {
+            Assert.Equal(pair.Item2, Decode(pair.Item1.CanonicalBase64Url));
+            Assert.Equal(pair.Item1.Sha256,
+                Convert.ToHexStringLower(SHA256.HashData(pair.Item2)));
+        }
+
+        var directState = new InMemoryProductionMailboxStateStore();
+        var closure = Fixture.Bytes(200, 32);
+        var created = await directState.CreateChallengeAsync(
+            Fixture.Now, Fixture.Now + 60, closure, 1, Fixture.Now - 60,
+            CancellationToken.None);
+        Assert.NotNull(created);
+        var wrongClosure = Fixture.Bytes(201, 32);
+        Assert.Null(await directState.ConsumeChallengeAndIssueAsync(
+            created.ChallengeId, created.Challenge, Fixture.Now, Fixture.Now + 60,
+            wrongClosure, Fixture.Bytes(202, 32),
+            _ => ValueTask.FromResult(Fixture.Bytes(203, 32)), CancellationToken.None));
+        Assert.NotNull(await directState.ConsumeChallengeAndIssueAsync(
+            created.ChallengeId, created.Challenge, Fixture.Now, Fixture.Now + 60,
+            closure, Fixture.Bytes(202, 32),
+            _ => ValueTask.FromResult(Fixture.Bytes(203, 32)), CancellationToken.None));
+    }
+
     [Fact]
     public async Task AnonymousBaseIssuance_IsCanonicalIdempotentAndBindsCurrentNext()
     {
@@ -43,6 +82,12 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.Equal(2, first.Selections.Count);
         Assert.Equal(2, first.Grants.Count);
         Assert.Equal(ProductionMailboxIssuanceIntent.LocalOwner, first.Intent);
+        Assert.NotNull(first.RouteCertificate);
+        var verifiedRouteCertificate = ProductionMailboxRouteCertificateVerifier.Verify(
+            Decode(first.RouteCertificate.CanonicalBase64Url), fixture.Artifacts.Authority,
+            Fixture.Now, 0, new SodiumProductionMailboxRouteSignatureVerifier());
+        Assert.Equal(fixture.OwnerPublicKey,
+            verifiedRouteCertificate.Certificate.MailboxOwnerEd25519PublicKey.ToArray());
         Assert.All(first.Grants, grant => Assert.Equal("retrieve", grant.Domain));
         foreach (var artifact in new[] { first.Authority, first.Revocation, first.Topology })
         {
@@ -86,6 +131,88 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     [Fact]
+    public async Task TwoPhaseEnrollment_ReplaysExactPrcAndRejectsCrossEnrollmentSubstitution()
+    {
+        using var fixture = Fixture.Create(maximumChallenges: 32);
+        var state = new InMemoryProductionMailboxStateStore();
+        using var signer = new DevelopmentSoftwareEd25519Signer(fixture.IssuerSeedPath);
+        var coordinator = fixture.Coordinator(state, signer);
+
+        var firstCredentialRequest = await fixture.RequestAsync(coordinator);
+        var enrollmentReplayRequest = fixture.Resign(firstCredentialRequest with
+        {
+            EnrollmentHandle = null,
+            RouteAdvertisement = null
+        });
+        var replayedEnrollment = await coordinator.EnrollRouteAsync(
+            enrollmentReplayRequest, CancellationToken.None);
+        Assert.Equal(firstCredentialRequest.EnrollmentHandle,
+            replayedEnrollment.EnrollmentHandle);
+        var firstAdvertisement = ProductionMailboxRouteAdvertisementCodec.DecodeAdvertisement(
+            Decode(firstCredentialRequest.RouteAdvertisement!));
+        Assert.Equal(
+            Decode(replayedEnrollment.RouteCertificate.CanonicalBase64Url),
+            ProductionMailboxRouteAdvertisementCodec.EncodeCertificate(
+                firstAdvertisement.Certificate));
+        var enrollmentJson = System.Text.Json.JsonSerializer.Serialize(replayedEnrollment);
+        Assert.DoesNotContain("grants", enrollmentJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("selections", enrollmentJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, coordinator.GetCounters().EnrollmentsIssued);
+        Assert.Equal(1, coordinator.GetCounters().EnrollmentsReplayed);
+
+        var credentialRequest = await fixture.RequestAsync(coordinator);
+        var bundle = await coordinator.IssueAsync(credentialRequest, CancellationToken.None);
+        Assert.Equal(replayedEnrollment.RouteCertificate.CanonicalBase64Url,
+            bundle.RouteCertificate!.CanonicalBase64Url);
+        Assert.Equal(credentialRequest.RouteAdvertisement,
+            bundle.RouteAdvertisement!.CanonicalBase64Url);
+
+        var attackerHolder = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(181, 32));
+        var attackerOwner = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(182, 32));
+        var attacker = await fixture.RequestAsync(
+            coordinator, ProductionMailboxIssuanceIntent.LocalOwner,
+            attackerHolder.PublicKey, attackerHolder.PrivateKey,
+            attackerOwner.PublicKey, attackerOwner.PrivateKey);
+        var victim = await fixture.RequestAsync(coordinator);
+        var crossEnrollment = fixture.Resign(victim with
+        {
+            EnrollmentHandle = attacker.EnrollmentHandle,
+            RouteAdvertisement = attacker.RouteAdvertisement
+        });
+        Assert.Equal(ProductionMailboxIssueError.InvalidRequest,
+            (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+                coordinator.IssueAsync(crossEnrollment, CancellationToken.None).AsTask())).Error);
+
+        var victimAdvertisement = ProductionMailboxRouteAdvertisementCodec.DecodeAdvertisement(
+            Decode(victim.RouteAdvertisement!));
+        var substitutedCertificateDraft = victimAdvertisement with
+        {
+            Certificate = victimAdvertisement.Certificate with
+            {
+                ExpiresAtUnixSeconds = victimAdvertisement.Certificate.ExpiresAtUnixSeconds - 1
+            },
+            ExpiresAtUnixSeconds = victimAdvertisement.ExpiresAtUnixSeconds - 1,
+            OwnerSignature = new byte[64]
+        };
+        var substitutedCertificate = substitutedCertificateDraft with
+        {
+            OwnerSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxRouteAdvertisementCodec.GetAdvertisementSigningBytes(
+                    substitutedCertificateDraft), fixture.OwnerPrivateKey)
+        };
+        var exactEnrollmentSubstitution = fixture.Resign(victim with
+        {
+            RouteAdvertisement = B64(
+                ProductionMailboxRouteAdvertisementCodec.EncodeAdvertisement(
+                    substitutedCertificate))
+        });
+        Assert.Equal(ProductionMailboxIssueError.InvalidRequest,
+            (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+                coordinator.IssueAsync(exactEnrollmentSubstitution,
+                    CancellationToken.None).AsTask())).Error);
+    }
+
+    [Fact]
     public async Task ConcurrentIssuance_ReturnsOneDeterministicOutcome()
     {
         using var fixture = Fixture.Create(maximumChallenges: 32);
@@ -116,8 +243,11 @@ public sealed class ProductionMailboxCoordinatorTests
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(mismatch, CancellationToken.None).AsTask())).Error);
 
-        var badAttestation = await fixture.RequestAsync(coordinator);
-        badAttestation = fixture.Resign(badAttestation with { BuildArtifactSha256 = B64(Fixture.Bytes(221, 32)) });
+        var badAttestation = await fixture.RequestAsync(
+            coordinator, ProductionMailboxIssuanceIntent.LocalOwner,
+            fixture.HolderPublicKey, fixture.HolderPrivateKey,
+            fixture.OwnerPublicKey, fixture.OwnerPrivateKey,
+            buildArtifact: Fixture.Bytes(221, 32));
         var metadataOnly = await coordinator.IssueAsync(badAttestation, CancellationToken.None);
         Assert.Equal(badAttestation.HolderEd25519PublicKey, metadataOnly.HolderEd25519PublicKey);
 
@@ -127,15 +257,17 @@ public sealed class ProductionMailboxCoordinatorTests
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(consumed, CancellationToken.None).AsTask())).Error);
 
-        await coordinator.RevokeHolderAsync(fixture.HolderPublicKey, CancellationToken.None);
         var revoked = await fixture.RequestAsync(coordinator);
+        await coordinator.RevokeHolderAsync(fixture.HolderPublicKey, CancellationToken.None);
         Assert.Equal(ProductionMailboxIssueError.Revoked,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(revoked, CancellationToken.None).AsTask())).Error);
 
+        var badSignatureState = new InMemoryProductionMailboxStateStore();
+        var enrollmentCoordinator = fixture.Coordinator(badSignatureState, signer);
+        var badSignature = await fixture.RequestAsync(enrollmentCoordinator);
         var badSignatureCoordinator = fixture.Coordinator(
-            new InMemoryProductionMailboxStateStore(), new InvalidSigner());
-        var badSignature = await fixture.RequestAsync(badSignatureCoordinator);
+            badSignatureState, new InvalidSigner());
         Assert.Equal(ProductionMailboxIssueError.IssuerUnavailable,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 badSignatureCoordinator.IssueAsync(badSignature, CancellationToken.None).AsTask())).Error);
@@ -149,7 +281,7 @@ public sealed class ProductionMailboxCoordinatorTests
         var coordinator = fixture.Coordinator(new InMemoryProductionMailboxStateStore(), signer);
         var request = await fixture.RequestAsync(coordinator);
         request = fixture.Resign(request with
-            { OpaqueEntitlement = B64(Encoding.ASCII.GetBytes("opaque-paid-proof")) });
+        { OpaqueEntitlement = B64(Encoding.ASCII.GetBytes("opaque-paid-proof")) });
         Assert.Equal(ProductionMailboxIssueError.InvalidEntitlement,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(request, CancellationToken.None).AsTask())).Error);
@@ -164,16 +296,16 @@ public sealed class ProductionMailboxCoordinatorTests
 
         var wrongIdempotency = await fixture.RequestAsync(coordinator);
         wrongIdempotency = fixture.SignExact(wrongIdempotency with
-            { IdempotencyKey = B64(Fixture.Bytes(201, 32)) });
+        { IdempotencyKey = B64(Fixture.Bytes(201, 32)) });
         Assert.Equal(ProductionMailboxIssueError.InvalidRequest,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(wrongIdempotency, CancellationToken.None).AsTask())).Error);
 
         var substituted = await fixture.RequestAsync(coordinator);
         substituted = fixture.Resign(substituted with
-            { OpaqueEntitlement = B64(Encoding.ASCII.GetBytes("opaque-paid-proof")) });
+        { OpaqueEntitlement = B64(Encoding.ASCII.GetBytes("opaque-paid-proof")) });
         substituted = substituted with
-            { OpaqueEntitlement = B64(Encoding.ASCII.GetBytes("substituted-proof")) };
+        { OpaqueEntitlement = B64(Encoding.ASCII.GetBytes("substituted-proof")) };
         Assert.Equal(ProductionMailboxIssueError.InvalidEntitlement,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(substituted, CancellationToken.None).AsTask())).Error);
@@ -188,6 +320,10 @@ public sealed class ProductionMailboxCoordinatorTests
         var coordinator = fixture.Coordinator(state, signer);
         var original = await coordinator.IssueAsync(
             await fixture.RequestAsync(coordinator), CancellationToken.None);
+        var ownerStateKey = Assert.Single(state.SnapshotOwnerRouteStateKeys());
+        Assert.False(ownerStateKey.AsSpan().SequenceEqual(fixture.OwnerPublicKey));
+        Assert.False(ownerStateKey.AsSpan().SequenceEqual(Decode(original.BlindedMailboxId)));
+        Assert.False(ownerStateKey.AsSpan().SequenceEqual(Decode(original.BlindedPlacementId)));
 
         var rotatedHolder = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(140, 32));
         var rotation = await fixture.RequestAsync(
@@ -220,6 +356,71 @@ public sealed class ProductionMailboxCoordinatorTests
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
                 coordinator.IssueAsync(peer, CancellationToken.None).AsTask())).Error);
 
+        var certificate = ProductionMailboxRouteAdvertisementCodec.DecodeCertificate(
+            Decode(original.RouteCertificate!.CanonicalBase64Url));
+        var advertisementDraft = new ProductionMailboxRouteAdvertisement
+        {
+            Certificate = certificate,
+            Sequence = 1,
+            PublishedAtUnixSeconds = Fixture.Now,
+            ExpiresAtUnixSeconds = certificate.ExpiresAtUnixSeconds,
+            OwnerSignature = new byte[64]
+        };
+        var advertisement = advertisementDraft with
+        {
+            OwnerSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxRouteAdvertisementCodec.GetAdvertisementSigningBytes(
+                    advertisementDraft), fixture.OwnerPrivateKey)
+        };
+        var advertisedPeer = fixture.Resign(peer with
+        {
+            RouteAdvertisement = B64(
+                ProductionMailboxRouteAdvertisementCodec.EncodeAdvertisement(advertisement))
+        }, attackerHolder.PrivateKey, null);
+        var peerBundle = await coordinator.IssueAsync(advertisedPeer, CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssuanceIntent.PeerDeposit, peerBundle.Intent);
+        Assert.Null(peerBundle.RouteCertificate);
+        Assert.All(peerBundle.Grants, grant => Assert.Equal("deposit", grant.Domain));
+        var advertisementStateKeys = state.SnapshotAdvertisementStateKeys();
+        Assert.Equal(2, advertisementStateKeys.Count);
+        Assert.All(advertisementStateKeys, advertisementStateKey =>
+            Assert.False(advertisementStateKey.AsSpan().SequenceEqual(
+                ProductionMailboxRouteAdvertisementCodec.ComputeRouteDomainHash(certificate))));
+
+        var tamperedPeer = await fixture.RequestAsync(
+            coordinator, ProductionMailboxIssuanceIntent.PeerDeposit,
+            attackerHolder.PublicKey, attackerHolder.PrivateKey,
+            fixture.OwnerPublicKey, null);
+        var tamperedSignature = advertisement.OwnerSignature.ToArray();
+        tamperedSignature[0] ^= 0x01;
+        tamperedPeer = fixture.Resign(tamperedPeer with
+        {
+            RouteAdvertisement = B64(ProductionMailboxRouteAdvertisementCodec
+                .EncodeAdvertisement(advertisement with
+                {
+                    OwnerSignature = tamperedSignature
+                }))
+        }, attackerHolder.PrivateKey, null);
+        Assert.Equal(ProductionMailboxIssueError.RouteAdvertisementRequired,
+            (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+                coordinator.IssueAsync(tamperedPeer, CancellationToken.None).AsTask())).Error);
+
+        var crossOwnerPeer = await fixture.RequestAsync(
+            coordinator, ProductionMailboxIssuanceIntent.PeerDeposit,
+            attackerHolder.PublicKey, attackerHolder.PrivateKey,
+            attackerOwner.PublicKey, null);
+        crossOwnerPeer = fixture.Resign(crossOwnerPeer with
+        {
+            BlindedMailboxId = original.BlindedMailboxId,
+            BlindedPlacementId = original.BlindedPlacementId,
+            SelectionInputCommitment = original.SelectionInputCommitment,
+            RouteAdvertisement = B64(ProductionMailboxRouteAdvertisementCodec
+                .EncodeAdvertisement(advertisement))
+        }, attackerHolder.PrivateKey, null);
+        Assert.Equal(ProductionMailboxIssueError.InvalidRequest,
+            (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+                coordinator.IssueAsync(crossOwnerPeer, CancellationToken.None).AsTask())).Error);
+
         var intentReplay = peer with { Intent = ProductionMailboxIssuanceIntent.LocalOwner };
         Assert.Equal(ProductionMailboxIssueError.InvalidHolderProof,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
@@ -231,6 +432,236 @@ public sealed class ProductionMailboxCoordinatorTests
             rotatedHolder.PublicKey, rotatedHolder.PrivateKey,
             fixture.OwnerPublicKey, fixture.OwnerPrivateKey);
         _ = await coordinator.IssueAsync(afterRevocation, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task RouteAdvertisementState_IsMonotonicIdempotentAndRejectsForks()
+    {
+        var state = new InMemoryProductionMailboxStateStore();
+        var key = Fixture.Bytes(0x31, 32);
+        var first = Fixture.Bytes(0x32, 32);
+        var second = Fixture.Bytes(0x33, 32);
+
+        Assert.Equal(ProductionMailboxRouteAdvertisementAcceptance.Accepted,
+            await state.AcceptRouteAdvertisementAsync(key, 2, first, CancellationToken.None));
+        Assert.Equal(ProductionMailboxRouteAdvertisementAcceptance.ExactReplay,
+            await state.AcceptRouteAdvertisementAsync(key, 2, first, CancellationToken.None));
+        Assert.Equal(ProductionMailboxRouteAdvertisementAcceptance.Conflict,
+            await state.AcceptRouteAdvertisementAsync(key, 2, second, CancellationToken.None));
+        Assert.Equal(ProductionMailboxRouteAdvertisementAcceptance.Accepted,
+            await state.AcceptRouteAdvertisementAsync(key, 3, second, CancellationToken.None));
+        Assert.Equal(ProductionMailboxRouteAdvertisementAcceptance.Rollback,
+            await state.AcceptRouteAdvertisementAsync(key, 2, first, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TwoPhaseState_CallbackFailureRollsBackAndExactRetryReplays()
+    {
+        var state = new InMemoryProductionMailboxStateStore();
+        var closure = Fixture.Bytes(190, 32);
+        var enrollmentKey = Fixture.Bytes(191, 32);
+        var idempotency = Fixture.Bytes(192, 32);
+        var enrollmentResponse = Fixture.Bytes(193, 64);
+        var challenge = await state.CreateChallengeAsync(
+            Fixture.Now, Fixture.Now + 60, closure, 8, Fixture.Now - 60,
+            CancellationToken.None);
+        Assert.NotNull(challenge);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await state.ConsumeChallengeAndEnrollAsync(
+                challenge.ChallengeId, challenge.Challenge, Fixture.Now,
+                Fixture.Now + 60, closure, enrollmentKey, idempotency,
+                _ => throw new InvalidOperationException("injected before commit"),
+                CancellationToken.None));
+        var enrolled = await state.ConsumeChallengeAndEnrollAsync(
+            challenge.ChallengeId, challenge.Challenge, Fixture.Now,
+            Fixture.Now + 60, closure, enrollmentKey, idempotency,
+            _ => ValueTask.FromResult(enrollmentResponse), CancellationToken.None);
+        Assert.NotNull(enrolled);
+        Assert.False(enrolled.Replayed);
+        Assert.Equal(enrollmentResponse, enrolled.CanonicalResponse);
+
+        var routeState = Fixture.Bytes(194, 32);
+        var advertisementHash = Fixture.Bytes(195, 32);
+        var credentialResponse = Fixture.Bytes(196, 80);
+        var credentialChallenge = await state.CreateChallengeAsync(
+            Fixture.Now, Fixture.Now + 60, closure, 8, Fixture.Now - 60,
+            CancellationToken.None);
+        Assert.NotNull(credentialChallenge);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+                credentialChallenge.ChallengeId, credentialChallenge.Challenge,
+                Fixture.Now, Fixture.Now + 60, closure, idempotency, enrollmentKey,
+                routeState, 1, advertisementHash,
+                _ => throw new InvalidOperationException("injected before commit"),
+                CancellationToken.None));
+        var issued = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+            credentialChallenge.ChallengeId, credentialChallenge.Challenge,
+            Fixture.Now, Fixture.Now + 60, closure, idempotency, enrollmentKey,
+            routeState, 1, advertisementHash,
+            _ => ValueTask.FromResult(new ProductionMailboxPreparedIssue(
+                credentialResponse, [], [], [])), CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssueCommitStatus.Accepted, issued.Status);
+        Assert.Equal(credentialResponse, issued.CanonicalResponse);
+
+        var replayChallenge = await state.CreateChallengeAsync(
+            Fixture.Now, Fixture.Now + 60, closure, 8, Fixture.Now - 60,
+            CancellationToken.None);
+        Assert.NotNull(replayChallenge);
+        var replayed = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+            replayChallenge.ChallengeId, replayChallenge.Challenge,
+            Fixture.Now, Fixture.Now + 60, closure, idempotency, enrollmentKey,
+            routeState, 1, advertisementHash,
+            _ => throw new InvalidOperationException("replay must not invoke callback"),
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssueCommitStatus.Replayed, replayed.Status);
+        Assert.Equal(credentialResponse, replayed.CanonicalResponse);
+    }
+
+    [Fact]
+    public async Task PostgreSqlTwoPhaseState_ExpiredDeterministicKeysRenewConcurrently()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+
+        var state = new PostgreSqlProductionMailboxStateStore(connectionString);
+        var prefix = RandomNumberGenerator.GetBytes(16);
+        byte[] Key(byte suffix) => SHA256.HashData([.. prefix, suffix]);
+        const ulong firstNow = 1_000_000;
+        var closure = Key(1);
+        var enrollmentStateKey = Key(2);
+        var enrollmentIdempotencyKey = Key(3);
+
+        var firstEnrollmentChallenge = await state.CreateChallengeAsync(
+            firstNow, firstNow + 60, closure, 100, firstNow - 60,
+            CancellationToken.None);
+        Assert.NotNull(firstEnrollmentChallenge);
+        var firstEnrollment = await state.ConsumeChallengeAndEnrollAsync(
+            firstEnrollmentChallenge.ChallengeId,
+            firstEnrollmentChallenge.Challenge,
+            firstNow, firstNow + 10, closure, enrollmentStateKey,
+            enrollmentIdempotencyKey,
+            _ => ValueTask.FromResult(Key(4)), CancellationToken.None);
+        Assert.NotNull(firstEnrollment);
+        Assert.False(firstEnrollment.Replayed);
+
+        const ulong renewalNow = firstNow + 11;
+        var enrollmentChallenges = new[]
+        {
+            await state.CreateChallengeAsync(
+                renewalNow, renewalNow + 120, closure, 100, renewalNow - 60,
+                CancellationToken.None),
+            await state.CreateChallengeAsync(
+                renewalNow, renewalNow + 120, closure, 100, renewalNow - 60,
+                CancellationToken.None)
+        };
+        Assert.All(enrollmentChallenges, Assert.NotNull);
+        var enrollmentCallbacks = 0;
+        var renewedEnrollmentResponse = Key(5);
+        var enrollmentRenewals = await Task.WhenAll(enrollmentChallenges.Select(
+            challenge => state.ConsumeChallengeAndEnrollAsync(
+                challenge!.ChallengeId, challenge.Challenge,
+                renewalNow, renewalNow + 120, closure, enrollmentStateKey,
+                enrollmentIdempotencyKey,
+                _ =>
+                {
+                    Interlocked.Increment(ref enrollmentCallbacks);
+                    return ValueTask.FromResult(renewedEnrollmentResponse);
+                }, CancellationToken.None).AsTask()));
+        Assert.Equal(1, enrollmentCallbacks);
+        Assert.All(enrollmentRenewals, Assert.NotNull);
+        Assert.Equal(1, enrollmentRenewals.Count(static result => result!.Replayed));
+        Assert.All(enrollmentRenewals, result =>
+            Assert.Equal(renewedEnrollmentResponse, result!.CanonicalResponse));
+
+        var issuanceIdempotencyKey = Key(6);
+        var routeDomainHash = Key(7);
+        var advertisementHash = Key(8);
+        var firstIssueChallenge = await state.CreateChallengeAsync(
+            renewalNow, renewalNow + 60, closure, 100, renewalNow - 60,
+            CancellationToken.None);
+        Assert.NotNull(firstIssueChallenge);
+        var firstIssue = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+            firstIssueChallenge.ChallengeId, firstIssueChallenge.Challenge,
+            renewalNow, renewalNow + 10, closure, issuanceIdempotencyKey,
+            enrollmentStateKey, routeDomainHash, 1, advertisementHash,
+            _ => ValueTask.FromResult(new ProductionMailboxPreparedIssue(
+                Key(9), [], [], [])), CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssueCommitStatus.Accepted, firstIssue.Status);
+
+        const ulong issueRenewalNow = renewalNow + 11;
+        var renewedAdvertisementHash = Key(11);
+        var issueChallenges = new[]
+        {
+            await state.CreateChallengeAsync(
+                issueRenewalNow, issueRenewalNow + 60, closure, 100,
+                issueRenewalNow - 60, CancellationToken.None),
+            await state.CreateChallengeAsync(
+                issueRenewalNow, issueRenewalNow + 60, closure, 100,
+                issueRenewalNow - 60, CancellationToken.None)
+        };
+        Assert.All(issueChallenges, Assert.NotNull);
+        var issueCallbacks = 0;
+        var renewedIssueResponse = Key(10);
+        var issueRenewals = await Task.WhenAll(issueChallenges.Select(
+            challenge => state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+                challenge!.ChallengeId, challenge.Challenge,
+                issueRenewalNow, issueRenewalNow + 60, closure,
+                issuanceIdempotencyKey, enrollmentStateKey, routeDomainHash,
+                2, renewedAdvertisementHash,
+                _ =>
+                {
+                    Interlocked.Increment(ref issueCallbacks);
+                    return ValueTask.FromResult(new ProductionMailboxPreparedIssue(
+                        renewedIssueResponse, [], [], []));
+                }, CancellationToken.None).AsTask()));
+        Assert.Equal(1, issueCallbacks);
+        Assert.Equal(1, issueRenewals.Count(static result =>
+            result.Status == ProductionMailboxIssueCommitStatus.Replayed));
+        Assert.Equal(1, issueRenewals.Count(static result =>
+            result.Status == ProductionMailboxIssueCommitStatus.Accepted));
+        Assert.All(issueRenewals, result =>
+            Assert.Equal(renewedIssueResponse, result.CanonicalResponse));
+
+        var liveForkChallenge = await state.CreateChallengeAsync(
+            issueRenewalNow, issueRenewalNow + 60, closure, 100,
+            issueRenewalNow - 60, CancellationToken.None);
+        Assert.NotNull(liveForkChallenge);
+        var liveFork = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+            liveForkChallenge.ChallengeId, liveForkChallenge.Challenge,
+            issueRenewalNow, issueRenewalNow + 60, closure,
+            issuanceIdempotencyKey, enrollmentStateKey, routeDomainHash,
+            3, Key(12), _ => throw new InvalidOperationException(
+                "live issuance fork must not invoke callback"), CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssueCommitStatus.IssuanceConflict,
+            liveFork.Status);
+
+        var rollbackChallenge = await state.CreateChallengeAsync(
+            issueRenewalNow, issueRenewalNow + 60, closure, 100,
+            issueRenewalNow - 60, CancellationToken.None);
+        Assert.NotNull(rollbackChallenge);
+        var rollback = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+            rollbackChallenge.ChallengeId, rollbackChallenge.Challenge,
+            issueRenewalNow, issueRenewalNow + 60, closure, Key(13),
+            enrollmentStateKey, routeDomainHash, 1, advertisementHash,
+            _ => throw new InvalidOperationException(
+                "advertisement rollback must not invoke callback"),
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssueCommitStatus.AdvertisementRollback,
+            rollback.Status);
+
+        var routeForkChallenge = await state.CreateChallengeAsync(
+            issueRenewalNow, issueRenewalNow + 60, closure, 100,
+            issueRenewalNow - 60, CancellationToken.None);
+        Assert.NotNull(routeForkChallenge);
+        var routeFork = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
+            routeForkChallenge.ChallengeId, routeForkChallenge.Challenge,
+            issueRenewalNow, issueRenewalNow + 60, closure, Key(14),
+            enrollmentStateKey, routeDomainHash, 2, Key(15),
+            _ => throw new InvalidOperationException(
+                "advertisement fork must not invoke callback"),
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxIssueCommitStatus.AdvertisementConflict,
+            routeFork.Status);
     }
 
     [Fact]
@@ -251,6 +682,57 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     [Fact]
+    public void CoordinatorConstruction_RejectsLinkedAndSwappedRouteStateKey()
+    {
+        using var fixture = Fixture.Create();
+        using var signer = new DevelopmentSoftwareEd25519Signer(
+            fixture.IssuerSeedPath);
+        var root = Path.Combine(Path.GetTempPath(), "deep-route-key-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var key = File.ReadAllBytes(fixture.Options.RouteStateHmacKeyPath);
+            var target = Path.Combine(root, "target.key");
+            File.WriteAllBytes(target, key);
+            var leafLink = Path.Combine(root, "leaf-link.key");
+            File.CreateSymbolicLink(leafLink, target);
+            fixture.Options.RouteStateHmacKeyPath = leafLink;
+            Assert.ThrowsAny<Exception>(() => fixture.Coordinator(
+                new InMemoryProductionMailboxStateStore(), signer));
+
+            var targetDirectory = Path.Combine(root, "target-directory");
+            Directory.CreateDirectory(targetDirectory);
+            File.WriteAllBytes(Path.Combine(targetDirectory, "state.key"), key);
+            var ancestorLink = Path.Combine(root, "ancestor-link");
+            Directory.CreateSymbolicLink(ancestorLink, targetDirectory);
+            fixture.Options.RouteStateHmacKeyPath = Path.Combine(
+                ancestorLink, "state.key");
+            Assert.ThrowsAny<Exception>(() => fixture.Coordinator(
+                new InMemoryProductionMailboxStateStore(), signer));
+
+            var swap = Path.Combine(root, "swap.key");
+            var replacement = Path.Combine(root, "replacement.key");
+            var backup = Path.Combine(root, "backup.key");
+            File.WriteAllBytes(swap, key);
+            File.WriteAllBytes(replacement, Fixture.Bytes(0xAC, 32));
+            fixture.Options.RouteStateHmacKeyPath = swap;
+            ProductionMailboxCoordinator.RouteStateKeyAfterActualOpenForTests = () =>
+            {
+                File.Move(swap, backup);
+                File.Move(replacement, swap);
+            };
+            Assert.Throws<InvalidDataException>(() => fixture.Coordinator(
+                new InMemoryProductionMailboxStateStore(), signer));
+        }
+        finally
+        {
+            ProductionMailboxCoordinator.RouteStateKeyAfterActualOpenForTests = null;
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ArtifactLoad_RejectsStaleOrTamperedClosure()
     {
         using var fixture = Fixture.Create();
@@ -268,9 +750,13 @@ public sealed class ProductionMailboxCoordinatorTests
     public async Task ArtifactFreshness_IsCheckedPerRequestBeforeIssuerUse()
     {
         using var fixture = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var enrollmentSigner = new DevelopmentSoftwareEd25519Signer(
+            fixture.IssuerSeedPath);
+        var enrollmentCoordinator = fixture.Coordinator(state, enrollmentSigner);
+        var request = await fixture.RequestAsync(enrollmentCoordinator);
         var signer = new CountingSigner();
-        var coordinator = fixture.Coordinator(new InMemoryProductionMailboxStateStore(), signer);
-        var request = await fixture.RequestAsync(coordinator);
+        var coordinator = fixture.Coordinator(state, signer);
         fixture.TimeProvider.Set(Fixture.Now + 2_000);
 
         Assert.Equal(ProductionMailboxIssueError.IssuerUnavailable,
@@ -292,7 +778,9 @@ public sealed class ProductionMailboxCoordinatorTests
         var coordinator = new ProductionMailboxCoordinator(
             Microsoft.Extensions.Options.Options.Create(first.Options), provider.Current, signer,
             new InMemoryProductionMailboxStateStore(), first.TimeProvider,
-            new ProductionMailboxMetrics());
+            new ProductionMailboxMetrics(),
+            new ProductionMailboxClosurePublisherSignerAdapter(signer),
+            new AcceptingClosureTransport());
         var request = await first.RequestAsync(coordinator);
         var oldAuthorityHash = Convert.ToHexStringLower(first.Artifacts.AuthoritySha256);
 
@@ -310,6 +798,393 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     [Fact]
+    public async Task RotationIssuesVerifiableDirectPssAndReplaysExactPromotedGrant()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        var oldBundle = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var secondCoordinator = second.Coordinator(state, secondSigner);
+        var candidate = await second.RequestAsync(secondCoordinator);
+        var candidateAdvertisement = ProductionMailboxRouteAdvertisementCodec.DecodeAdvertisement(
+            Decode(candidate.RouteAdvertisement!));
+        var rollbackDraft = candidateAdvertisement with
+        {
+            Sequence = 1,
+            OwnerSignature = new byte[64]
+        };
+        var rollback = rollbackDraft with
+        {
+            OwnerSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxRouteAdvertisementCodec.GetAdvertisementSigningBytes(
+                    rollbackDraft), second.OwnerPrivateKey)
+        };
+        var rollbackRequest = second.Resign(candidate with
+        {
+            RouteAdvertisement = B64(
+                ProductionMailboxRouteAdvertisementCodec.EncodeAdvertisement(rollback))
+        });
+        Assert.Equal(ProductionMailboxIssueError.InvalidRequest,
+            (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+                secondCoordinator.IssueAsync(
+                    rollbackRequest, CancellationToken.None).AsTask())).Error);
+        var newBundle = await secondCoordinator.IssueAsync(
+            await second.RequestAsync(secondCoordinator), CancellationToken.None);
+
+        Assert.NotNull(newBundle.SelectionSuccessor);
+        var oldTopology = first.Artifacts.Topology.Snapshot;
+        var oldNextSelection = oldBundle.Selections.Single(value =>
+            value.Epoch == oldTopology.NextEpoch.Epoch &&
+            value.Generation == oldTopology.NextEpoch.Generation);
+        var verified = ProductionMailboxSelectionSuccessorVerifier.VerifyDirectPromotion(
+            Decode(newBundle.SelectionSuccessor.CanonicalBase64Url),
+            first.Artifacts.Authority, first.Artifacts.Topology,
+            second.Artifacts.Authority, second.Artifacts.Topology,
+            new ProductionMailboxSelectionSuccessorVerificationContext
+            {
+                ExpectedNetworkId = second.Artifacts.Authority.Authority.NetworkId,
+                ExpectedMailboxOwnerEd25519PublicKey = second.OwnerPublicKey,
+                ExpectedBlindedMailboxId = Decode(newBundle.BlindedMailboxId),
+                ExpectedBlindedPlacementId = Decode(newBundle.BlindedPlacementId),
+                PinnedMrXPublicKeySha256 = Convert.FromHexString(
+                    second.Options.PinnedMrXPublicKeySha256),
+                ExpectedOldCanonicalSelectionHash = SHA256.HashData(
+                    Decode(oldNextSelection.CanonicalBase64Url)),
+                NowUnixSeconds = Fixture.Now,
+                ClockSkewSeconds = 0
+            }, new SodiumProductionMailboxAuthoritySignatureVerifier(),
+            new SodiumProductionMailboxTopologySignatureVerifier(),
+            new SodiumProductionMailboxSelectionSuccessorSignatureVerifier());
+        Assert.Equal(ProductionMailboxSelectionSuccessorMode.DirectPromotion,
+            verified.Proof.Mode);
+
+        var oldNextGrant = oldBundle.Grants.Single(value =>
+            value.Epoch == oldTopology.NextEpoch.Epoch &&
+            value.Generation == oldTopology.NextEpoch.Generation);
+        var promotedCurrentGrant = newBundle.Grants.Single(value =>
+            value.Epoch == second.Artifacts.Topology.Snapshot.CurrentEpoch.Epoch &&
+            value.Generation == second.Artifacts.Topology.Snapshot.CurrentEpoch.Generation);
+        Assert.Equal(oldNextGrant.CanonicalBase64Url, promotedCurrentGrant.CanonicalBase64Url);
+    }
+
+    [Fact]
+    public async Task PublicationRetryRenewsFreshPmpAttemptAfterOriginalAttemptExpires()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new SwitchableClosureTransport { Accept = false };
+        var coordinator = second.Coordinator(state, secondSigner, transport);
+        var request = await second.RequestAsync(coordinator);
+        Assert.Equal(ProductionMailboxIssueError.IssuerUnavailable,
+            (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+                coordinator.IssueAsync(request, CancellationToken.None).AsTask())).Error);
+        var firstAttemptHashes = transport.CommandHashes.ToArray();
+        Assert.NotEmpty(firstAttemptHashes);
+        Assert.NotEmpty(await state.ListPendingPublicationKeysAsync(8, CancellationToken.None));
+
+        second.TimeProvider.Set(Fixture.Now + 301);
+        transport.Accept = true;
+        var replay = await second.RequestAsync(coordinator);
+        _ = await coordinator.IssueAsync(replay, CancellationToken.None);
+
+        var renewed = transport.CommandHashes.Skip(firstAttemptHashes.Length).ToArray();
+        Assert.Equal(firstAttemptHashes.Length, renewed.Length);
+        Assert.All(firstAttemptHashes.Zip(renewed), pair => Assert.NotEqual(pair.First, pair.Second));
+        Assert.Empty(await state.ListPendingPublicationKeysAsync(8, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ProactivePromotion_FencesLateOwnersAndResumesAfterAtomicCommitCrash()
+    {
+        using var first = Fixture.Create(maximumChallenges: 32);
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        var oldBundle = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var secondHolder = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(0xB7, 32));
+        var secondOwner = PublicKeyAuth.GenerateKeyPair(Fixture.Bytes(0xB8, 32));
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator,
+                ProductionMailboxIssuanceIntent.LocalOwner,
+                secondHolder.PublicKey, secondHolder.PrivateKey,
+                secondOwner.PublicKey, secondOwner.PrivateKey),
+            CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var transport = new SwitchableClosureTransport { Accept = true };
+        var promotionCoordinator = first.Coordinator(state, secondSigner, transport);
+        state.ThrowAfterPromotedOwnerCommitOnce = true;
+        await Assert.ThrowsAsync<IOException>(() =>
+            promotionCoordinator.PromoteArtifactsAsync(
+                provider, second.Artifacts, CancellationToken.None).AsTask());
+
+        Assert.Equal(first.Artifacts.AuthoritySha256, provider.Current.AuthoritySha256);
+        Assert.NotEmpty(await state.ListPendingPublicationKeysAsync(
+            8, CancellationToken.None));
+        var blocked = await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
+            first.RequestAsync(promotionCoordinator));
+        Assert.Contains(blocked.Error,
+            new[] { ProductionMailboxIssueError.InvalidChallenge,
+                ProductionMailboxIssueError.IssuerUnavailable });
+
+        File.Copy(second.Options.AuthorityPath, first.Options.AuthorityPath, true);
+        File.Copy(second.Options.RevocationPath, first.Options.RevocationPath, true);
+        File.Copy(second.Options.TopologyPath, first.Options.TopologyPath, true);
+        Directory.Delete(first.Options.MembershipProofDirectory, recursive: true);
+        var restartedProvider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            restartedProvider.Current.AuthoritySha256);
+        File.Delete(first.Options.AuthorityPath);
+        File.Delete(first.Options.RevocationPath);
+        File.Delete(first.Options.TopologyPath);
+        var restartedCoordinator = first.Coordinator(state, secondSigner, transport);
+        var promoted = await restartedCoordinator.PromoteConfiguredArtifactsAsync(
+            restartedProvider, first.TimeProvider, CancellationToken.None);
+        Assert.Equal(second.Artifacts.AuthoritySha256, promoted.AuthoritySha256);
+        Assert.Equal(second.Artifacts.AuthoritySha256,
+            restartedProvider.Current.AuthoritySha256);
+        Assert.Empty(await state.ListPendingPublicationKeysAsync(8, CancellationToken.None));
+        Assert.NotEmpty(transport.CommandHashes);
+        Assert.Equal(2, state.SnapshotOwnerRouteStateKeys().Count);
+        foreach (var ownerStateKey in state.SnapshotOwnerRouteStateKeys())
+        {
+            var promotedBytes = await state.GetLatestOwnerBundleAsync(
+                ownerStateKey, CancellationToken.None);
+            var promotedBundle = System.Text.Json.JsonSerializer.Deserialize<
+                ProductionMailboxCredentialBundle>(promotedBytes!,
+                    new System.Text.Json.JsonSerializerOptions(
+                        System.Text.Json.JsonSerializerDefaults.Web));
+            Assert.NotNull(promotedBundle);
+            Assert.Equal(Convert.ToHexStringLower(second.Artifacts.AuthoritySha256),
+                promotedBundle.Authority.Sha256);
+            Assert.NotEqual(oldBundle.Authority.Sha256, promotedBundle.Authority.Sha256);
+            Assert.NotNull(promotedBundle.SelectionSuccessor);
+        }
+    }
+
+    [Fact]
+    public async Task PromotionState_PaginatesImmutableWatermarkAndRequiresEveryAck()
+    {
+        var state = new InMemoryProductionMailboxStateStore();
+        for (var index = 1; index <= 70; index++)
+            await state.StoreLatestOwnerBundleAsync(
+                Fixture.Bytes((byte)index, 32), Fixture.Bytes((byte)(index + 70), 48),
+                Fixture.Now, CancellationToken.None);
+        var promotionKey = Fixture.Bytes(0xD0, 32);
+        var promotion = await state.BeginArtifactPromotionAsync(
+            promotionKey, Fixture.Bytes(0xD1, 32), Fixture.Bytes(0xD2, 32),
+            CancellationToken.None);
+        Assert.Equal(70, promotion.OwnerWatermark);
+        await state.StoreLatestOwnerBundleAsync(
+            Fixture.Bytes(0xD3, 32), Fixture.Bytes(0xD4, 48), Fixture.Now,
+            CancellationToken.None);
+
+        var processed = 0;
+        while (true)
+        {
+            var owners = await state.ListOwnerBundlesForPromotionAsync(
+                promotionKey, 64, CancellationToken.None);
+            if (owners.Count == 0) break;
+            Assert.InRange(owners.Count, 1, 64);
+            foreach (var owner in owners)
+            {
+                var marker = checked((byte)owner.Sequence);
+                var envelope = Fixture.Bytes(marker, 64);
+                var publicationKey = SHA256.HashData(
+                    Encoding.UTF8.GetBytes($"promotion-{owner.Sequence}"));
+                var targetKey = SHA256.HashData(
+                    Encoding.UTF8.GetBytes($"target-{owner.Sequence}"));
+                var item = new ProductionMailboxPublicationItem(
+                    targetKey, Fixture.Bytes(0xE1, 32), "https://node.example/",
+                    Fixture.Bytes(0xE2, 32), Fixture.Bytes(0xE3, 32), [],
+                    envelope, SHA256.HashData(envelope));
+                var prepared = new ProductionMailboxPreparedIssue(
+                    Fixture.Bytes((byte)(marker + 1), 96), owner.RouteStateKey,
+                    publicationKey, [item]);
+                Assert.True(await state.CommitPromotedOwnerAsync(
+                    promotionKey, owner, prepared, Fixture.Now,
+                    CancellationToken.None));
+                var attempt = Fixture.Bytes(0xE4, 32);
+                Assert.True(await state.RecordPublicationAttemptAsync(
+                    publicationKey, targetKey, item.EnvelopeSha256, attempt,
+                    Fixture.Now, CancellationToken.None));
+                Assert.True(await state.AcknowledgePublicationAsync(
+                    publicationKey, targetKey, item.EnvelopeSha256, attempt,
+                    CancellationToken.None));
+                processed++;
+            }
+        }
+        Assert.Equal(70, processed);
+        Assert.True(await state.CompleteArtifactPromotionSweepAsync(
+            promotionKey, CancellationToken.None));
+        Assert.True(await state.MarkArtifactPromotionPublishedAsync(
+            promotionKey, CancellationToken.None));
+        Assert.Equal(Fixture.Bytes(0xD4, 48),
+            await state.GetLatestOwnerBundleAsync(
+                Fixture.Bytes(0xD3, 32), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Promotion_ReconcilesCrashAfterProviderCutoverBeforePublishedMarker()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var promotionCoordinator = first.Coordinator(
+            state, secondSigner, new AcceptingClosureTransport());
+        state.ThrowBeforePromotionPublishedOnce = true;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            promotionCoordinator.PromoteArtifactsAsync(
+                provider, second.Artifacts, CancellationToken.None).AsTask());
+        Assert.Equal(second.Artifacts.AuthoritySha256,
+            provider.Current.AuthoritySha256);
+        var active = await state.GetActiveArtifactPromotionAsync(CancellationToken.None);
+        Assert.NotNull(active);
+        Assert.True(active.SweepCompleted);
+
+        var restartedProvider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Equal(second.Artifacts.AuthoritySha256,
+            restartedProvider.Current.AuthoritySha256);
+        var restartedCoordinator = first.Coordinator(
+            state, secondSigner, new AcceptingClosureTransport());
+        var reconciled = await restartedCoordinator.PromoteConfiguredArtifactsAsync(
+            restartedProvider, first.TimeProvider, CancellationToken.None);
+        Assert.Equal(second.Artifacts.AuthoritySha256, reconciled.AuthoritySha256);
+        Assert.Null(await state.GetActiveArtifactPromotionAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Promotion_FreshProviderKeepsOldActiveAfterCompletedSweepBeforeCutover()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        _ = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var promotionCoordinator = first.Coordinator(
+            state, secondSigner, new AcceptingClosureTransport());
+        promotionCoordinator.ThrowBeforeArtifactProviderCutoverOnce = true;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            promotionCoordinator.PromoteArtifactsAsync(
+                provider, second.Artifacts, CancellationToken.None).AsTask());
+        var active = await state.GetActiveArtifactPromotionAsync(CancellationToken.None);
+        Assert.NotNull(active);
+        Assert.True(active.SweepCompleted);
+        Assert.Equal(first.Artifacts.AuthoritySha256, provider.Current.AuthoritySha256);
+
+        var restartedProvider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            restartedProvider.Current.AuthoritySha256);
+        var restartedCoordinator = first.Coordinator(
+            state, secondSigner, new AcceptingClosureTransport());
+        var promoted = await restartedCoordinator.PromoteConfiguredArtifactsAsync(
+            restartedProvider, first.TimeProvider, CancellationToken.None);
+        Assert.Equal(second.Artifacts.AuthoritySha256, promoted.AuthoritySha256);
+        Assert.Null(await state.GetActiveArtifactPromotionAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AtomicOwnerStateCommit_SurvivesLostIssueResponseBeforeNextRotation()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        var lostRequest = await first.RequestAsync(firstCoordinator);
+        state.ThrowAfterIssueCommitOnce = true;
+        await Assert.ThrowsAsync<IOException>(() => firstCoordinator.IssueAsync(
+            lostRequest, CancellationToken.None).AsTask());
+
+        using var second = Fixture.CreateRotation(first);
+        using var secondSigner = new DevelopmentSoftwareEd25519Signer(second.IssuerSeedPath);
+        var secondCoordinator = second.Coordinator(state, secondSigner);
+        var next = await secondCoordinator.IssueAsync(
+            await second.RequestAsync(secondCoordinator), CancellationToken.None);
+
+        Assert.NotNull(next.SelectionSuccessor);
+        var successor = ProductionMailboxSelectionSuccessorCodec.Decode(
+            Decode(next.SelectionSuccessor.CanonicalBase64Url));
+        Assert.Equal(ProductionMailboxSelectionSuccessorMode.DirectPromotion,
+            successor.Mode);
+    }
+
+    [Fact]
+    public async Task TwoMissedRotationsIssueVerifiableOfflineCheckpoint()
+    {
+        using var first = Fixture.Create();
+        var state = new InMemoryProductionMailboxStateStore();
+        using var firstSigner = new DevelopmentSoftwareEd25519Signer(first.IssuerSeedPath);
+        var firstCoordinator = first.Coordinator(state, firstSigner);
+        var oldBundle = await firstCoordinator.IssueAsync(
+            await first.RequestAsync(firstCoordinator), CancellationToken.None);
+
+        using var second = Fixture.CreateRotation(first);
+        using var third = Fixture.CreateRotation(second);
+        using var thirdSigner = new DevelopmentSoftwareEd25519Signer(third.IssuerSeedPath);
+        var thirdCoordinator = third.Coordinator(state, thirdSigner);
+        var currentBundle = await thirdCoordinator.IssueAsync(
+            await third.RequestAsync(thirdCoordinator), CancellationToken.None);
+
+        Assert.NotNull(currentBundle.SelectionSuccessor);
+        var oldNext = oldBundle.Selections.Single(value =>
+            value.Epoch == first.Artifacts.Topology.Snapshot.NextEpoch.Epoch);
+        var verified = ProductionMailboxSelectionSuccessorVerifier.VerifyOfflineCheckpoint(
+            Decode(currentBundle.SelectionSuccessor.CanonicalBase64Url),
+            first.Artifacts.Authority, first.Artifacts.Topology,
+            third.Artifacts.TopologyBytes,
+            new ProductionMailboxSelectionSuccessorVerificationContext
+            {
+                ExpectedNetworkId = third.Artifacts.Authority.Authority.NetworkId,
+                ExpectedMailboxOwnerEd25519PublicKey = third.OwnerPublicKey,
+                ExpectedBlindedMailboxId = Decode(currentBundle.BlindedMailboxId),
+                ExpectedBlindedPlacementId = Decode(currentBundle.BlindedPlacementId),
+                PinnedMrXPublicKeySha256 = Convert.FromHexString(
+                    third.Options.PinnedMrXPublicKeySha256),
+                ExpectedOldCanonicalSelectionHash = SHA256.HashData(
+                    Decode(oldNext.CanonicalBase64Url)),
+                NowUnixSeconds = Fixture.Now,
+                ClockSkewSeconds = 0
+            }, new SodiumProductionMailboxAuthoritySignatureVerifier(),
+            new SodiumProductionMailboxTopologySignatureVerifier(),
+            new SodiumProductionMailboxSelectionSuccessorSignatureVerifier());
+        Assert.Equal(ProductionMailboxSelectionSuccessorMode.OfflineCheckpoint,
+            verified.Proof.Mode);
+        Assert.All(verified.Proof.OldIssuerSignature.ToArray(), value => Assert.Equal(0, value));
+    }
+
+    [Fact]
     public void ArtifactCatalog_RejectsReloadBeforeEvictingAnUnexpiredClosure()
     {
         using var first = Fixture.Create();
@@ -320,6 +1195,282 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.Throws<InvalidOperationException>(() =>
             provider.PublishVerified(second.Artifacts, Fixture.Now));
         Assert.Equal(first.Artifacts.AuthoritySha256, provider.Current.AuthoritySha256);
+    }
+
+    [Fact]
+    public void ArtifactCatalog_PrunesExpiredStagedClosureAcrossRestart()
+    {
+        using var first = Fixture.Create();
+        first.Options.MaximumRetainedArtifactClosures = 2;
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        using var expiredCandidate = Fixture.CreateRotation(first);
+        provider.StageVerifiedSuccessor(expiredCandidate.Artifacts);
+
+        var catalogRoot = Path.Combine(Path.GetDirectoryName(
+            first.Options.RouteStateHmacKeyPath)!,
+            "production-mailbox-artifact-catalog");
+        var activeId = Convert.ToHexStringLower(File.ReadAllBytes(
+            Path.Combine(catalogRoot, "active.pmac1"))[..32]);
+        var stagedManifest = Directory.EnumerateFiles(
+                catalogRoot, "*.pmac1.json")
+            .Single(path => !Path.GetFileName(path).StartsWith(
+                activeId, StringComparison.Ordinal));
+        ExpireCatalogManifest(
+            stagedManifest, first.Options.RouteStateHmacKeyPath);
+
+        var restarted = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Single(Directory.EnumerateFiles(catalogRoot, "*.pmac1.json"));
+        using var replacement = Fixture.CreateRotation(first, routeVariant: 1);
+        restarted.StageVerifiedSuccessor(replacement.Artifacts);
+        Assert.Equal(2, Directory.EnumerateFiles(
+            catalogRoot, "*.pmac1.json").Count());
+    }
+
+    [Fact]
+    public void ArtifactCatalog_RejectsWrongMembershipProofBeforeStaging()
+    {
+        using var first = Fixture.Create();
+        using var second = Fixture.CreateRotation(first);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        var currentEpochPrefix = second.Artifacts.Topology.Snapshot.CurrentEpoch.Epoch + "-";
+        var proofs = Directory.EnumerateFiles(second.Options.MembershipProofDirectory)
+            .Where(path => Path.GetFileName(path).StartsWith(
+                currentEpochPrefix, StringComparison.Ordinal))
+            .Take(2).ToArray();
+        Assert.Equal(2, proofs.Length);
+        File.Copy(proofs[1], proofs[0], overwrite: true);
+
+        Assert.Throws<InvalidDataException>(() =>
+            provider.StageVerifiedSuccessor(second.Artifacts));
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            provider.Current.AuthoritySha256);
+    }
+
+    [Fact]
+    public void ArtifactProvider_PublicSurfaceCannotMutateActiveClosure()
+    {
+        var publicMethods = typeof(ProductionMailboxArtifactProvider)
+            .GetMethods(System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Public)
+            .Select(static method => method.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.DoesNotContain("Reload", publicMethods);
+        Assert.DoesNotContain("PublishVerified", publicMethods);
+        Assert.DoesNotContain("StageVerifiedSuccessor", publicMethods);
+    }
+
+    [Fact]
+    public void ArtifactCatalog_CorruptStagedClosureCannotBecomeActiveOrBlockOldRestart()
+    {
+        using var first = Fixture.Create();
+        using var second = Fixture.CreateRotation(first);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        provider.StageVerifiedSuccessor(second.Artifacts);
+        var catalogRoot = Path.Combine(Path.GetDirectoryName(
+            first.Options.RouteStateHmacKeyPath)!,
+            "production-mailbox-artifact-catalog");
+        var stagedAuthority = Directory.EnumerateFiles(catalogRoot, "*.pma1")
+            .Single(path => !File.ReadAllBytes(path).AsSpan().SequenceEqual(
+                first.Artifacts.AuthorityBytes));
+        var corrupted = File.ReadAllBytes(stagedAuthority);
+        corrupted[^1] ^= 1;
+        File.WriteAllBytes(stagedAuthority, corrupted);
+
+        Assert.ThrowsAny<Exception>(() =>
+            provider.StageVerifiedSuccessor(second.Artifacts));
+        Assert.ThrowsAny<Exception>(() =>
+            provider.PublishVerified(second.Artifacts, Fixture.Now));
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            provider.Current.AuthoritySha256);
+
+        var restarted = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            restarted.Current.AuthoritySha256);
+    }
+
+    [Fact]
+    public void ArtifactCatalog_StableReadRejectsLeafLinkAndSameLengthPathSwap()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "deep-pma-stable-read",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var first = Path.Combine(root, "first.bin");
+            var second = Path.Combine(root, "second.bin");
+            var backup = Path.Combine(root, "backup.bin");
+            File.WriteAllBytes(first, Fixture.Bytes(0x11, 32));
+            File.WriteAllBytes(second, Fixture.Bytes(0x22, 32));
+            Assert.Throws<InvalidDataException>(() =>
+                ProductionMailboxProtectedFile.ReadStable(
+                    first, 32, 32, () =>
+                        ProductionMailboxArtifactProvider.EnsureNoReparseAncestors(first),
+                    () =>
+                    {
+                        File.Move(first, backup);
+                        File.Move(second, first);
+                    }));
+
+            var link = Path.Combine(root, "linked.bin");
+            File.CreateSymbolicLink(link, first);
+            Assert.ThrowsAny<Exception>(() =>
+                ProductionMailboxProtectedFile.ReadStable(
+                    link, 32, 32, () =>
+                        ProductionMailboxArtifactProvider.EnsureNoReparseAncestors(link)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ArtifactCatalog_TombstoneCrashIsReconciledWithoutEvictingActive()
+    {
+        using var first = Fixture.Create();
+        first.Options.MaximumRetainedArtifactClosures = 2;
+        using var second = Fixture.CreateRotation(first);
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        provider.StageVerifiedSuccessor(second.Artifacts);
+        var catalogRoot = Path.Combine(Path.GetDirectoryName(
+            first.Options.RouteStateHmacKeyPath)!,
+            "production-mailbox-artifact-catalog");
+        var activeId = Convert.ToHexStringLower(File.ReadAllBytes(
+            Path.Combine(catalogRoot, "active.pmac1"))[..32]);
+        var stagedManifest = Directory.EnumerateFiles(
+                catalogRoot, "*.pmac1.json")
+            .Single(path => !Path.GetFileName(path).StartsWith(
+                activeId, StringComparison.Ordinal));
+        ExpireCatalogManifest(
+            stagedManifest, first.Options.RouteStateHmacKeyPath);
+        var injected = 0;
+        provider.CatalogMutationFaultForTests = point =>
+        {
+            if (point == "after-manifest-tombstone"
+                && Interlocked.Exchange(ref injected, 1) == 0)
+                throw new IOException("injected catalog deletion crash");
+        };
+        Assert.Throws<IOException>(() =>
+            provider.PruneExpiredForTests(Fixture.Now));
+        Assert.True(Directory.EnumerateFiles(
+            catalogRoot, "*.pmac1.json.gc").Any());
+
+        var restarted = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            restarted.Current.AuthoritySha256);
+        Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(catalogRoot),
+            path => path.EndsWith(".gc", StringComparison.Ordinal));
+        Assert.Single(Directory.EnumerateFiles(catalogRoot, "*.pmac1.json"));
+    }
+
+    [Fact]
+    public async Task ArtifactCatalog_DurablePublishedStateRejectsSignedPointerRollback()
+    {
+        using var first = Fixture.Create();
+        using var second = Fixture.CreateRotation(first);
+        var state = new InMemoryProductionMailboxStateStore();
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        var oldClosureHash = ProductionMailboxArtifactProvider
+            .ComputeArtifactClosureHash(provider.Current);
+        _ = await state.GetOrInitializePublishedArtifactClosureAsync(
+            oldClosureHash, CancellationToken.None);
+        var catalogRoot = Path.Combine(Path.GetDirectoryName(
+            first.Options.RouteStateHmacKeyPath)!,
+            "production-mailbox-artifact-catalog");
+        var pointerPath = Path.Combine(catalogRoot, "active.pmac1");
+        var oldSignedPointer = File.ReadAllBytes(pointerPath);
+        var newClosureHash = ProductionMailboxArtifactProvider
+            .ComputeArtifactClosureHash(second.Artifacts);
+        var promotion = await state.BeginArtifactPromotionAsync(
+            Fixture.Bytes(0xF1, 32), oldClosureHash, newClosureHash,
+            CancellationToken.None);
+        Assert.True(await state.CompleteArtifactPromotionSweepAsync(
+            promotion.PromotionStateKey, CancellationToken.None));
+        provider.PublishVerified(second.Artifacts, Fixture.Now);
+        Assert.True(await state.MarkArtifactPromotionPublishedAsync(
+            promotion.PromotionStateKey, CancellationToken.None));
+
+        File.WriteAllBytes(pointerPath, oldSignedPointer);
+        var rolledBack = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        Assert.Equal(first.Artifacts.AuthoritySha256,
+            rolledBack.Current.AuthoritySha256);
+        var validator = new ProductionMailboxArtifactsStartupValidator(
+            rolledBack, state);
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            validator.StartAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public void ArtifactSnapshot_ReturnedArraysCannotMutateVerifiedOwnedState()
+    {
+        using var first = Fixture.Create();
+        var provider = new ProductionMailboxArtifactProvider(
+            first.Options, first.TimeProvider);
+        var expectedAuthority = first.Artifacts.AuthorityBytes;
+        var expectedAuthorityHash = first.Artifacts.AuthoritySha256;
+        var expectedClosureHash = ProductionMailboxArtifactProvider
+            .ComputeArtifactClosureHash(provider.Current);
+        foreach (var value in new[]
+                 {
+                     provider.Current.AuthorityBytes,
+                     provider.Current.RevocationBytes,
+                     provider.Current.TopologyBytes,
+                     provider.Current.AuthoritySha256,
+                     provider.Current.RevocationSha256,
+                     provider.Current.TopologySha256
+                 })
+            value.AsSpan().Fill(0xFF);
+
+        Assert.Equal(expectedAuthority, provider.Current.AuthorityBytes);
+        Assert.Equal(expectedAuthorityHash, provider.Current.AuthoritySha256);
+        Assert.Equal(expectedClosureHash,
+            ProductionMailboxArtifactProvider.ComputeArtifactClosureHash(
+                provider.Current));
+        Assert.True(provider.TryGetArtifact(
+            Convert.ToHexStringLower(expectedAuthorityHash), "authority.pma1",
+            out var served, out _));
+        served.AsSpan().Fill(0xEE);
+        Assert.True(provider.TryGetArtifact(
+            Convert.ToHexStringLower(expectedAuthorityHash), "authority.pma1",
+            out var servedAgain, out _));
+        Assert.Equal(expectedAuthority, servedAgain);
+        var publicProperties = typeof(ProductionMailboxArtifacts).GetProperties()
+            .Select(static property => property.Name).ToArray();
+        Assert.DoesNotContain("Authority", publicProperties);
+        Assert.DoesNotContain("Revocation", publicProperties);
+        Assert.DoesNotContain("Topology", publicProperties);
+    }
+
+    [Fact]
+    public void ArtifactCatalog_RejectsManifestPredecessorContextTamper()
+    {
+        using var fixture = Fixture.Create();
+        _ = new ProductionMailboxArtifactProvider(
+            fixture.Options, fixture.TimeProvider);
+        var catalogRoot = Path.Combine(Path.GetDirectoryName(
+            fixture.Options.RouteStateHmacKeyPath)!,
+            "production-mailbox-artifact-catalog");
+        var manifestPath = Directory.EnumerateFiles(
+            catalogRoot, "*.pmac1.json").Single();
+        var manifest = JsonNode.Parse(File.ReadAllBytes(manifestPath))!.AsObject();
+        manifest["previousTopologyGeneration"] = 123456UL;
+        File.WriteAllBytes(manifestPath,
+            System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(manifest,
+                new System.Text.Json.JsonSerializerOptions(
+                    System.Text.Json.JsonSerializerDefaults.Web)));
+
+        Assert.Throws<InvalidDataException>(() =>
+            new ProductionMailboxArtifactProvider(
+                fixture.Options, fixture.TimeProvider));
     }
 
     [Fact]
@@ -399,6 +1550,40 @@ public sealed class ProductionMailboxCoordinatorTests
         }
     }
 
+    private sealed class AcceptingClosureTransport : IProductionMailboxClosureTransport
+    {
+        public List<ProductionMailboxPublicationItem> Received { get; } = [];
+
+        public ValueTask<bool> PrepositionAsync(
+            ProductionMailboxPublicationItem item,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Received.Add(item with
+            {
+                LastAttemptSha256 = SHA256.HashData(canonicalCommand.Span)
+            });
+            return ValueTask.FromResult(true);
+        }
+    }
+
+    private sealed class SwitchableClosureTransport : IProductionMailboxClosureTransport
+    {
+        public bool Accept { get; set; }
+        public List<string> CommandHashes { get; } = [];
+
+        public ValueTask<bool> PrepositionAsync(
+            ProductionMailboxPublicationItem item,
+            ReadOnlyMemory<byte> canonicalCommand,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CommandHashes.Add(Convert.ToHexString(SHA256.HashData(canonicalCommand.Span)));
+            return ValueTask.FromResult(Accept);
+        }
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         private long unixSeconds = now.ToUnixTimeSeconds();
@@ -414,12 +1599,17 @@ public sealed class ProductionMailboxCoordinatorTests
         private Fixture(string root, ProductionMailboxOptions options, FixedTimeProvider timeProvider,
             ProductionMailboxArtifacts artifacts, byte[] issuerPublicKey, byte[] holderPublicKey,
             byte[] holderPrivateKey, byte[] ownerPublicKey, byte[] ownerPrivateKey,
-            int maximumChallenges)
+            int maximumChallenges, byte[] issuerSeed, byte[] mrXPrivateKey,
+            MembershipRouteDescriptor[] nextDescriptors,
+            ulong routeAdvertisementSequence)
         {
             this.root = root; Options = options; TimeProvider = timeProvider; Artifacts = artifacts;
             IssuerPublicKey = issuerPublicKey; HolderPublicKey = holderPublicKey;
             HolderPrivateKey = holderPrivateKey; OwnerPublicKey = ownerPublicKey;
             OwnerPrivateKey = ownerPrivateKey; MaximumChallenges = maximumChallenges;
+            IssuerSeed = issuerSeed; MrXPrivateKey = mrXPrivateKey;
+            NextDescriptors = nextDescriptors;
+            RouteAdvertisementSequence = routeAdvertisementSequence;
             IssuerSeedPath = Path.Combine(root, "issuer.seed");
         }
 
@@ -433,6 +1623,10 @@ public sealed class ProductionMailboxCoordinatorTests
         public byte[] OwnerPrivateKey { get; }
         public string IssuerSeedPath { get; }
         public int MaximumChallenges { get; }
+        public byte[] IssuerSeed { get; }
+        public byte[] MrXPrivateKey { get; }
+        public MembershipRouteDescriptor[] NextDescriptors { get; }
+        public ulong RouteAdvertisementSequence { get; }
 
         public static Fixture Create(int maximumChallenges = 16, byte artifactSeedOffset = 0)
         {
@@ -445,6 +1639,9 @@ public sealed class ProductionMailboxCoordinatorTests
             var holder = PublicKeyAuth.GenerateKeyPair(Bytes(unchecked((byte)(90 + artifactSeedOffset)), 32));
             var owner = PublicKeyAuth.GenerateKeyPair(Bytes(unchecked((byte)(100 + artifactSeedOffset)), 32));
             File.WriteAllBytes(Path.Combine(root, "issuer.seed"), issuerSeed);
+            var routeStateHmacKeyPath = Path.Combine(root, "route-state-hmac.key");
+            File.WriteAllBytes(routeStateHmacKeyPath,
+                Bytes(unchecked((byte)(110 + artifactSeedOffset)), 32));
             var current = Descriptors(9, Now - 200, Now + 1_000);
             var next = Descriptors(10, Now - 10, Now + 1_200);
             var draft = Authority(issuer.PublicKey, mrX.PublicKey,
@@ -497,31 +1694,179 @@ public sealed class ProductionMailboxCoordinatorTests
             var topologyPath = Path.Combine(root, "topology.pmt1"); File.WriteAllBytes(topologyPath, topologyBytes);
             var options = new ProductionMailboxOptions
             {
-                Enabled = true, AuthorityPath = authorityPath, RevocationPath = revocationPath,
-                TopologyPath = topologyPath, MembershipProofDirectory = proofRoot,
+                Enabled = true,
+                AuthorityPath = authorityPath,
+                RevocationPath = revocationPath,
+                TopologyPath = topologyPath,
+                MembershipProofDirectory = proofRoot,
                 PinnedMrXPublicKeySha256 = Hex(SHA256.HashData(mrX.PublicKey)),
                 ExpectedNetworkId = Hex(authority.NetworkId.Span),
-                PreviousAuthorityGeneration = 6, PreviousAuthorityHash = Hex(authority.PreviousAuthorityHash.Span),
-                PreviousRevocationGeneration = 5, PreviousRevocationHeadHash = Hex(authority.Revocation.PreviousHeadHash.Span),
+                PreviousAuthorityGeneration = 6,
+                PreviousAuthorityHash = Hex(authority.PreviousAuthorityHash.Span),
+                PreviousRevocationGeneration = 5,
+                PreviousRevocationHeadHash = Hex(authority.Revocation.PreviousHeadHash.Span),
                 PreviousRevocationSnapshotHash = Hex(Bytes(23, 32)),
-                PreviousTopologyGeneration = 2, PreviousTopologyHash = Hex(topology.PreviousTopologyHash.Span),
-                ClockSkewSeconds = 0, SelectionLifetimeSeconds = 300, ChallengeLifetimeSeconds = 300,
-                ProofOfWorkLeadingZeroBits = 8, MaximumChallengesPerWindow = maximumChallenges,
-                ChallengeWindowSeconds = 60, UseDevelopmentInMemoryState = true,
-                DevelopmentSoftwareSignerSeedPath = Path.Combine(root, "issuer.seed")
+                PreviousTopologyGeneration = 2,
+                PreviousTopologyHash = Hex(topology.PreviousTopologyHash.Span),
+                ClockSkewSeconds = 0,
+                SelectionLifetimeSeconds = 300,
+                ChallengeLifetimeSeconds = 300,
+                ProofOfWorkLeadingZeroBits = 8,
+                MaximumChallengesPerWindow = maximumChallenges,
+                ChallengeWindowSeconds = 60,
+                UseDevelopmentInMemoryState = true,
+                DevelopmentSoftwareSignerSeedPath = Path.Combine(root, "issuer.seed"),
+                DevelopmentClosurePublisherSeedPath = Path.Combine(root, "issuer.seed"),
+                ClosurePublisherEd25519PublicKey = Hex(issuer.PublicKey),
+                RouteStateHmacKeyPath = routeStateHmacKeyPath
             };
             var time = new FixedTimeProvider(DateTimeOffset.FromUnixTimeSeconds(checked((long)Now)));
             var artifacts = ProductionMailboxArtifacts.Load(options, time);
             return new Fixture(root, options, time, artifacts, issuer.PublicKey,
                 holder.PublicKey, holder.PrivateKey, owner.PublicKey, owner.PrivateKey,
-                maximumChallenges);
+                maximumChallenges, issuerSeed, mrX.PrivateKey, next, 1);
+        }
+
+        public static Fixture CreateRotation(Fixture previous, int routeVariant = 0)
+        {
+            var root = Path.Combine(Path.GetTempPath(), "deep-pma-tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            var proofRoot = Path.Combine(root, "proofs"); Directory.CreateDirectory(proofRoot);
+            File.WriteAllBytes(Path.Combine(root, "issuer.seed"), previous.IssuerSeed);
+            var routeStateHmacKeyPath = Path.Combine(root, "route-state-hmac.key");
+            File.Copy(previous.Options.RouteStateHmacKeyPath, routeStateHmacKeyPath);
+            var issuer = PublicKeyAuth.GenerateKeyPair(previous.IssuerSeed);
+            var oldAuthority = previous.Artifacts.Authority.Authority;
+            var current = previous.NextDescriptors;
+            var nextEpochNumber = oldAuthority.NextEpoch.Epoch + 1;
+            var next = Descriptors(nextEpochNumber, Now - 10, Now + 1_800,
+                routeVariant);
+            var nextEpoch = Epoch(nextEpochNumber, oldAuthority.NextEpoch.Generation + 1,
+                MembershipRouteDescriptorCodec.ComputeRoot(next),
+                Bytes(unchecked((byte)(12 + nextEpochNumber)), 32),
+                Now - 10, Now + 1_800);
+            var draft = oldAuthority with
+            {
+                AuthorityGeneration = oldAuthority.AuthorityGeneration + 1,
+                PreviousAuthorityHash = previous.Artifacts.AuthoritySha256,
+                CurrentEpoch = oldAuthority.NextEpoch,
+                NextEpoch = nextEpoch,
+                Revocation = oldAuthority.Revocation with
+                {
+                    Generation = oldAuthority.Revocation.Generation + 1,
+                    PreviousHeadHash = oldAuthority.Revocation.HeadHash,
+                    HeadHash = Bytes(unchecked((byte)(25 + oldAuthority.Revocation.Generation)), 32),
+                    IssuedAtUnixSeconds = Now - 10,
+                    ExpiresAtUnixSeconds = Now + 800
+                },
+                MrXApproval = oldAuthority.MrXApproval with
+                {
+                    RolloutNotBeforeUnixSeconds = Now - 10,
+                    RolloutNotAfterUnixSeconds = Now + 800
+                },
+                Signature = new byte[64]
+            };
+            var unsignedRevocation = new ProductionMailboxRevocationSnapshot
+            {
+                NetworkId = draft.NetworkId,
+                AuthorityGeneration = draft.AuthorityGeneration,
+                AuthorityBindingHash = ProductionMailboxRevocationSnapshotCodec.ComputeAuthorityBindingHash(draft),
+                RevocationGeneration = draft.Revocation.Generation,
+                RevocationHeadHash = draft.Revocation.HeadHash,
+                PreviousRevocationHeadHash = draft.Revocation.PreviousHeadHash,
+                IssuedAtUnixSeconds = draft.Revocation.IssuedAtUnixSeconds,
+                ExpiresAtUnixSeconds = draft.Revocation.ExpiresAtUnixSeconds,
+                RevokedGrantSerials = [],
+                IssuerSignature = new byte[64]
+            };
+            var revocation = unsignedRevocation with
+            {
+                IssuerSignature = PublicKeyAuth.SignDetached(
+                    ProductionMailboxRevocationSnapshotCodec.GetSigningBytes(unsignedRevocation),
+                    issuer.PrivateKey)
+            };
+            var revocationBytes = ProductionMailboxRevocationSnapshotCodec.Encode(revocation);
+            var authority = SignAuthority(draft with
+            {
+                Revocation = draft.Revocation with { SnapshotHash = SHA256.HashData(revocationBytes) }
+            }, previous.MrXPrivateKey);
+            var authorityBytes = ProductionMailboxAuthorityCodec.Encode(authority);
+            var verifiedAuthority = ProductionMailboxAuthorityVerifier.Verify(authority,
+                new ProductionMailboxAuthorityVerificationContext
+                {
+                    PinnedMrXPublicKeySha256 = SHA256.HashData(authority.MrXApprovalEd25519PublicKey.Span),
+                    ExpectedNetworkId = authority.NetworkId,
+                    LastCommittedGeneration = oldAuthority.AuthorityGeneration,
+                    LastCommittedAuthorityHash = previous.Artifacts.AuthoritySha256,
+                    LastCommittedRevocationGeneration = oldAuthority.Revocation.Generation,
+                    LastCommittedRevocationHeadHash = oldAuthority.Revocation.HeadHash,
+                    LastCommittedRevocationSnapshotHash = previous.Artifacts.RevocationSha256,
+                    NowUnixSeconds = Now,
+                    ClockSkewSeconds = 0
+                }, new SodiumProductionMailboxAuthoritySignatureVerifier());
+            var topology = SignTopology(new ProductionMailboxTopologySnapshot
+            {
+                NetworkId = authority.NetworkId,
+                AuthorityGeneration = authority.AuthorityGeneration,
+                CanonicalAuthorityHash = verifiedAuthority.CanonicalAuthorityHash,
+                TopologyGeneration = previous.Artifacts.Topology.Snapshot.TopologyGeneration + 1,
+                PreviousTopologyHash = previous.Artifacts.TopologySha256,
+                IssuedAtUnixSeconds = Now - 2,
+                ExpiresAtUnixSeconds = Now + 500,
+                CurrentEpoch = TopologyEpoch(authority.CurrentEpoch, current),
+                NextEpoch = TopologyEpoch(authority.NextEpoch, next),
+                IssuerSignature = new byte[64]
+            }, issuer.PrivateKey);
+            var topologyBytes = ProductionMailboxTopologyCodec.Encode(topology);
+            WriteProofs(proofRoot, current); WriteProofs(proofRoot, next);
+            var authorityPath = Path.Combine(root, "authority.pma1"); File.WriteAllBytes(authorityPath, authorityBytes);
+            var revocationPath = Path.Combine(root, "revocations.pmr1"); File.WriteAllBytes(revocationPath, revocationBytes);
+            var topologyPath = Path.Combine(root, "topology.pmt1"); File.WriteAllBytes(topologyPath, topologyBytes);
+            var options = new ProductionMailboxOptions
+            {
+                Enabled = true,
+                AuthorityPath = authorityPath,
+                RevocationPath = revocationPath,
+                TopologyPath = topologyPath,
+                MembershipProofDirectory = proofRoot,
+                PinnedMrXPublicKeySha256 = Hex(SHA256.HashData(authority.MrXApprovalEd25519PublicKey.Span)),
+                ExpectedNetworkId = Hex(authority.NetworkId.Span),
+                PreviousAuthorityGeneration = oldAuthority.AuthorityGeneration,
+                PreviousAuthorityHash = Hex(previous.Artifacts.AuthoritySha256),
+                PreviousRevocationGeneration = oldAuthority.Revocation.Generation,
+                PreviousRevocationHeadHash = Hex(oldAuthority.Revocation.HeadHash.Span),
+                PreviousRevocationSnapshotHash = Hex(previous.Artifacts.RevocationSha256),
+                PreviousTopologyGeneration = previous.Artifacts.Topology.Snapshot.TopologyGeneration,
+                PreviousTopologyHash = Hex(previous.Artifacts.TopologySha256),
+                ClockSkewSeconds = 0,
+                SelectionLifetimeSeconds = 300,
+                ChallengeLifetimeSeconds = 300,
+                ProofOfWorkLeadingZeroBits = 8,
+                MaximumChallengesPerWindow = previous.MaximumChallenges,
+                ChallengeWindowSeconds = 60,
+                UseDevelopmentInMemoryState = true,
+                DevelopmentSoftwareSignerSeedPath = Path.Combine(root, "issuer.seed"),
+                DevelopmentClosurePublisherSeedPath = Path.Combine(root, "issuer.seed"),
+                ClosurePublisherEd25519PublicKey = Hex(issuer.PublicKey),
+                RouteStateHmacKeyPath = routeStateHmacKeyPath
+            };
+            var time = new FixedTimeProvider(DateTimeOffset.FromUnixTimeSeconds(checked((long)Now)));
+            var artifacts = ProductionMailboxArtifacts.Load(options, time);
+            return new Fixture(root, options, time, artifacts, issuer.PublicKey,
+                previous.HolderPublicKey, previous.HolderPrivateKey,
+                previous.OwnerPublicKey, previous.OwnerPrivateKey, previous.MaximumChallenges,
+                previous.IssuerSeed, previous.MrXPrivateKey, next,
+                checked(previous.RouteAdvertisementSequence + 1));
         }
 
         public ProductionMailboxCoordinator Coordinator(
             IProductionMailboxStateStore state,
-            IEd25519ExternalSigner signer) => new(
+            IEd25519ExternalSigner signer,
+            IProductionMailboxClosureTransport? closureTransport = null) => new(
                 Microsoft.Extensions.Options.Options.Create(Options), Artifacts, signer, state,
-                TimeProvider, new ProductionMailboxMetrics());
+                TimeProvider, new ProductionMailboxMetrics(),
+                new ProductionMailboxClosurePublisherSignerAdapter(signer),
+                closureTransport ?? new AcceptingClosureTransport());
 
         public Task<ProductionMailboxIssueRequest> RequestAsync(ProductionMailboxCoordinator coordinator) =>
             RequestAsync(coordinator, ProductionMailboxIssuanceIntent.LocalOwner,
@@ -533,7 +1878,56 @@ public sealed class ProductionMailboxCoordinatorTests
             byte[] holderPublicKey,
             byte[] holderPrivateKey,
             byte[] ownerPublicKey,
-            byte[]? ownerPrivateKey)
+            byte[]? ownerPrivateKey,
+            byte[]? signingCertificate = null,
+            byte[]? buildArtifact = null)
+        {
+            var request = await RawRequestAsync(
+                coordinator, intent, holderPublicKey, holderPrivateKey,
+                ownerPublicKey, ownerPrivateKey, signingCertificate, buildArtifact);
+            if (intent != ProductionMailboxIssuanceIntent.LocalOwner)
+                return request;
+            if (ownerPrivateKey is null)
+                throw new InvalidOperationException(
+                    "Local owner enrollment requires the owner private key in tests.");
+            var enrollment = await coordinator.EnrollRouteAsync(
+                request, CancellationToken.None);
+            var certificate = ProductionMailboxRouteAdvertisementCodec.DecodeCertificate(
+                Decode(enrollment.RouteCertificate.CanonicalBase64Url));
+            var advertisementDraft = new ProductionMailboxRouteAdvertisement
+            {
+                Certificate = certificate,
+                Sequence = RouteAdvertisementSequence,
+                PublishedAtUnixSeconds = Now,
+                ExpiresAtUnixSeconds = certificate.ExpiresAtUnixSeconds,
+                OwnerSignature = new byte[64]
+            };
+            var advertisement = advertisementDraft with
+            {
+                OwnerSignature = PublicKeyAuth.SignDetached(
+                    ProductionMailboxRouteAdvertisementCodec.GetAdvertisementSigningBytes(
+                        advertisementDraft), ownerPrivateKey)
+            };
+            var credentialRequest = await RawRequestAsync(
+                coordinator, intent, holderPublicKey, holderPrivateKey,
+                ownerPublicKey, ownerPrivateKey, signingCertificate, buildArtifact);
+            return Resign(credentialRequest with
+            {
+                EnrollmentHandle = enrollment.EnrollmentHandle,
+                RouteAdvertisement = B64(
+                    ProductionMailboxRouteAdvertisementCodec.EncodeAdvertisement(advertisement))
+            }, holderPrivateKey, ownerPrivateKey);
+        }
+
+        private async Task<ProductionMailboxIssueRequest> RawRequestAsync(
+            ProductionMailboxCoordinator coordinator,
+            ProductionMailboxIssuanceIntent intent,
+            byte[] holderPublicKey,
+            byte[] holderPrivateKey,
+            byte[] ownerPublicKey,
+            byte[]? ownerPrivateKey,
+            byte[]? signingCertificate,
+            byte[]? buildArtifact)
         {
             var challenge = await coordinator.CreateChallengeAsync(CancellationToken.None);
             var id = Decode(challenge.ChallengeId); var value = Decode(challenge.Challenge);
@@ -542,7 +1936,8 @@ public sealed class ProductionMailboxCoordinatorTests
             var mailbox = intent == ProductionMailboxIssuanceIntent.LocalOwner ? "" : B64(route.MailboxId);
             var placement = intent == ProductionMailboxIssuanceIntent.LocalOwner ? "" : B64(route.PlacementId);
             var selection = intent == ProductionMailboxIssuanceIntent.LocalOwner ? "" : B64(route.SelectionCommitment);
-            var certificate = Bytes(15, 32); var artifact = Bytes(17, 32);
+            var certificate = signingCertificate ?? Bytes(15, 32);
+            var artifact = buildArtifact ?? Bytes(17, 32);
             var request = new ProductionMailboxIssueRequest(
                 B64(holderPublicKey), B64(ownerPublicKey), intent,
                 ProductionMailboxClientPlatform.Android,
@@ -612,14 +2007,12 @@ public sealed class ProductionMailboxCoordinatorTests
 
         public OwnerRoute DeriveOwnerRoute(byte[] ownerPublicKey)
         {
-            var transcript = DomainHash("Deep/production-mailbox/owner-route-prf-input/v1",
-                Artifacts.Authority.Authority.NetworkId.ToArray(), Artifacts.AuthoritySha256, ownerPublicKey);
-            var issuer = PublicKeyAuth.GenerateKeyPair(File.ReadAllBytes(IssuerSeedPath));
-            var issuerOutput = PublicKeyAuth.SignDetached(transcript, issuer.PrivateKey);
-            var mailbox = DomainHash("Deep/production-mailbox/blinded-mailbox-id/v1",
-                Artifacts.Authority.Authority.NetworkId.ToArray(), ownerPublicKey, issuerOutput);
-            var placement = DomainHash("Deep/production-mailbox/blinded-placement-id/v1",
-                Artifacts.Authority.Authority.NetworkId.ToArray(), ownerPublicKey, issuerOutput);
+            var routeInput = DomainHash("Deep/production-mailbox/owner-route-input/v2",
+                Artifacts.Authority.Authority.NetworkId.ToArray(), ownerPublicKey);
+            var mailbox = DomainHash("Deep/production-mailbox/blinded-mailbox-id/v2",
+                Artifacts.Authority.Authority.NetworkId.ToArray(), ownerPublicKey, routeInput);
+            var placement = DomainHash("Deep/production-mailbox/blinded-placement-id/v2",
+                Artifacts.Authority.Authority.NetworkId.ToArray(), ownerPublicKey, routeInput);
             return new OwnerRoute(mailbox, placement,
                 ProductionMailboxReplicaSelection.ComputeSelectionInputCommitment(new BlindedPlacementId(placement)));
         }
@@ -647,7 +2040,10 @@ public sealed class ProductionMailboxCoordinatorTests
             ["ProductionMailbox:ProofOfWorkLeadingZeroBits"] = Options.ProofOfWorkLeadingZeroBits.ToString(),
             ["ProductionMailbox:MaximumChallengesPerWindow"] = Options.MaximumChallengesPerWindow.ToString(),
             ["ProductionMailbox:ChallengeWindowSeconds"] = Options.ChallengeWindowSeconds.ToString(),
-            ["ProductionMailbox:DevelopmentSoftwareSignerSeedPath"] = Options.DevelopmentSoftwareSignerSeedPath
+            ["ProductionMailbox:DevelopmentSoftwareSignerSeedPath"] = Options.DevelopmentSoftwareSignerSeedPath,
+            ["ProductionMailbox:DevelopmentClosurePublisherSeedPath"] = Options.DevelopmentClosurePublisherSeedPath,
+            ["ProductionMailbox:ClosurePublisherEd25519PublicKey"] = Options.ClosurePublisherEd25519PublicKey,
+            ["ProductionMailbox:RouteStateHmacKeyPath"] = Options.RouteStateHmacKeyPath
         };
 
         public void Dispose()
@@ -657,20 +2053,28 @@ public sealed class ProductionMailboxCoordinatorTests
 
         private static ProductionMailboxAuthority Authority(byte[] issuer, byte[] mrX, byte[] currentRoot, byte[] nextRoot) => new()
         {
-            DevelopmentOnly = false, Environment = ProductionMailboxAuthorityEnvironment.Production,
+            DevelopmentOnly = false,
+            Environment = ProductionMailboxAuthorityEnvironment.Production,
             Transport = ProductionMailboxAuthorityTransport.AuthenticatedMau2,
             Ownership = ProductionMailboxAuthorityOwnership.OfficialManaged,
             EndpointPolicy = ProductionMailboxAuthorityEndpointPolicy.PublicHttpsOnly,
-            NetworkId = Bytes(1, 16), AuthorityGeneration = 7, PreviousAuthorityHash = Bytes(2, 32),
-            MailboxIssuerEd25519PublicKey = issuer, MrXApprovalEd25519PublicKey = mrX,
+            NetworkId = Bytes(1, 16),
+            AuthorityGeneration = 7,
+            PreviousAuthorityHash = Bytes(2, 32),
+            MailboxIssuerEd25519PublicKey = issuer,
+            MrXApprovalEd25519PublicKey = mrX,
             Coordinator = Endpoint("https://coord.example.net/", 4),
             NodeIngress = Endpoint("https://ingress.example.net/mau2/", 6),
             CurrentEpoch = Epoch(9, 70, currentRoot, Bytes(8, 32), Now - 200, Now + 1_000),
             NextEpoch = Epoch(10, 71, nextRoot, Bytes(10, 32), Now - 10, Now + 1_200),
             Revocation = new ProductionMailboxAuthorityRevocation
             {
-                SnapshotHash = Bytes(12, 32), HeadHash = Bytes(13, 32), PreviousHeadHash = Bytes(22, 32),
-                Generation = 6, IssuedAtUnixSeconds = Now - 20, ExpiresAtUnixSeconds = Now + 800
+                SnapshotHash = Bytes(12, 32),
+                HeadHash = Bytes(13, 32),
+                PreviousHeadHash = Bytes(22, 32),
+                Generation = 6,
+                IssuedAtUnixSeconds = Now - 20,
+                ExpiresAtUnixSeconds = Now + 800
             },
             MrXApproval = new ProductionMailboxAuthorityApproval
             {
@@ -679,22 +2083,33 @@ public sealed class ProductionMailboxCoordinatorTests
                 AllowedWindowsSigningCertificateSha256 = [Bytes(16, 32)],
                 AndroidReleaseBuildArtifactSha256 = [Bytes(17, 32)],
                 WindowsReleaseBuildArtifactSha256 = [Bytes(18, 32)],
-                RolloutNotBeforeUnixSeconds = Now - 30, RolloutNotAfterUnixSeconds = Now + 800
-            }, Signature = new byte[64]
+                RolloutNotBeforeUnixSeconds = Now - 30,
+                RolloutNotAfterUnixSeconds = Now + 800
+            },
+            Signature = new byte[64]
         };
 
         private static ProductionMailboxAuthorityVerificationContext AuthorityContext(ProductionMailboxAuthority authority, byte[] mrX) => new()
         {
-            PinnedMrXPublicKeySha256 = SHA256.HashData(mrX), ExpectedNetworkId = authority.NetworkId,
-            LastCommittedGeneration = 6, LastCommittedAuthorityHash = authority.PreviousAuthorityHash,
-            LastCommittedRevocationGeneration = 5, LastCommittedRevocationHeadHash = authority.Revocation.PreviousHeadHash,
-            LastCommittedRevocationSnapshotHash = Bytes(23, 32), NowUnixSeconds = Now, ClockSkewSeconds = 0
+            PinnedMrXPublicKeySha256 = SHA256.HashData(mrX),
+            ExpectedNetworkId = authority.NetworkId,
+            LastCommittedGeneration = 6,
+            LastCommittedAuthorityHash = authority.PreviousAuthorityHash,
+            LastCommittedRevocationGeneration = 5,
+            LastCommittedRevocationHeadHash = authority.Revocation.PreviousHeadHash,
+            LastCommittedRevocationSnapshotHash = Bytes(23, 32),
+            NowUnixSeconds = Now,
+            ClockSkewSeconds = 0
         };
 
         private static ProductionMailboxAuthority SignAuthority(ProductionMailboxAuthority value, byte[] key)
         {
-            var bound = value with { MrXApproval = value.MrXApproval with
-                { AuthorityPayloadHash = ProductionMailboxAuthorityCodec.ComputePayloadHash(value) }, Signature = new byte[64] };
+            var bound = value with
+            {
+                MrXApproval = value.MrXApproval with
+                { AuthorityPayloadHash = ProductionMailboxAuthorityCodec.ComputePayloadHash(value) },
+                Signature = new byte[64]
+            };
             return bound with { Signature = PublicKeyAuth.SignDetached(ProductionMailboxAuthorityCodec.GetSigningBytes(bound), key) };
         }
         private static ProductionMailboxTopologySnapshot SignTopology(ProductionMailboxTopologySnapshot value, byte[] key)
@@ -703,30 +2118,46 @@ public sealed class ProductionMailboxCoordinatorTests
             return unsigned with { IssuerSignature = PublicKeyAuth.SignDetached(ProductionMailboxTopologyCodec.GetSigningBytes(unsigned), key) };
         }
         private static ProductionMailboxAuthorityEndpoint Endpoint(string uri, byte seed) => new()
-            { Uri = uri, CurrentSpkiSha256 = Bytes(seed, 32), NextSpkiSha256 = Bytes((byte)(seed + 1), 32) };
+        { Uri = uri, CurrentSpkiSha256 = Bytes(seed, 32), NextSpkiSha256 = Bytes((byte)(seed + 1), 32) };
         private static ProductionMailboxAuthorityEpoch Epoch(ulong epoch, ulong generation, byte[] membership, byte[] topologyPlacement, ulong from, ulong until) => new()
-            { Epoch = epoch, Generation = generation, MembershipCommitment = membership, TopologyPlacementCommitment = topologyPlacement,
-                NotBeforeUnixSeconds = from, NotAfterUnixSeconds = until };
+        {
+            Epoch = epoch,
+            Generation = generation,
+            MembershipCommitment = membership,
+            TopologyPlacementCommitment = topologyPlacement,
+            NotBeforeUnixSeconds = from,
+            NotAfterUnixSeconds = until
+        };
         private static ProductionMailboxTopologyEpoch TopologyEpoch(ProductionMailboxAuthorityEpoch epoch, MembershipRouteDescriptor[] descriptors) => new()
         {
-            Epoch = epoch.Epoch, Generation = epoch.Generation, MembershipCommitment = epoch.MembershipCommitment,
+            Epoch = epoch.Epoch,
+            Generation = epoch.Generation,
+            MembershipCommitment = epoch.MembershipCommitment,
             TopologyPlacementCommitment = epoch.TopologyPlacementCommitment,
-            NotBeforeUnixSeconds = epoch.NotBeforeUnixSeconds, NotAfterUnixSeconds = epoch.NotAfterUnixSeconds,
+            NotBeforeUnixSeconds = epoch.NotBeforeUnixSeconds,
+            NotAfterUnixSeconds = epoch.NotAfterUnixSeconds,
             Nodes = descriptors.Select((descriptor, index) => new ProductionMailboxTopologyNode
             {
-                NodeId = descriptor.RouterId, HttpsEndpoint = $"https://node-{index + 1}.example.net/",
+                NodeId = descriptor.RouterId,
+                HttpsEndpoint = $"https://node-{index + 1}.example.net/",
                 CurrentSpkiSha256 = Bytes((byte)(130 + index * 2), 32),
                 NextSpkiSha256 = Bytes((byte)(131 + index * 2), 32)
             }).ToArray()
         };
-        private static MembershipRouteDescriptor[] Descriptors(ulong epoch, ulong from, ulong until) =>
-            [Descriptor(0x10, epoch, from, until), Descriptor(0x40, epoch, from, until), Descriptor(0x70, epoch, from, until)];
+        private static MembershipRouteDescriptor[] Descriptors(
+            ulong epoch, ulong from, ulong until, int variant = 0) =>
+            [Descriptor(0x10 + variant, epoch, from, until), Descriptor(0x40 + variant, epoch, from, until), Descriptor(0x70 + variant, epoch, from, until)];
         private static MembershipRouteDescriptor Descriptor(int start, ulong epoch, ulong from, ulong until) => new()
         {
-            RouterId = Range(start, 32), Ed25519PublicKey = Range(start + 32, 32), X25519PublicKey = Range(start + 64, 32),
-            RpcEndpoint = $"https://route-{start}.example.net/", Roles = MembershipRouteRole.Storage,
-            Capabilities = MembershipRouteCapability.Storage, Epoch = epoch,
-            ValidFromUnixSeconds = from, ValidUntilUnixSeconds = until
+            RouterId = Range(start, 32),
+            Ed25519PublicKey = Range(start + 32, 32),
+            X25519PublicKey = Range(start + 64, 32),
+            RpcEndpoint = $"https://route-{start}.example.net/",
+            Roles = MembershipRouteRole.Storage,
+            Capabilities = MembershipRouteCapability.Storage,
+            Epoch = epoch,
+            ValidFromUnixSeconds = from,
+            ValidUntilUnixSeconds = until
         };
         private static void WriteProofs(string root, MembershipRouteDescriptor[] descriptors)
         {
@@ -736,8 +2167,10 @@ public sealed class ProductionMailboxCoordinatorTests
                 var descriptor = descriptors[index];
                 var mip = new MailboxReplicaMembershipProof
                 {
-                    ReplicaId = descriptor.RouterId, SigningPublicKey = descriptor.Ed25519PublicKey,
-                    Epoch = descriptor.Epoch, MembershipCommitment = MembershipRouteDescriptorCodec.ComputeRoot(descriptors),
+                    ReplicaId = descriptor.RouterId,
+                    SigningPublicKey = descriptor.Ed25519PublicKey,
+                    Epoch = descriptor.Epoch,
+                    MembershipCommitment = MembershipRouteDescriptorCodec.ComputeRoot(descriptors),
                     CanonicalInclusionProof = MailboxReplicaRouteProofCodec.Encode(descriptor, proofs[index])
                 };
                 File.WriteAllBytes(Path.Combine(root,
@@ -781,6 +2214,25 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     private static string B64(ReadOnlySpan<byte> value) => Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static void ExpireCatalogManifest(string manifestPath, string keyPath)
+    {
+        var json = new System.Text.Json.JsonSerializerOptions(
+            System.Text.Json.JsonSerializerDefaults.Web);
+        var manifest = JsonNode.Parse(File.ReadAllBytes(manifestPath))!.AsObject();
+        manifest["retainUntilUnixSeconds"] = Fixture.Now - 1;
+        manifest["integrityTag"] = "";
+        var unsignedManifest = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+            manifest, json);
+        using var hmac = IncrementalHash.CreateHMAC(
+            HashAlgorithmName.SHA256, File.ReadAllBytes(keyPath));
+        hmac.AppendData(Encoding.UTF8.GetBytes(
+            "Deep/production-mailbox/artifact-catalog-manifest/v1"));
+        hmac.AppendData(unsignedManifest);
+        manifest["integrityTag"] = Convert.ToHexStringLower(hmac.GetHashAndReset());
+        File.WriteAllBytes(manifestPath,
+            System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(manifest, json));
+    }
+
     private static byte[] Decode(string value)
     {
         var padded = value.Replace('-', '+').Replace('_', '/');

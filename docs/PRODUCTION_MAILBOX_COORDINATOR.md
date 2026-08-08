@@ -28,7 +28,9 @@ All binary strings in JSON are canonical unpadded base64url. Enum values are JSO
 (Windows).
 
 1. `POST /api/production-mailbox/challenges` with an empty body returns `challengeId` (16 bytes),
-   `challenge` (32 bytes), `leadingZeroBits`, and `expiresAtUnixSeconds`.
+   `challenge` (32 bytes), `leadingZeroBits`, `expiresAtUnixSeconds`, and the exact inline immutable
+   PMA1/PMR1/PMT1 closure. The durable challenge row binds the three artifact hashes; issuance on a
+   different closure fails closed instead of silently changing the signed PHP1 inputs.
 2. The client solves `SHA-256(UTF8("Deep/production-mailbox/pow/v1") || challengeId || challenge
    || nonceBE64)` and requires the advertised number of leading zero bits.
 3. `POST /api/production-mailbox/credentials` receives:
@@ -51,17 +53,17 @@ All binary strings in JSON are canonical unpadded base64url. Enum values are JSO
   "proofOfWorkNonce": 0,
   "holderProofSignature": "base64url-64",
   "ownerProofSignature": "base64url-64",
-  "opaqueEntitlement": null
+  "opaqueEntitlement": null,
+  "routeAdvertisement": null
 }
 ```
 
 For `LocalOwner`, all three route strings are empty and both the active holder and stable owner sign
-the exact protocol `PHP1` transcript. The coordinator derives the stable route with the external
-issuer. `PeerDeposit` currently fails closed with HTTP 409 and
-`{"error":"route-advertisement-required"}`. It must not be exposed in production UI until the
-protocol defines and the client verifies an owner-signed, authority/network-bound public route
-advertisement. Dormant issuance logic will later require its three exact nonzero route fields and
-will issue deposit grants only; retrieve grants remain exclusive to `LocalOwner`.
+the exact protocol `PHP1` transcript. The coordinator derives a stable network/owner route and
+returns an issuer-signed `PRC1`. The owner publishes an exact owner-signed `PRA1` only inside an
+authenticated E2E contact channel. `PeerDeposit` requires that PRA1 plus its three exact nonzero
+route fields, enforces authority/network/owner/route binding and durable sequence/hash replay state,
+and issues deposit grants only; retrieve grants remain exclusive to `LocalOwner`.
 
 `signingCertificateSha256` and `buildArtifactSha256` are holder-signed cohort metadata, not remote
 attestation and not an authorization decision. Public approved hashes can be copied by an altered
@@ -87,8 +89,11 @@ Every hash/key/route/commitment is exactly 32 bytes. LocalOwner uses three all-z
 The client includes this key in `PHP1`; the server independently recomputes it before issuance.
 Retries obtain a byte-identical stored credential response while its current-epoch validity remains.
 
-The response contains exact canonical `PMS1` selections and exact `MCG2` grants for both current and
-next epochs. Each selection contains exactly two ordered replicas. Clients send to the first replica
+The response contains exact canonical Rendezvous-SHA256-v2 `PMS1` selections and exact `MCG2`
+grants for both current and next epochs. On direct old-next/new-current promotion, Registry replays
+the exact stored old-next MCG2 bytes for the same holder and emits a verifiable dual-signed `PSS1`;
+after two or more missed rotations it emits current-issuer-signed `OfflineCheckpoint` PSS1. Each
+selection contains exactly two ordered replicas. Clients send to the first replica
 and fail over to the second only after a definitely pre-acceptance transport failure or an explicit
 non-accepting response. An ambiguous post-dispatch timeout is retried with the exact same operation
 identity so node-side duplicate handling remains authoritative.
@@ -103,10 +108,34 @@ support ETags:
 - `GET /api/production-mailbox/artifacts/{sha256}/revocations.pmr1`
 - `GET /api/production-mailbox/artifacts/{sha256}/topology.pmt1`
 
-Catalog entries are retained through the credential/current-epoch expiry plus clock skew. Reload is
-rejected before memory can exceed `MaximumRetainedArtifactClosures` (default 16, maximum 64), so a
-rapid administrative reload cannot silently evict a still-valid content address or grow memory
-without bound.
+Catalog entries are retained through the credential/current-epoch expiry plus clock skew. Each
+entry durably owns PMA1/PMR1/PMT1 and the exact bounded current+next MIP1 proof closure; every proof
+is checked against its topology membership root, storage role and full epoch validity before the
+entry can be staged. Canonical manifests and the active pointer are domain-separated HMAC-bound by
+the protected route-state key. The PostgreSQL published-closure row is the rollback floor: startup
+rejects a signed old-pointer replay, while a completed sweep whose pointer flip committed before its
+database marker is reconciled before the server accepts traffic. Reads use one no-follow stable
+handle and reject reparse/path-swap races. Expired entries are removed through durable tombstones
+and bounded restart reconciliation. Reload is rejected before memory or persisted entries can
+exceed `MaximumRetainedArtifactClosures` (default 16, maximum 64), so a rapid administrative reload
+cannot silently evict a still-valid content address or grow memory/disk metadata without bound.
+
+Artifact reload is a staged promotion, not an immediate pointer swap. PostgreSQL records one active
+promotion with an immutable owner-sequence watermark and a resumable cursor. New enrollment and
+credential issuance are fenced while it is active. The coordinator scans the durable LocalOwner
+cohort in bounded pages, creates an exact new owner bundle/PSS1, updates the latest predecessor and
+inserts immutable PMC1 publication targets in the same serializable transaction. PMP1 timestamp,
+nonce and signature are renewable attempts; ACK binds the immutable target and PMC1 hash plus the
+latest attempt hash. A background drainer can resume after process or network failure. The active
+PMA1/PMR1/PMT1 pointer changes only after every cohort publication is acknowledged; a crash after
+provider cutover but before the final database marker remains fail-closed and idempotently
+reconcilable.
+
+This sweep/ACK implementation is not yet the node-capacity reservation gate. Until XNode exposes an
+authenticated bounded cohort reservation for exact count/bytes/expiry, a rotation can safely stop
+as a resumable unpublished partial sweep when a node rejects capacity, but cannot claim a
+production-wide preflight reservation. Survival Beta remains blocked on that separate API and its
+capacity-pressure E2E; partial progress is never reported as a published artifact generation.
 
 Internal reload, holder revocation, and sanitized runtime counters are under
 `/api/internal/production-mailbox`. They fail closed unless the connection has the configured
@@ -115,11 +144,13 @@ authentication type and the exact pinned client-certificate SHA-256.
 ## Production configuration
 
 Set `ProductionMailbox:Enabled=true` and provide all artifact paths, membership-proof directory,
+an absolute `ProductionMailbox:RouteStateHmacKeyPath` to a protected, non-reparse 32-byte
+secret used only for privacy-preserving durable route-state keys,
 pinned Mr. X/network/last-known-good generations and hashes, absolute external signer socket,
 bounded external signer timeout (1–30 seconds), PostgreSQL connection string, and internal
 client-certificate pin. Mount artifacts and membership
 proofs read-only. Do not put Mr. X or issuer private material in configuration or environment
 variables. `UseDevelopmentInMemoryState` and `DevelopmentSoftwareSignerSeedPath` must remain unset.
 
-The exact local protocol closure is recorded in `vendor/pma/package-manifest.json`; it is built from
-protocol commit `eacaeb831905d6508fa118ca80c78b4a22a987e6` and is not published.
+The exact local protocol closure is recorded in `vendor/pma/package-manifest.json`; it is built
+reproducibly from protocol commit `20249077913abfd9ad69f957aa07e57ff55b5e24` and is not published.

@@ -136,3 +136,38 @@ internal static class ProductionMailboxSignerFactory
         return new DevelopmentSoftwareEd25519Signer(options.DevelopmentSoftwareSignerSeedPath);
     }
 }
+
+internal static class ProductionMailboxClosurePublisherSignerFactory
+{
+    public static IProductionMailboxClosurePublisherSigner Create(
+        ProductionMailboxOptions options,
+        IHostEnvironment environment)
+    {
+        IEd25519ExternalSigner signer;
+        if (environment.IsProduction())
+        {
+            if (OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException(
+                    "Production closure publishing requires a Unix domain socket host.");
+            if (!string.IsNullOrEmpty(options.DevelopmentClosurePublisherSeedPath)
+                || string.IsNullOrWhiteSpace(options.ClosurePublisherSignerSocketPath)
+                || !Path.IsPathFullyQualified(options.ClosurePublisherSignerSocketPath)
+                || !File.Exists(options.ClosurePublisherSignerSocketPath))
+                throw new InvalidOperationException(
+                    "Production requires a protected closure-publisher signer socket.");
+            signer = new UnixSocketEd25519ExternalSigner(
+                options.ClosurePublisherSignerSocketPath,
+                TimeSpan.FromSeconds(options.ClosurePublisherSignerTimeoutSeconds));
+        }
+        else
+        {
+            if (!environment.IsDevelopment()
+                || string.IsNullOrWhiteSpace(options.DevelopmentClosurePublisherSeedPath))
+                throw new InvalidOperationException(
+                    "Development closure publishing requires an explicit software key.");
+            signer = new DevelopmentSoftwareEd25519Signer(
+                options.DevelopmentClosurePublisherSeedPath);
+        }
+        return new ProductionMailboxClosurePublisherSignerAdapter(signer);
+    }
+}

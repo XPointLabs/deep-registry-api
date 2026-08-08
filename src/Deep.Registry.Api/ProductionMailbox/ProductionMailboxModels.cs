@@ -6,7 +6,10 @@ public sealed record ProductionMailboxChallengeResponse(
     string ChallengeId,
     string Challenge,
     int LeadingZeroBits,
-    ulong ExpiresAtUnixSeconds);
+    ulong ExpiresAtUnixSeconds,
+    ProductionMailboxArtifactReference Authority,
+    ProductionMailboxArtifactReference Revocation,
+    ProductionMailboxArtifactReference Topology);
 
 public sealed record ProductionMailboxIssueRequest(
     string HolderEd25519PublicKey,
@@ -25,7 +28,31 @@ public sealed record ProductionMailboxIssueRequest(
     ulong ProofOfWorkNonce,
     string HolderProofSignature,
     string? OwnerProofSignature = null,
-    string? OpaqueEntitlement = null);
+    string? OpaqueEntitlement = null,
+    string? RouteAdvertisement = null,
+    string? EnrollmentHandle = null);
+
+public sealed record ProductionMailboxRouteEnrollment(
+    string Schema,
+    string EnrollmentHandle,
+    string IdempotencyKey,
+    string HolderEd25519PublicKey,
+    string MailboxOwnerEd25519PublicKey,
+    string BlindedMailboxId,
+    string BlindedPlacementId,
+    string SelectionInputCommitment,
+    ProductionMailboxArtifactReference Authority,
+    ProductionMailboxArtifactReference Revocation,
+    ProductionMailboxArtifactReference Topology,
+    ProductionMailboxCanonicalEnvelope RouteCertificate,
+    ulong IssuedAtUnixSeconds,
+    ulong ExpiresAtUnixSeconds);
+
+public sealed record ProductionMailboxCanonicalEnvelope(
+    string FileName,
+    string MediaType,
+    string Sha256,
+    string CanonicalBase64Url);
 
 public sealed record ProductionMailboxArtifactReference(
     string FileName,
@@ -82,11 +109,16 @@ public sealed record ProductionMailboxCredentialBundle(
     IReadOnlyList<ProductionMailboxGrantEnvelope> Grants,
     ProductionMailboxServiceLimits Limits,
     ulong IssuedAtUnixSeconds,
-    ulong ExpiresAtUnixSeconds);
+    ulong ExpiresAtUnixSeconds,
+    ProductionMailboxCanonicalEnvelope? RouteCertificate = null,
+    ProductionMailboxCanonicalEnvelope? RouteAdvertisement = null,
+    ProductionMailboxCanonicalEnvelope? SelectionSuccessor = null);
 
 public sealed record ProductionMailboxRuntimeCounters(
     long ChallengesCreated,
     long ChallengesRejected,
+    long EnrollmentsIssued,
+    long EnrollmentsReplayed,
     long BundlesIssued,
     long BundlesReplayed,
     long RequestsRejected,
@@ -96,6 +128,8 @@ public sealed class ProductionMailboxMetrics
 {
     private long challengesCreated;
     private long challengesRejected;
+    private long enrollmentsIssued;
+    private long enrollmentsReplayed;
     private long bundlesIssued;
     private long bundlesReplayed;
     private long requestsRejected;
@@ -103,12 +137,15 @@ public sealed class ProductionMailboxMetrics
 
     public void ChallengeCreated() => Interlocked.Increment(ref challengesCreated);
     public void ChallengeRejected() => Interlocked.Increment(ref challengesRejected);
+    public void EnrollmentIssued() => Interlocked.Increment(ref enrollmentsIssued);
+    public void EnrollmentReplayed() => Interlocked.Increment(ref enrollmentsReplayed);
     public void BundleIssued() => Interlocked.Increment(ref bundlesIssued);
     public void BundleReplayed() => Interlocked.Increment(ref bundlesReplayed);
     public void RequestRejected() => Interlocked.Increment(ref requestsRejected);
     public void RevocationApplied() => Interlocked.Increment(ref revocationsApplied);
     public ProductionMailboxRuntimeCounters Snapshot() => new(
         Interlocked.Read(ref challengesCreated), Interlocked.Read(ref challengesRejected),
+        Interlocked.Read(ref enrollmentsIssued), Interlocked.Read(ref enrollmentsReplayed),
         Interlocked.Read(ref bundlesIssued), Interlocked.Read(ref bundlesReplayed),
         Interlocked.Read(ref requestsRejected), Interlocked.Read(ref revocationsApplied));
 }
