@@ -3,6 +3,7 @@ using System.Data;
 using System.Security.Cryptography;
 using Deep.Protocol.DeepExtension.MailboxTopology;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace Deep.Registry.Api.ProductionMailbox;
 
@@ -37,6 +38,7 @@ internal sealed class ProductionMailboxRouteContinuityStateSnapshot
     private readonly byte[] canonicalDelegationAcceptanceHash;
     private readonly byte[] canonicalOwnerRevocation;
     private readonly byte[] canonicalOwnerRevocationHash;
+    private readonly ProductionMailboxRouteHistoryStateSnapshot? history;
 
     internal ProductionMailboxRouteContinuityStateSnapshot(
         byte[] routeStateKey,
@@ -60,7 +62,8 @@ internal sealed class ProductionMailboxRouteContinuityStateSnapshot
         byte[] canonicalDelegationAcceptanceHash,
         ulong ownerRevocationGeneration,
         byte[] canonicalOwnerRevocation,
-        byte[] canonicalOwnerRevocationHash)
+        byte[] canonicalOwnerRevocationHash,
+        ProductionMailboxRouteHistoryStateSnapshot? history = null)
     {
         this.routeStateKey = routeStateKey.ToArray();
         this.canonicalRouteOriginLkg = canonicalRouteOriginLkg.ToArray();
@@ -84,6 +87,7 @@ internal sealed class ProductionMailboxRouteContinuityStateSnapshot
         OwnerRevocationGeneration = ownerRevocationGeneration;
         this.canonicalOwnerRevocation = canonicalOwnerRevocation.ToArray();
         this.canonicalOwnerRevocationHash = canonicalOwnerRevocationHash.ToArray();
+        this.history = history?.Clone();
     }
 
     internal ReadOnlyMemory<byte> RouteStateKey => routeStateKey.ToArray();
@@ -110,6 +114,7 @@ internal sealed class ProductionMailboxRouteContinuityStateSnapshot
     internal ulong OwnerRevocationGeneration { get; }
     internal ReadOnlyMemory<byte> CanonicalOwnerRevocation => canonicalOwnerRevocation.ToArray();
     internal ReadOnlyMemory<byte> CanonicalOwnerRevocationHash => canonicalOwnerRevocationHash.ToArray();
+    internal ProductionMailboxRouteHistoryStateSnapshot? History => history?.Clone();
 }
 
 internal sealed record ProductionMailboxRouteContinuityCommitResult(
@@ -129,6 +134,23 @@ internal interface IProductionMailboxRouteContinuityStateStore
         ProductionMailboxRouteContinuityEnrollmentCommitPlan plan,
         CancellationToken cancellationToken);
 
+    ValueTask<ProductionMailboxRouteContinuityCommitResult> CommitVerifiedOwnerRevocationAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        VerifiedProductionMailboxRouteContinuityRevocation revocation,
+        CancellationToken cancellationToken);
+
+    ValueTask<ProductionMailboxRouteContinuityCommitResult> CommitVerifiedHistoryBatchAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        VerifiedProductionMailboxRouteHistoryCursor expectedCurrent,
+        ProductionMailboxRouteHistoryBatchCommitPlan plan,
+        CancellationToken cancellationToken);
+
+    ValueTask<ProductionMailboxRouteContinuityCommitResult> CheckHistoryBatchReplayAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        ulong batchSequence,
+        ReadOnlyMemory<byte> canonicalBatch,
+        CancellationToken cancellationToken);
+
     ValueTask<ProductionMailboxRouteContinuityStateSnapshot?> GetRouteContinuityStateAsync(
         ReadOnlyMemory<byte> routeStateKey,
         CancellationToken cancellationToken);
@@ -136,11 +158,25 @@ internal interface IProductionMailboxRouteContinuityStateStore
 
 internal static class ProductionMailboxRouteContinuityStateGuard
 {
+    private static ReadOnlySpan<byte> RouteOriginHashDomain =>
+        "Deep/production-mailbox/route-origin-lkg/v1"u8;
+
     internal static byte[] FreezeKey(ReadOnlyMemory<byte> key)
     {
         if (key.Length != 32 || key.Span.IndexOfAnyExcept((byte)0) < 0)
             throw new InvalidDataException("Route continuity state key is invalid.");
         return key.ToArray();
+    }
+
+    internal static byte[] ComputeRouteOriginLkgHash(ReadOnlySpan<byte> canonical)
+    {
+        if (canonical.Length !=
+            ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength)
+            throw new InvalidDataException("ROL1 canonical length is invalid.");
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(RouteOriginHashDomain);
+        hash.AppendData(canonical);
+        return hash.GetHashAndReset();
     }
 }
 
@@ -176,7 +212,8 @@ internal sealed class ProductionMailboxFrozenRouteTransition
             ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength)
             throw new InvalidDataException("Expected ROL1 length is invalid.");
         var expectedOld = expectedCanonicalOldRouteOriginLkg.ToArray();
-        var oldHash = SHA256.HashData(expectedOld);
+        var oldHash = ProductionMailboxRouteContinuityStateGuard
+            .ComputeRouteOriginLkgHash(expectedOld);
         var successor = transition.CanonicalSuccessor.ToArray();
         var proof = ProductionMailboxSelectionSuccessorV2Codec.Decode(successor);
         var contextBytes = transition.CanonicalTransitionContext.ToArray();
@@ -206,7 +243,8 @@ internal sealed class ProductionMailboxFrozenRouteTransition
                 SHA256.HashData(contextBytes))
             || nextRol.Length != ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength
             || nextRolHash.Length != 32
-            || !Fixed(nextRolHash, SHA256.HashData(nextRol))
+            || !Fixed(nextRolHash, ProductionMailboxRouteContinuityStateGuard
+                .ComputeRouteOriginLkgHash(nextRol))
             || transcriptHash.Length != 32
             || !Fixed(transcriptHash, SHA256.HashData(transcript))
             || context.OldLocalRouteCommitGeneration == ulong.MaxValue
@@ -290,11 +328,13 @@ internal sealed class ProductionMailboxFrozenEnrollment
             || value.CanonicalDelegationHash.Length != 32
             || value.CanonicalAcceptanceHash.Length != 32
             || value.EnrolledRouteOriginLkgHash.Length != 32
-            || !Fixed(SHA256.HashData(value.ExpectedOldRouteOriginLkg),
+            || !Fixed(ProductionMailboxRouteContinuityStateGuard.ComputeRouteOriginLkgHash(
+                    value.ExpectedOldRouteOriginLkg),
                 value.ExpectedOldRouteOriginLkgHash)
             || !Fixed(SHA256.HashData(value.CanonicalDelegation), value.CanonicalDelegationHash)
             || !Fixed(SHA256.HashData(value.CanonicalAcceptance), value.CanonicalAcceptanceHash)
-            || !Fixed(SHA256.HashData(value.CanonicalEnrolledRouteOriginLkg),
+            || !Fixed(ProductionMailboxRouteContinuityStateGuard.ComputeRouteOriginLkgHash(
+                    value.CanonicalEnrolledRouteOriginLkg),
                 value.EnrolledRouteOriginLkgHash)
             || value.ExpectedOldLocalCommitGeneration == ulong.MaxValue
             || value.ExpectedPreviousDelegationSequence == ulong.MaxValue)
@@ -397,7 +437,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
             value.CanonicalDelegation.ToArray(), value.CanonicalDelegationHash.ToArray(),
             value.CanonicalDelegationAcceptance.ToArray(),
             value.CanonicalDelegationAcceptanceHash.ToArray(), value.OwnerRevocationGeneration,
-            value.CanonicalOwnerRevocation.ToArray(), value.CanonicalOwnerRevocationHash.ToArray());
+            value.CanonicalOwnerRevocation.ToArray(), value.CanonicalOwnerRevocationHash.ToArray(),
+            value.History);
 
     internal static ProductionMailboxRouteContinuityCommitStatus ValidateTransitionPredecessor(
         ProductionMailboxRouteContinuityStateSnapshot? current,
@@ -413,6 +454,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
                 ProductionMailboxRouteAuthorizationKind.OwnerPRA2
                 ? ProductionMailboxRouteContinuityCommitStatus.Accepted
                 : ProductionMailboxRouteContinuityCommitStatus.MissingState;
+        if (current.History is not null)
+            return ProductionMailboxRouteContinuityCommitStatus.Terminal;
         if (value.NewAuthorizationKind ==
                 ProductionMailboxRouteAuthorizationKind.DelegatedRCA1
             && (current.DelegationSequence == 0
@@ -453,6 +496,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
             return ExactEnrollment(current, value)
                 ? ProductionMailboxRouteContinuityCommitStatus.ExactReplay
                 : ProductionMailboxRouteContinuityCommitStatus.Conflict;
+        if (current.History is not null)
+            return ProductionMailboxRouteContinuityCommitStatus.Terminal;
         if (current.DelegationSequence > value.ExpectedPreviousDelegationSequence)
             return ProductionMailboxRouteContinuityCommitStatus.Rollback;
         if (!Fixed(current.CanonicalRouteOriginLkg.Span, value.ExpectedOldRouteOriginLkg)
@@ -508,7 +553,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
             current?.CanonicalDelegationAcceptanceHash.ToArray() ?? new byte[32],
             current?.OwnerRevocationGeneration ?? 0,
             current?.CanonicalOwnerRevocation.ToArray() ?? [],
-            current?.CanonicalOwnerRevocationHash.ToArray() ?? new byte[32]);
+            current?.CanonicalOwnerRevocationHash.ToArray() ?? new byte[32],
+            current?.History);
 
     internal static ProductionMailboxRouteContinuityStateSnapshot FromEnrollment(
         ReadOnlySpan<byte> routeStateKey,
@@ -648,8 +694,33 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
                     canonical_history_checkpoint bytea NULL CHECK(canonical_history_checkpoint IS NULL OR octet_length(canonical_history_checkpoint)=464),
                     history_checkpoint_hash bytea NULL CHECK(history_checkpoint_hash IS NULL OR octet_length(history_checkpoint_hash)=32),
                     last_history_batch_sequence bytea NULL CHECK(last_history_batch_sequence IS NULL OR octet_length(last_history_batch_sequence)=8),
-                    last_history_batch_hash bytea NULL CHECK(last_history_batch_hash IS NULL OR octet_length(last_history_batch_hash)=32)
+                    last_history_batch_hash bytea NULL CHECK(last_history_batch_hash IS NULL OR octet_length(last_history_batch_hash)=32),
+                    history_current_route_origin_hash bytea NULL CHECK(history_current_route_origin_hash IS NULL OR octet_length(history_current_route_origin_hash)=32),
+                    history_enrollment_delegation_hash bytea NULL CHECK(history_enrollment_delegation_hash IS NULL OR octet_length(history_enrollment_delegation_hash)=32),
+                    history_enrollment_acceptance_hash bytea NULL CHECK(history_enrollment_acceptance_hash IS NULL OR octet_length(history_enrollment_acceptance_hash)=32),
+                    history_network_id bytea NULL CHECK(history_network_id IS NULL OR octet_length(history_network_id)=16),
+                    history_route_domain_hash bytea NULL CHECK(history_route_domain_hash IS NULL OR octet_length(history_route_domain_hash)=32),
+                    history_delegation_binding bytea NULL CHECK(history_delegation_binding IS NULL OR octet_length(history_delegation_binding)=32),
+                    history_pinned_mrx_hash bytea NULL CHECK(history_pinned_mrx_hash IS NULL OR octet_length(history_pinned_mrx_hash)=32),
+                    history_current_authority_generation bytea NULL CHECK(history_current_authority_generation IS NULL OR octet_length(history_current_authority_generation)=8),
+                    history_current_authority_hash bytea NULL CHECK(history_current_authority_hash IS NULL OR octet_length(history_current_authority_hash)=32),
+                    history_current_revocation_generation bytea NULL CHECK(history_current_revocation_generation IS NULL OR octet_length(history_current_revocation_generation)=8),
+                    history_current_revocation_head_hash bytea NULL CHECK(history_current_revocation_head_hash IS NULL OR octet_length(history_current_revocation_head_hash)=32),
+                    history_current_revocation_snapshot_hash bytea NULL CHECK(history_current_revocation_snapshot_hash IS NULL OR octet_length(history_current_revocation_snapshot_hash)=32)
                 );
+                ALTER TABLE production_mailbox_route_continuity_v2
+                    ADD COLUMN IF NOT EXISTS history_current_route_origin_hash bytea NULL CHECK(history_current_route_origin_hash IS NULL OR octet_length(history_current_route_origin_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_enrollment_delegation_hash bytea NULL CHECK(history_enrollment_delegation_hash IS NULL OR octet_length(history_enrollment_delegation_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_enrollment_acceptance_hash bytea NULL CHECK(history_enrollment_acceptance_hash IS NULL OR octet_length(history_enrollment_acceptance_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_network_id bytea NULL CHECK(history_network_id IS NULL OR octet_length(history_network_id)=16),
+                    ADD COLUMN IF NOT EXISTS history_route_domain_hash bytea NULL CHECK(history_route_domain_hash IS NULL OR octet_length(history_route_domain_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_delegation_binding bytea NULL CHECK(history_delegation_binding IS NULL OR octet_length(history_delegation_binding)=32),
+                    ADD COLUMN IF NOT EXISTS history_pinned_mrx_hash bytea NULL CHECK(history_pinned_mrx_hash IS NULL OR octet_length(history_pinned_mrx_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_current_authority_generation bytea NULL CHECK(history_current_authority_generation IS NULL OR octet_length(history_current_authority_generation)=8),
+                    ADD COLUMN IF NOT EXISTS history_current_authority_hash bytea NULL CHECK(history_current_authority_hash IS NULL OR octet_length(history_current_authority_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_current_revocation_generation bytea NULL CHECK(history_current_revocation_generation IS NULL OR octet_length(history_current_revocation_generation)=8),
+                    ADD COLUMN IF NOT EXISTS history_current_revocation_head_hash bytea NULL CHECK(history_current_revocation_head_hash IS NULL OR octet_length(history_current_revocation_head_hash)=32),
+                    ADD COLUMN IF NOT EXISTS history_current_revocation_snapshot_hash bytea NULL CHECK(history_current_revocation_snapshot_hash IS NULL OR octet_length(history_current_revocation_snapshot_hash)=32);
                 """;
             await using var command = new NpgsqlCommand(sql, connection);
             await command.ExecuteNonQueryAsync(cancellationToken);
@@ -666,12 +737,29 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
             bool forUpdate,
             CancellationToken cancellationToken)
     {
-        var sql = "SELECT canonical_route_origin,route_origin_hash,local_commit_generation,current_authorization_kind,current_authorization_hash,current_authorization_sequence,canonical_route_certificate,canonical_route_authorization,canonical_revocation_checkpoint,canonical_transition_context,canonical_selection_successor,canonical_transition_transcript,transition_transcript_hash,delegation_sequence,canonical_delegation,canonical_delegation_hash,canonical_delegation_acceptance,canonical_delegation_acceptance_hash,owner_revocation_generation,canonical_owner_revocation,canonical_owner_revocation_hash FROM production_mailbox_route_continuity_v2 WHERE route_state_key=@key" +
+        var sql = "SELECT canonical_route_origin,route_origin_hash,local_commit_generation,current_authorization_kind,current_authorization_hash,current_authorization_sequence,canonical_route_certificate,canonical_route_authorization,canonical_revocation_checkpoint,canonical_transition_context,canonical_selection_successor,canonical_transition_transcript,transition_transcript_hash,delegation_sequence,canonical_delegation,canonical_delegation_hash,canonical_delegation_acceptance,canonical_delegation_acceptance_hash,owner_revocation_generation,canonical_owner_revocation,canonical_owner_revocation_hash,canonical_history_checkpoint,history_checkpoint_hash,last_history_batch_sequence,last_history_batch_hash,history_current_route_origin_hash,history_enrollment_delegation_hash,history_enrollment_acceptance_hash,history_network_id,history_route_domain_hash,history_delegation_binding,history_pinned_mrx_hash,history_current_authority_generation,history_current_authority_hash,history_current_revocation_generation,history_current_revocation_head_hash,history_current_revocation_snapshot_hash FROM production_mailbox_route_continuity_v2 WHERE route_state_key=@key" +
             (forUpdate ? " FOR UPDATE" : string.Empty);
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("key", routeStateKey.ToArray());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
+        var historyNulls = Enumerable.Range(21, 16).Select(reader.IsDBNull).ToArray();
+        if (historyNulls.Any(static value => value) && historyNulls.Any(static value => !value))
+            throw new InvalidDataException("Stored route-history state is split.");
+        ProductionMailboxRouteHistoryStateSnapshot? history = null;
+        if (!historyNulls[0])
+        {
+            history = new ProductionMailboxRouteHistoryStateSnapshot(
+                new ProductionMailboxRouteHistoryProtectedRestoreContext(
+                    reader.GetFieldValue<byte[]>(21), reader.GetFieldValue<byte[]>(22),
+                    ReadU64(reader.GetFieldValue<byte[]>(23)), reader.GetFieldValue<byte[]>(24),
+                    reader.GetFieldValue<byte[]>(25), reader.GetFieldValue<byte[]>(26),
+                    reader.GetFieldValue<byte[]>(27), reader.GetFieldValue<byte[]>(28),
+                    reader.GetFieldValue<byte[]>(29), reader.GetFieldValue<byte[]>(30),
+                    reader.GetFieldValue<byte[]>(31), ReadU64(reader.GetFieldValue<byte[]>(32)),
+                    reader.GetFieldValue<byte[]>(33), ReadU64(reader.GetFieldValue<byte[]>(34)),
+                    reader.GetFieldValue<byte[]>(35), reader.GetFieldValue<byte[]>(36)));
+        }
         var result = new ProductionMailboxRouteContinuityStateSnapshot(
             routeStateKey.ToArray(), reader.GetFieldValue<byte[]>(0),
             reader.GetFieldValue<byte[]>(1), ReadU64(reader.GetFieldValue<byte[]>(2)),
@@ -684,7 +772,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
             reader.GetFieldValue<byte[]>(14), reader.GetFieldValue<byte[]>(15),
             reader.GetFieldValue<byte[]>(16), reader.GetFieldValue<byte[]>(17),
             ReadU64(reader.GetFieldValue<byte[]>(18)), reader.GetFieldValue<byte[]>(19),
-            reader.GetFieldValue<byte[]>(20));
+            reader.GetFieldValue<byte[]>(20), history);
         ValidateStoredState(result);
         return result;
     }
@@ -704,11 +792,22 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
                 canonical_transition_transcript,transition_transcript_hash,
                 delegation_sequence,canonical_delegation,canonical_delegation_hash,
                 canonical_delegation_acceptance,canonical_delegation_acceptance_hash,
-                owner_revocation_generation,canonical_owner_revocation,canonical_owner_revocation_hash)
+                owner_revocation_generation,canonical_owner_revocation,canonical_owner_revocation_hash,
+                canonical_history_checkpoint,history_checkpoint_hash,last_history_batch_sequence,
+                last_history_batch_hash,history_current_route_origin_hash,
+                history_enrollment_delegation_hash,history_enrollment_acceptance_hash,
+                history_network_id,history_route_domain_hash,history_delegation_binding,
+                history_pinned_mrx_hash,history_current_authority_generation,
+                history_current_authority_hash,history_current_revocation_generation,
+                history_current_revocation_head_hash,history_current_revocation_snapshot_hash)
             VALUES(@key,@origin,@originHash,@local,@kind,@authHash,@authSequence,@certificate,
                 @authorization,@rch,@rtc,@pss,@transcriptBytes,@transcript,@delegationSequence,@delegation,
                 @delegationHash,@acceptance,@acceptanceHash,@revocationGeneration,@revocation,
-                @revocationHash)
+                @revocationHash,@historyCheckpoint,@historyCheckpointHash,@historyBatchSequence,
+                @historyBatchHash,@historyRolHash,@historyDelegationHash,@historyAcceptanceHash,
+                @historyNetwork,@historyRouteDomain,@historyDelegationBinding,@historyMrX,
+                @historyAuthorityGeneration,@historyAuthorityHash,@historyRevocationGeneration,
+                @historyRevocationHead,@historyRevocationSnapshot)
             ON CONFLICT(route_state_key) DO UPDATE SET
                 canonical_route_origin=EXCLUDED.canonical_route_origin,
                 route_origin_hash=EXCLUDED.route_origin_hash,
@@ -730,7 +829,23 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
                 canonical_delegation_acceptance_hash=EXCLUDED.canonical_delegation_acceptance_hash,
                 owner_revocation_generation=EXCLUDED.owner_revocation_generation,
                 canonical_owner_revocation=EXCLUDED.canonical_owner_revocation,
-                canonical_owner_revocation_hash=EXCLUDED.canonical_owner_revocation_hash
+                canonical_owner_revocation_hash=EXCLUDED.canonical_owner_revocation_hash,
+                canonical_history_checkpoint=EXCLUDED.canonical_history_checkpoint,
+                history_checkpoint_hash=EXCLUDED.history_checkpoint_hash,
+                last_history_batch_sequence=EXCLUDED.last_history_batch_sequence,
+                last_history_batch_hash=EXCLUDED.last_history_batch_hash,
+                history_current_route_origin_hash=EXCLUDED.history_current_route_origin_hash,
+                history_enrollment_delegation_hash=EXCLUDED.history_enrollment_delegation_hash,
+                history_enrollment_acceptance_hash=EXCLUDED.history_enrollment_acceptance_hash,
+                history_network_id=EXCLUDED.history_network_id,
+                history_route_domain_hash=EXCLUDED.history_route_domain_hash,
+                history_delegation_binding=EXCLUDED.history_delegation_binding,
+                history_pinned_mrx_hash=EXCLUDED.history_pinned_mrx_hash,
+                history_current_authority_generation=EXCLUDED.history_current_authority_generation,
+                history_current_authority_hash=EXCLUDED.history_current_authority_hash,
+                history_current_revocation_generation=EXCLUDED.history_current_revocation_generation,
+                history_current_revocation_head_hash=EXCLUDED.history_current_revocation_head_hash,
+                history_current_revocation_snapshot_hash=EXCLUDED.history_current_revocation_snapshot_hash
             """;
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("key", value.RouteStateKey.ToArray());
@@ -755,7 +870,33 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         command.Parameters.AddWithValue("revocationGeneration", U64(value.OwnerRevocationGeneration));
         command.Parameters.AddWithValue("revocation", value.CanonicalOwnerRevocation.ToArray());
         command.Parameters.AddWithValue("revocationHash", value.CanonicalOwnerRevocationHash.ToArray());
+        var history = value.History;
+        AddOptionalBytea("historyCheckpoint", history?.CanonicalCheckpoint);
+        AddOptionalBytea("historyCheckpointHash", history?.CanonicalCheckpointHash);
+        AddOptionalBytea("historyBatchSequence", history is null
+            ? (ReadOnlyMemory<byte>?)null : U64(history.LastCommittedBatchSequence));
+        AddOptionalBytea("historyBatchHash", history?.LastCommittedBatchHash);
+        AddOptionalBytea("historyRolHash", history?.CurrentRouteOriginLkgHash);
+        AddOptionalBytea("historyDelegationHash", history?.EnrollmentCanonicalDelegationHash);
+        AddOptionalBytea("historyAcceptanceHash", history?.EnrollmentCanonicalAcceptanceHash);
+        AddOptionalBytea("historyNetwork", history?.NetworkId);
+        AddOptionalBytea("historyRouteDomain", history?.RouteDomainHash);
+        AddOptionalBytea("historyDelegationBinding", history?.DelegationHistoryBinding);
+        AddOptionalBytea("historyMrX", history?.PinnedMrXPublicKeySha256);
+        AddOptionalBytea("historyAuthorityGeneration",
+            history is null ? (ReadOnlyMemory<byte>?)null : U64(history.CurrentAuthorityGeneration));
+        AddOptionalBytea("historyAuthorityHash", history?.CurrentCanonicalAuthorityHash);
+        AddOptionalBytea("historyRevocationGeneration",
+            history is null ? (ReadOnlyMemory<byte>?)null : U64(history.CurrentRevocationGeneration));
+        AddOptionalBytea("historyRevocationHead", history?.CurrentRevocationHeadHash);
+        AddOptionalBytea("historyRevocationSnapshot", history?.CurrentRevocationSnapshotHash);
         await command.ExecuteNonQueryAsync(cancellationToken);
+
+        void AddOptionalBytea(string name, ReadOnlyMemory<byte>? bytes)
+        {
+            var parameter = command.Parameters.Add(name, NpgsqlDbType.Bytea);
+            parameter.Value = bytes.HasValue ? bytes.Value.ToArray() : DBNull.Value;
+        }
     }
 
     private static ProductionMailboxRouteContinuityCommitStatus ValidateTransitionPredecessor(
@@ -791,7 +932,8 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         if (value.CanonicalRouteOriginLkg.Length !=
                 ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength
             || value.RouteOriginLkgHash.Length != 32
-            || !Fixed(SHA256.HashData(value.CanonicalRouteOriginLkg.Span),
+            || !Fixed(ProductionMailboxRouteContinuityStateGuard.ComputeRouteOriginLkgHash(
+                    value.CanonicalRouteOriginLkg.Span),
                 value.RouteOriginLkgHash.Span)
             || value.LocalCommitGeneration == ulong.MaxValue
             || !Enum.IsDefined(value.CurrentAuthorizationKind)
@@ -799,11 +941,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
             || value.CurrentAuthorizationHash.Length != 32
             || value.CurrentAuthorizationHash.Span.IndexOfAnyExcept((byte)0) < 0
             || value.CurrentAuthorizationSequence is 0 or ulong.MaxValue
-            || value.TransitionTranscriptHash.Length != 32
-            || value.CanonicalOwnerRevocation.Length != 0
-            || value.OwnerRevocationGeneration != 0
-            || value.CanonicalOwnerRevocationHash.Length != 32
-            || value.CanonicalOwnerRevocationHash.Span.IndexOfAnyExcept((byte)0) >= 0)
+            || value.TransitionTranscriptHash.Length != 32)
             throw new InvalidDataException("Stored route-continuity state is invalid.");
 
         if (value.DelegationSequence == 0)
@@ -835,6 +973,9 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
                     value.CanonicalDelegationHash.Span))
                 throw new InvalidDataException("Stored route-continuity enrollment lineage is invalid.");
         }
+
+        ValidateStoredOwnerRevocation(value);
+        value.History?.ValidateAgainst(value);
 
         var hasTransition = value.CanonicalSelectionSuccessor.Length != 0;
         if (!hasTransition)
@@ -885,5 +1026,38 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
             || context.NewAuthorizationKind != value.CurrentAuthorizationKind
             || context.NewRouteAuthorizationSequence != value.CurrentAuthorizationSequence)
             throw new InvalidDataException("Stored route transition is internally inconsistent.");
+    }
+
+    private static void ValidateStoredOwnerRevocation(
+        ProductionMailboxRouteContinuityStateSnapshot value)
+    {
+        if (value.CanonicalOwnerRevocationHash.Length != 32)
+            throw new InvalidDataException("Stored owner-revocation hash length is invalid.");
+        if (value.OwnerRevocationGeneration == 0)
+        {
+            if (value.CanonicalOwnerRevocation.Length != 0 ||
+                value.CanonicalOwnerRevocationHash.Span.IndexOfAnyExcept((byte)0) >= 0)
+                throw new InvalidDataException("Stored active owner-revocation state is invalid.");
+            return;
+        }
+        if (value.OwnerRevocationGeneration != 1 || value.DelegationSequence == 0 ||
+            value.CanonicalOwnerRevocation.Length !=
+                ProductionMailboxRouteContinuityConstants.CanonicalRevocationLength ||
+            value.CanonicalOwnerRevocationHash.Span.IndexOfAnyExcept((byte)0) < 0 ||
+            !Fixed(SHA256.HashData(value.CanonicalOwnerRevocation.Span),
+                value.CanonicalOwnerRevocationHash.Span))
+            throw new InvalidDataException("Stored terminal owner-revocation state is invalid.");
+        var revocation = ProductionMailboxRouteContinuityCodec.DecodeRevocation(
+            value.CanonicalOwnerRevocation.Span);
+        var delegation = ProductionMailboxRouteContinuityCodec.DecodeDelegation(
+            value.CanonicalDelegation.Span);
+        if (revocation.RevocationGeneration != 1 ||
+            revocation.PreviousCanonicalRevocationHash.Span.IndexOfAnyExcept((byte)0) >= 0 ||
+            !Fixed(revocation.NetworkId.Span, delegation.NetworkId.Span) ||
+            !Fixed(revocation.RouteDomainHash.Span, delegation.RouteDomainHash.Span) ||
+            !Fixed(revocation.TargetDelegationSerial.Span, delegation.DelegationSerial.Span) ||
+            !Fixed(revocation.TargetCanonicalDelegationHash.Span,
+                value.CanonicalDelegationHash.Span))
+            throw new InvalidDataException("Stored terminal owner revocation is misbound.");
     }
 }

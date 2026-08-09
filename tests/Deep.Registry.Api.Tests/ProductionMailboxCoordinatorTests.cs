@@ -2598,13 +2598,12 @@ public sealed class ProductionMailboxCoordinatorTests
                     ClockSkewSeconds = 0,
                     MaximumStoredClosures = 1_000,
                     MaximumClosureStoreBytes = 1_073_741_824,
-                    MaximumClosureVersionsPerSelection = 4,
                     MaximumClosureLineagesPerSelection = 4,
                     MaximumClosureReservations = 32,
                     MinimumClosureReservationLifetimeSeconds = 60,
                     MaximumClosureReservationLifetimeSeconds =
                         maximumReservationLifetimeSeconds,
-                    ClosureScheduleAccountingOverheadBytes = 1_024
+                    ClosureAccountingOverheadBytes = 1_024
                 };
                 configuration = new(options, node);
                 configurations.Add(key, configuration);

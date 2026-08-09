@@ -137,12 +137,17 @@ freeze the opaque route-state key before waiting, and accept only non-forgeable 
 `ProductionMailboxRouteContinuityEnrollmentCommitPlan`. The PostgreSQL mutation is serialized by
 the opaque route-state-key advisory lock and commits the entire successor row atomically.
 
-RCR1 and RHB1/RHC1 columns are reserved in this schema, but this slice intentionally exposes no
-mutation method for them. Owner revocation remains blocked until the protocol package exposes a
-sealed public owner-revocation verification result. History persistence remains blocked until its
-verified cursor/commit plan exports the exact defensive restore tuple, including the current ROL1
-hash. Registry must not parse internal fixed offsets or accept a raw "already verified" artifact
-to bypass either capability boundary.
+The second state-only slice activates those reserved RCR1 and RHB1/RHC1 columns without opening a
+wire or coordinator path. Owner revocation mutation accepts only the sealed
+`VerifiedProductionMailboxRouteContinuityRevocation` returned by the protocol's owner-signature
+verifier. History mutation accepts only a sealed expected cursor plus a verified batch commit plan;
+Registry repeats protocol verification and exact protected-restore-context comparison before it
+waits on storage. A bounded raw RHB1 is accepted only by a read-only lost-response replay check:
+the current sequence and exact SHA-256 return the durable state, the same sequence with different
+bytes is a fork, and older/future sequences are rejected without mutation. PostgreSQL serializes
+all three operations on the opaque route advisory lock and stores the complete RHC1 protected
+restore tuple atomically. Endpoints, coordinator activation, RCR/RHB ingestion, and XNode
+publication remain deliberately absent until the later reviewed integration slices.
 
 Artifact reload infrastructure stages a promotion rather than immediately swapping the pointer.
 PostgreSQL records one active

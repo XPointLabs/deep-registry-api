@@ -138,10 +138,33 @@ public sealed class ProductionMailboxRouteContinuityStateTests
         Assert.Collection(methods.OrderBy(static method => method.Name, StringComparer.Ordinal),
             method =>
             {
+                Assert.Equal("CheckHistoryBatchReplayAsync", method.Name);
+                Assert.Contains(method.GetParameters(), parameter =>
+                    parameter.ParameterType == typeof(ReadOnlyMemory<byte>));
+            },
+            method =>
+            {
                 Assert.Equal("CommitEnrollmentAsync", method.Name);
                 Assert.Contains(method.GetParameters(), parameter =>
                     parameter.ParameterType ==
                     typeof(ProductionMailboxRouteContinuityEnrollmentCommitPlan));
+            },
+            method =>
+            {
+                Assert.Equal("CommitVerifiedHistoryBatchAsync", method.Name);
+                Assert.Contains(method.GetParameters(), parameter =>
+                    parameter.ParameterType ==
+                    typeof(VerifiedProductionMailboxRouteHistoryCursor));
+                Assert.Contains(method.GetParameters(), parameter =>
+                    parameter.ParameterType ==
+                    typeof(ProductionMailboxRouteHistoryBatchCommitPlan));
+            },
+            method =>
+            {
+                Assert.Equal("CommitVerifiedOwnerRevocationAsync", method.Name);
+                Assert.Contains(method.GetParameters(), parameter =>
+                    parameter.ParameterType ==
+                    typeof(VerifiedProductionMailboxRouteContinuityRevocation));
             },
             method =>
             {
@@ -151,11 +174,25 @@ public sealed class ProductionMailboxRouteContinuityStateTests
                     typeof(VerifiedProductionMailboxRouteSelectionTransition));
             },
             method => Assert.Equal("GetRouteContinuityStateAsync", method.Name));
-        Assert.DoesNotContain(methods, method => method.Name.Contains("Revocation",
-            StringComparison.Ordinal) || method.Name.Contains("History", StringComparison.Ordinal));
+        Assert.DoesNotContain(methods.Where(static method =>
+                method.Name.StartsWith("Commit", StringComparison.Ordinal) &&
+                (method.Name.Contains("History", StringComparison.Ordinal) ||
+                 method.Name.Contains("OwnerRevocation", StringComparison.Ordinal))), method =>
+            method.GetParameters().Any(parameter =>
+                parameter.ParameterType == typeof(ReadOnlyMemory<byte>) &&
+                !string.Equals(parameter.Name, "routeStateKey", StringComparison.Ordinal)));
         Assert.DoesNotContain(typeof(InMemoryProductionMailboxStateStore)
             .GetMethods(BindingFlags.Instance | BindingFlags.Public), method =>
                 method.Name.Contains("RouteContinuity", StringComparison.Ordinal));
+        Assert.DoesNotContain(typeof(PostgreSqlProductionMailboxStateStore)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public), method =>
+                method.Name.Contains("RouteContinuity", StringComparison.Ordinal));
+        Assert.Empty(typeof(VerifiedProductionMailboxRouteContinuityRevocation)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.Public));
+        Assert.Empty(typeof(VerifiedProductionMailboxRouteHistoryCursor)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.Public));
+        Assert.Empty(typeof(ProductionMailboxRouteHistoryBatchCommitPlan)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.Public));
     }
 
     [Fact]
@@ -314,7 +351,8 @@ public sealed class ProductionMailboxRouteContinuityStateTests
     private static ProductionMailboxRouteContinuityEnrollmentCommitPlan Plan(
         byte[] oldRol, byte delegationSeed, byte acceptanceSeed)
     {
-        var oldRolHash = SHA256.HashData(oldRol);
+        var oldRolHash = ProductionMailboxRouteContinuityStateGuard
+            .ComputeRouteOriginLkgHash(oldRol);
         var delegation = new ProductionMailboxRouteContinuityDelegation
         {
             NetworkId = Bytes(delegationSeed, 16),
@@ -368,7 +406,8 @@ public sealed class ProductionMailboxRouteContinuityStateTests
             ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength);
         return CreatePlan(oldRol, oldRolHash, 3, 0, new byte[32], canonicalDelegation,
             delegationHash, canonicalAcceptance, SHA256.HashData(canonicalAcceptance),
-            enrolledRol, SHA256.HashData(enrolledRol));
+            enrolledRol, ProductionMailboxRouteContinuityStateGuard
+                .ComputeRouteOriginLkgHash(enrolledRol));
     }
 
     private static VerifiedProductionMailboxRouteSelectionTransition Transition(
@@ -457,7 +496,8 @@ public sealed class ProductionMailboxRouteContinuityStateTests
             CanonicalRevocationCheckpointHash = checkpointHash,
             CurrentCanonicalAuthorityHash = authorityHash,
             CurrentAuthorityGeneration = authority.AuthorityGeneration,
-            SealedOldRouteOriginLkgHash = SHA256.HashData(oldRol),
+            SealedOldRouteOriginLkgHash = ProductionMailboxRouteContinuityStateGuard
+                .ComputeRouteOriginLkgHash(oldRol),
             OldRouteVerifiedAtUnixSeconds = now - 100,
             OldLocalRouteCommitGeneration = oldLocalGeneration,
             NotBeforeUnixSeconds = now,
@@ -559,7 +599,8 @@ public sealed class ProductionMailboxRouteContinuityStateTests
         return CreateTransition(verifiedSelection, null,
             newKind,
             predecessorSequence + 1, canonicalPss, certificateBytes, contextBytes,
-            authorizationBytes, checkpointBytes, nextRol, SHA256.HashData(nextRol),
+            authorizationBytes, checkpointBytes, nextRol,
+            ProductionMailboxRouteContinuityStateGuard.ComputeRouteOriginLkgHash(nextRol),
             transcript, SHA256.HashData(transcript));
     }
 
