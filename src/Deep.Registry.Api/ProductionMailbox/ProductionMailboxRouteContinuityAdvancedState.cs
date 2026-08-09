@@ -192,13 +192,19 @@ internal sealed class ProductionMailboxFrozenHistoryBatch
             throw new InvalidDataException("RHB1 length is outside its strict bound.");
         var expected = new ProductionMailboxRouteHistoryStateSnapshot(
             expectedCurrent.ToProtectedRestoreContext());
+        var plannedExpected = new ProductionMailboxRouteHistoryStateSnapshot(
+            plan.ToExpectedCurrentProtectedRestoreContext());
         var plannedNext = new ProductionMailboxRouteHistoryStateSnapshot(
             plan.ToProtectedRestoreContext());
-        var verifiedNext = ProductionMailboxRouteHistoryAuthoring.VerifyBatch(
+        var verifiedPlan = ProductionMailboxRouteHistoryAuthoring.VerifyNextBatchForCommit(
             expectedCurrent, sourceBatch.Span);
+        var verifiedExpected = new ProductionMailboxRouteHistoryStateSnapshot(
+            verifiedPlan.ToExpectedCurrentProtectedRestoreContext());
         var verifiedNextState = new ProductionMailboxRouteHistoryStateSnapshot(
-            verifiedNext.ToProtectedRestoreContext());
-        if (!plannedNext.Exact(verifiedNextState))
+            verifiedPlan.ToProtectedRestoreContext());
+        if (!expected.Exact(plannedExpected) || !expected.Exact(verifiedExpected) ||
+            !plannedNext.Exact(verifiedNextState) ||
+            !Fixed(plan.PlanHash.Span, verifiedPlan.PlanHash.Span))
             throw new InvalidDataException("RHB1 plan result differs from protocol verification.");
         var batch = sourceBatch.ToArray();
         var hash = plan.CanonicalBatchHash.ToArray();
