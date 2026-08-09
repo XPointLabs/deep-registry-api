@@ -63,7 +63,10 @@ public static class ProductionMailboxHostingExtensions
             {
                 if (options.UseDevelopmentInMemoryState || string.IsNullOrWhiteSpace(options.PostgreSqlConnectionString))
                     throw new InvalidOperationException("Production mailbox state requires PostgreSQL; in-memory state is forbidden.");
-                return new PostgreSqlProductionMailboxStateStore(options.PostgreSqlConnectionString);
+                return new PostgreSqlProductionMailboxStateStore(
+                    options.PostgreSqlConnectionString,
+                    ProductionMailboxV2PreparedIntegrity.ReadProtectedKey(
+                        options.RouteStateHmacKeyPath));
             }
             if (!environment.IsDevelopment() || !options.UseDevelopmentInMemoryState)
                 throw new InvalidOperationException("Non-production mailbox state requires explicit Development in-memory opt-in.");

@@ -149,6 +149,60 @@ all three operations on the opaque route advisory lock and stores the complete R
 restore tuple atomically. Endpoints, coordinator activation, RCR/RHB ingestion, and XNode
 publication remain deliberately absent until the later reviewed integration slices.
 
+The third isolated slice adds only the V2 XNode cache-publication barrier; it still does not
+activate a route or expose an owner endpoint. Registry freezes PMA1/PMR1/PMT1 and current/next
+PMS1 from one internal control-plane snapshot, then replaces every route-specific field from one
+durable route-state snapshot and invokes the protocol's cache-only verifier. The verifier output
+is bound to a domain-separated fingerprint of the complete ROL/authorization/RCR/RHC transition
+state. The store compares that fingerprint both when the activation is created and again in the
+same transaction that marks publication complete.
+
+Only after the verified plan is accepted does the state transaction generate and persist the
+one nonzero random PMC2 salt, exact canonical envelope, cache transcript, hard expiry, lineage,
+cohort and ordered target set. Exact retry returns those stored bytes; it never generates a new
+salt. The same transaction writes a domain-separated Prepared-V2 HMAC over the entire bounded
+materialized activation using the existing protected route-state integrity key. Every reload
+verifies that MAC before returning an owned Prepared snapshot to the external signer. Missing,
+wrong-key or corrupted prepared state fails closed. The HMAC format is clean-break v1: operators
+must drain or explicitly discard all V2 activation rows before rotating that key; old and
+new keys are never accepted concurrently. Publication then uses a separate Prepared-to-Attested
+CAS: the publisher signs the exact
+persisted salt, lineage commitment, envelope hash and length together with the verified source,
+every exact artifact, cache transcript and complete ordered target/endpoint/pin set. A crash before
+or after signing resumes the same prepared bytes, and a lost response after the attestation write
+is an exact replay. An unattested row cannot enter the work queue, reserve capacity, create an
+attempt, accept an ACK or finalize. PostgreSQL reload revalidates the attestation before any
+capacity, signer or network callback. Database length constraints and
+bounded target reads reject oversized or excess stored rows before materialization. Target
+identities, HTTPS endpoints and pin pairs are derived only from the verified PSS2 old/current
+selection and PMT1 closure; a disjoint next-only replica is not a publication target. Publisher-
+signed PMP2 attempts freeze a signer result once, are locally reverified, and are durably recorded
+before the constant-path peer POST. A delayed ACK is accepted only for the current exact attempt
+hash.
+The final store primitive locks the route, activation, target and capacity rows in canonical order
+and, using authoritative transaction time, requires an unchanged source fingerprint, an unexpired
+PMC2, every exact PMP2 ACK and every current node-signed PMB2 reservation receipt through the safe
+renewal margin. It repeats the source/time/capacity predicate at the final write boundary.
+An independent phase-integrity HMAC covers the exact persisted attestation signature, ordered
+attempt bytes/hashes/timestamps/ACK flags and Published bit. Every read verifies both HMACs and,
+for Attested/Published state, the exact Ed25519 attestation before interpreting a phase. Attempt,
+ACK and final publication transactions lock and verify the full old phase, then update the row and
+phase HMAC atomically; a stored phase-bit or coherent attempt/ACK rewrite is never authority.
+The store admits at most two live cache commitments for one exact selection/old-PMS lineage under
+the same cross-process lock used for creation; authenticated expired rows are pruned before a new
+admission. Publication checks the immutable cache expiry and safety margin before capacity and
+again before every attempt, so a hard-expired activation performs no signer, transport or capacity
+work and is boundedly reclaimed. A best-effort source-current check also precedes those side
+effects. If the source changes while an already-issued network request is in flight, the final
+source CAS still prevents activation; the resulting undiscoverable XNode cache is bounded by its
+signed hard expiry.
+
+Node-visible PMC2/PMP2 records contain no RCD1, RDA1, RCR1, RHB1, RHC1, ROL1, route-state key,
+token or entitlement data. There is no PMQ endpoint, owner signing, V1 fallback or public raw V2
+mutation API in this slice. Capacity release remains the existing durable post-publication cohort
+cleanup. Route activation remains blocked by the explicit NO-GO above until the continuity
+coordinator and high-level client verifier are integrated.
+
 Artifact reload infrastructure stages a promotion rather than immediately swapping the pointer.
 PostgreSQL records one active
 promotion with an immutable owner-sequence watermark and a resumable cursor. New enrollment and

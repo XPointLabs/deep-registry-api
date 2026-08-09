@@ -46,7 +46,16 @@ public interface IProductionMailboxClosureTransport
         CancellationToken cancellationToken);
 }
 
-public sealed class HttpsProductionMailboxClosureTransport : IProductionMailboxClosureTransport
+internal interface IProductionMailboxV2ClosureTransport
+{
+    ValueTask<bool> PrepositionV2Async(
+        ProductionMailboxV2Target target,
+        ReadOnlyMemory<byte> canonicalCommand,
+        CancellationToken cancellationToken);
+}
+
+public sealed class HttpsProductionMailboxClosureTransport : IProductionMailboxClosureTransport,
+    IProductionMailboxV2ClosureTransport
 {
     private const string Route = "/api/peer/production-mailbox/closure";
     private const string MediaType =
@@ -98,6 +107,48 @@ public sealed class HttpsProductionMailboxClosureTransport : IProductionMailboxC
         {
             using var response = await client.SendAsync(
                 request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            return response.StatusCode == System.Net.HttpStatusCode.NoContent;
+        }
+        catch (Exception exception) when (exception is HttpRequestException
+            or IOException or TaskCanceledException)
+        {
+            return false;
+        }
+    }
+
+    async ValueTask<bool> IProductionMailboxV2ClosureTransport.PrepositionV2Async(
+        ProductionMailboxV2Target target, ReadOnlyMemory<byte> canonicalCommand,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (!Uri.TryCreate(target.Endpoint, UriKind.Absolute, out var origin)
+            || origin.Scheme != Uri.UriSchemeHttps || origin.PathAndQuery != "/"
+            || canonicalCommand.Length is < ProductionMailboxV2WireCodec.CommandHeaderLength
+                or > ProductionMailboxV2WireCodec.MaximumCommandBytes)
+            return false;
+        using var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            AutomaticDecompression = System.Net.DecompressionMethods.None,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+            SslOptions = new SslClientAuthenticationOptions
+            {
+                RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+                    VerifyPinnedCertificate(certificate, errors,
+                        target.CurrentSpkiSha256.Span, target.NextSpkiSha256.Span)
+            }
+        };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(origin, Route))
+        {
+            Content = new ByteArrayContent(canonicalCommand.ToArray())
+        };
+        request.Content.Headers.ContentType = new(MediaType);
+        request.Headers.CacheControl = new() { NoStore = true };
+        try
+        {
+            using var response = await client.SendAsync(request,
+                HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             return response.StatusCode == System.Net.HttpStatusCode.NoContent;
         }
         catch (Exception exception) when (exception is HttpRequestException

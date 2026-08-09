@@ -105,13 +105,13 @@ internal static class ProductionMailboxCapacityRevisionPolicy
     internal static bool CanIssueSuccessor(
         ulong currentRevision,
         ProductionMailboxCapacityOperation operation) => operation switch
-    {
-        ProductionMailboxCapacityOperation.ReserveOrRenew =>
-            currentRevision < MaximumStoredRevision - 1,
-        ProductionMailboxCapacityOperation.Release =>
-            currentRevision < MaximumStoredRevision,
-        _ => false
-    };
+        {
+            ProductionMailboxCapacityOperation.ReserveOrRenew =>
+                currentRevision < MaximumStoredRevision - 1,
+            ProductionMailboxCapacityOperation.Release =>
+                currentRevision < MaximumStoredRevision,
+            _ => false
+        };
 
     internal static bool IsStorableReceipt(
         ProductionMailboxCapacityReceipt receipt) =>
@@ -1420,7 +1420,8 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
     private sealed record RouteAdvertisementRecord(ulong Sequence, byte[] AdvertisementHash);
 }
 
-public sealed partial class PostgreSqlProductionMailboxStateStore(string connectionString)
+public sealed partial class PostgreSqlProductionMailboxStateStore(
+    string connectionString, ReadOnlyMemory<byte> v2PublicationIntegrityKey = default)
     : IProductionMailboxStateStore, IProductionMailboxRouteContinuityStateStore
 {
     private readonly SemaphoreSlim initializeGate = new(1, 1);

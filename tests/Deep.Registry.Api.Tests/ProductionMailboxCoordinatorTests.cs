@@ -1366,7 +1366,7 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     [Fact]
-    public async Task PostgreSqlPromotion_ReconcilesRealXNodeAfterRetentionAndBothRestart()
+    public async Task PostgreSqlCapacity_ReconcilesRealXNodeAfterRetentionAndBothRestart()
     {
         var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
         if (string.IsNullOrWhiteSpace(connectionString)) return;
@@ -1391,7 +1391,8 @@ public sealed class ProductionMailboxCoordinatorTests
             first.TimeProvider,
             maximumReservationLifetimeSeconds: 600)
         {
-            DropReleaseAndReconciliation = true
+            DropReleaseAndReconciliation = true,
+            CapacityOnlyPublicationBarrier = true
         };
         var coordinator = first.Coordinator(state, secondSigner, transport);
 
@@ -1403,6 +1404,7 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.True(active.Published,
             interrupted.Message + Environment.NewLine + transport.LastFailure);
         Assert.False(active.CapacityReleaseCompleted);
+        Assert.True(transport.CapacityOnlyPublicationCount > 0);
 
         first.TimeProvider.Set(Fixture.Now + 1_261);
         transport.DropReleaseAndReconciliation = false;
@@ -2492,6 +2494,11 @@ public sealed class ProductionMailboxCoordinatorTests
         }
 
         internal bool DropReleaseAndReconciliation { get; set; }
+        // The legacy coordinator path is deliberately route-activation NO-GO after the XNode
+        // PMC2 clean break. This switch keeps this test scoped to its PMB3/PMB4 cross-process
+        // capacity-reconciliation contract; PMC2 publication is covered by the isolated V2 tests.
+        internal bool CapacityOnlyPublicationBarrier { get; set; }
+        internal int CapacityOnlyPublicationCount { get; private set; }
         internal int ReconciliationCount { get; private set; }
         internal string? LastFailure { get; private set; }
 
@@ -2500,6 +2507,11 @@ public sealed class ProductionMailboxCoordinatorTests
             ReadOnlyMemory<byte> canonicalCommand,
             CancellationToken cancellationToken)
         {
+            if (CapacityOnlyPublicationBarrier)
+            {
+                CapacityOnlyPublicationCount++;
+                return true;
+            }
             try
             {
                 await Store(item.TargetReplicaId).PrepositionAsync(
