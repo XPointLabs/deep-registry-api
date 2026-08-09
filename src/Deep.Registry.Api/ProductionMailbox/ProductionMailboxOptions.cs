@@ -37,9 +37,45 @@ public sealed class ProductionMailboxOptions
     public string DevelopmentClosurePublisherSeedPath { get; set; } = "";
     public string PostgreSqlConnectionString { get; set; } = "";
     public string RouteStateHmacKeyPath { get; set; } = "";
+    public string OwnerControlHsmSocketPath { get; set; } = "";
+    public uint OwnerControlHsmTimeoutSeconds { get; set; } = 5;
+    public string DevelopmentOwnerControlSeedPath { get; set; } = "";
+    public bool OwnerControlSigningEnabled { get; set; } = true;
+    public int MaximumOwnerControlRequestsPerWindow { get; set; } = 64;
+    public uint OwnerControlRequestWindowSeconds { get; set; } = 60;
+    public int MaximumOwnerControlEntriesPerRoute { get; set; } = 1024;
+    public int MaximumOwnerControlEntriesGlobal { get; set; } = 1_000_000;
+    public long MaximumOwnerControlStateBytes { get; set; } = 512L * 1024 * 1024;
+    public int MaximumOwnerControlGcBatch { get; set; } = 256;
+    public uint OwnerControlStatementTimeoutSeconds { get; set; } = 5;
+    public uint OwnerControlLockTimeoutSeconds { get; set; } = 2;
+    public uint OwnerControlIdleTransactionTimeoutSeconds { get; set; } = 5;
     public bool UseDevelopmentInMemoryState { get; set; }
     public string InternalAdminAuthenticationType { get; set; } = "Certificate";
     public string InternalAdminClientCertificateSha256 { get; set; } = "";
+}
+
+public sealed record ProductionMailboxOwnerControlStoreLimits(
+    int MaximumEntriesPerRoute = 1024,
+    int MaximumEntriesGlobal = 1_000_000,
+    long MaximumStateBytes = 512L * 1024 * 1024,
+    int MaximumGcBatch = 256,
+    uint StatementTimeoutSeconds = 5,
+    uint LockTimeoutSeconds = 2,
+    uint IdleTransactionTimeoutSeconds = 5)
+{
+    internal void Validate()
+    {
+        if (MaximumEntriesPerRoute is < 4 or > 1_000_000
+            || MaximumEntriesGlobal < MaximumEntriesPerRoute
+            || MaximumEntriesGlobal > 10_000_000
+            || MaximumStateBytes is < 1_048_576 or > 16L * 1024 * 1024 * 1024
+            || MaximumGcBatch is < 1 or > 4096
+            || StatementTimeoutSeconds is < 1 or > 30
+            || LockTimeoutSeconds is < 1 or > 30
+            || IdleTransactionTimeoutSeconds is < 1 or > 30)
+            throw new InvalidOperationException("Owner-control durable limits are invalid.");
+    }
 }
 
 public static class ProductionMailboxMediaTypes
@@ -52,4 +88,14 @@ public static class ProductionMailboxMediaTypes
     public const string RouteCertificate = "application/vnd.deep.production-mailbox-route-certificate";
     public const string RouteAdvertisement = "application/vnd.deep.production-mailbox-route-advertisement";
     public const string SelectionSuccessor = "application/vnd.deep.production-mailbox-selection-successor";
+    public const string OwnerEnrollmentRequest =
+        "application/vnd.deep.production-mailbox-owner-enrollment";
+    public const string OwnerEnrollmentResponse =
+        "application/vnd.deep.production-mailbox-owner-enrollment-response";
+    public const string OwnerControlRequest =
+        "application/vnd.deep.production-mailbox-owner-control-request";
+    public const string OwnerControlResponse =
+        "application/vnd.deep.production-mailbox-owner-control-response";
+    public const string OwnerRevocationRequest =
+        "application/vnd.deep.production-mailbox-owner-revocation";
 }

@@ -117,15 +117,16 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         if (string.IsNullOrWhiteSpace(connectionString)) return;
         await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
         var store = (IProductionMailboxRouteContinuityStateStore)
-            new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
-        var fixture = await AdvancedFixture.CreateAsync(store, 91);
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, AdvancedFixture.Bytes(240, 32));
+        var fixture = await AdvancedFixture.CreateAsync(store, 91,
+            nowUnixSeconds: checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
 
         var accepted = await store.CommitVerifiedHistoryBatchAsync(
             fixture.RouteKey, fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None);
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted, accepted.Status);
 
         var restarted = (IProductionMailboxRouteContinuityStateStore)
-            new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, AdvancedFixture.Bytes(240, 32));
         var durable = await restarted.GetRouteContinuityStateAsync(
             fixture.RouteKey, CancellationToken.None);
         Assert.NotNull(durable?.History);
@@ -140,7 +141,7 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
 
         var forkPlan = fixture.AuthorCompetingSecondPlan();
         var storeB = (IProductionMailboxRouteContinuityStateStore)
-            new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, AdvancedFixture.Bytes(240, 32));
         var results = await Task.WhenAll(
             restarted.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
                 fixture.FirstPlan.NextCursor, fixture.SecondPlan, CancellationToken.None).AsTask(),
@@ -165,12 +166,14 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             fixture.RouteKey, revocation, CancellationToken.None);
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted, revoked.Status);
         var afterRestart = (IProductionMailboxRouteContinuityStateStore)
-            new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, AdvancedFixture.Bytes(240, 32));
         var replay = await afterRestart.CommitVerifiedOwnerRevocationAsync(
             fixture.RouteKey, revocation, CancellationToken.None);
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.ExactReplay, replay.Status);
 
-        var high = await AdvancedFixture.CreateAsync(restarted, 101, highCounters: true);
+        var high = await AdvancedFixture.CreateAsync(restarted, 101, highCounters: true,
+            nowUnixSeconds: fixture.NowUnixSeconds,
+            sourceArtifactClosureHash: fixture.SourceArtifactClosureHash);
         var highAccepted = await restarted.CommitVerifiedHistoryBatchAsync(high.RouteKey,
             high.InitialCursor, high.FirstPlan, CancellationToken.None);
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted, highAccepted.Status);
@@ -187,8 +190,9 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         if (string.IsNullOrWhiteSpace(connectionString)) return;
         await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
         var store = (IProductionMailboxRouteContinuityStateStore)
-            new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
-        var fixture = await AdvancedFixture.CreateAsync(store, 141);
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, AdvancedFixture.Bytes(240, 32));
+        var fixture = await AdvancedFixture.CreateAsync(store, 141,
+            nowUnixSeconds: checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
             (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
                 fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
@@ -224,31 +228,38 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             store.GetRouteContinuityStateAsync(fixture.RouteKey, CancellationToken.None).AsTask());
     }
 
-    private sealed record AdvancedFixture(
+    internal sealed record AdvancedFixture(
         byte[] RouteKey,
         VerifiedProductionMailboxAuthority Authority,
         VerifiedProductionMailboxRevocationSnapshot Revocations,
         VerifiedProductionMailboxRouteCertificate Certificate,
         VerifiedProductionMailboxRouteAdvertisementV2 InitialAuthorization,
-        VerifiedProductionMailboxRouteContinuityEnrollmentState EnrollmentState,
+        VerifiedProductionMailboxRouteContinuityEnrollment Enrollment,
         VerifiedProductionMailboxRouteHistoryCursor InitialCursor,
+        ProductionMailboxRouteContinuityGenesisCommitPlan GenesisPlan,
         ProductionMailboxRouteHistoryBatchCommitPlan FirstPlan,
         ProductionMailboxRouteHistoryBatchCommitPlan SecondPlan,
         ProductionMailboxRouteAdvertisementV2 SecondAuthorization,
         byte[] OwnerPrivateKey,
+        byte[] ResponderPrivateKey,
+        byte[] SourceArtifactClosureHash,
+        byte[] EnrollmentRequestId,
+        byte[] EnrollmentRequestHash,
+        byte[] GenesisIntentHash,
+        byte[] OwnerControlKeyToken,
+        ulong NowUnixSeconds,
         byte Variant)
     {
-        private const ulong Now = 1_800_000_000;
-
         internal static async ValueTask<AdvancedFixture> CreateAsync(
             IProductionMailboxRouteContinuityStateStore store, byte variant,
-            bool highCounters = false)
+            bool highCounters = false, ulong nowUnixSeconds = 1_800_000_000,
+            byte[]? sourceArtifactClosureHash = null)
         {
             var issuer = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(20 + variant), 32));
             var mrX = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(50 + variant), 32));
             var owner = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(80 + variant), 32));
             var authorityValue = AuthorityValue(
-                issuer.PublicKey, mrX.PublicKey, variant, highCounters);
+                issuer.PublicKey, mrX.PublicKey, variant, highCounters, nowUnixSeconds);
             var unsignedPmr = new ProductionMailboxRevocationSnapshot
             {
                 NetworkId = authorityValue.NetworkId,
@@ -286,11 +297,11 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                     LastCommittedRevocationGeneration = authorityValue.Revocation.Generation - 1,
                     LastCommittedRevocationHeadHash = authorityValue.Revocation.PreviousHeadHash,
                     LastCommittedRevocationSnapshotHash = Bytes(23, 32),
-                    NowUnixSeconds = Now,
+                    NowUnixSeconds = nowUnixSeconds,
                     ClockSkewSeconds = 0
                 }, new SodiumProductionMailboxAuthoritySignatureVerifier());
             var revocations = ProductionMailboxRevocationSnapshotVerifier.Verify(
-                pmrBytes, authority, Now, 0,
+                pmrBytes, authority, nowUnixSeconds, 0,
                 new SodiumProductionMailboxRevocationSnapshotSignatureVerifier());
             var placement = new BlindedPlacementId(Bytes((byte)(121 + variant), 32));
             var certificateValue = new ProductionMailboxRouteCertificate
@@ -304,14 +315,14 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 BlindedPlacementId = placement.Bytes,
                 SelectionInputCommitment = ProductionMailboxReplicaSelection
                     .ComputeSelectionInputCommitment(placement),
-                IssuedAtUnixSeconds = Now - 10,
-                ExpiresAtUnixSeconds = Now + 300,
+                IssuedAtUnixSeconds = nowUnixSeconds - 10,
+                ExpiresAtUnixSeconds = nowUnixSeconds + 300,
                 IssuerSignature = new byte[64]
             };
             certificateValue = SignCertificate(certificateValue, issuer.PrivateKey);
             var certificate = ProductionMailboxRouteCertificateVerifier.Verify(
                 ProductionMailboxRouteAdvertisementCodec.EncodeCertificate(certificateValue),
-                authority, Now, 0, new SodiumProductionMailboxRouteSignatureVerifier());
+                authority, nowUnixSeconds, 0, new SodiumProductionMailboxRouteSignatureVerifier());
             var routeDomain = ProductionMailboxRouteAdvertisementCodec
                 .ComputeRouteDomainHash(certificateValue);
             var praValue = SignPra(new ProductionMailboxRouteAdvertisementV2
@@ -321,12 +332,12 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 PredecessorCanonicalRouteAuthorizationHash = Bytes((byte)(140 + variant), 32),
                 PredecessorRouteAuthorizationSequence = 3,
                 Sequence = 4,
-                PublishedAtUnixSeconds = Now - 5,
-                ExpiresAtUnixSeconds = Now + 200,
+                PublishedAtUnixSeconds = nowUnixSeconds - 5,
+                ExpiresAtUnixSeconds = nowUnixSeconds + 200,
                 OwnerSignature = new byte[64]
             }, owner.PrivateKey);
-            var verifiedPra = VerifyPra(praValue, authority, routeDomain);
-            const ulong routeVerifiedAt = Now - 20;
+            var verifiedPra = VerifyPra(praValue, authority, routeDomain, nowUnixSeconds);
+            var routeVerifiedAt = nowUnixSeconds - 20;
             var preRolBytes = EncodeRol(authorityValue.NetworkId.Span, routeDomain,
                 ProductionMailboxRouteAuthorizationKind.OwnerPRA2,
                 verifiedPra.CanonicalHash.Span, praValue.Sequence, new byte[32], new byte[32],
@@ -355,65 +366,124 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 MaximumAuthorityGeneration = authorityValue.AuthorityGeneration + 1,
                 FirstActivationSequence = 5,
                 LastActivationSequence = 16,
-                IssuedAtUnixSeconds = Now - 4,
-                NotBeforeUnixSeconds = Now - 3,
-                ExpiresAtUnixSeconds = Now + 180,
+                IssuedAtUnixSeconds = nowUnixSeconds - 4,
+                NotBeforeUnixSeconds = nowUnixSeconds - 3,
+                ExpiresAtUnixSeconds = nowUnixSeconds + 180,
                 OwnerSignature = new byte[64]
             }, owner.PrivateKey);
-            ProductionMailboxRouteContinuityEnrollmentCommitPlan? enrollmentPlan = null;
-            var enrollmentState = await ProductionMailboxRouteIssuerAuthoring.AcceptDelegationAsync(
-                ProductionMailboxRouteContinuityCodec.EncodeDelegation(delegation), preRolBytes,
-                authority, revocations, certificate, verifiedPra, Now, Now, 0,
+            var intent = ProductionMailboxRouteIssuerAuthoring.VerifyGenesisIntent(
+                ProductionMailboxRouteContinuityCodec.EncodeDelegation(delegation),
+                preRolBytes, authority, revocations, certificate, verifiedPra, nowUnixSeconds, 0);
+            var responder = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(190 + variant), 32));
+            var routeKey = Bytes((byte)(201 + variant), 32);
+            var ownerState = Assert.IsAssignableFrom<IProductionMailboxOwnerControlStateStore>(store);
+            var requestId = Bytes((byte)(211 + variant), 16);
+            var requestHash = SHA256.HashData([
+                .. ProductionMailboxRouteContinuityCodec.EncodeDelegation(delegation),
+                .. preRolBytes]);
+            var sourceClosureHash = sourceArtifactClosureHash?.ToArray()
+                ?? Bytes((byte)(221 + variant), 32);
+            var keyToken = Bytes((byte)(231 + variant), 32);
+            var prepared = await ownerState.PrepareOwnerEnrollmentAsync(routeKey, requestId,
+                requestHash, intent.CanonicalDelegationHash, intent.IntentHash,
+                sourceClosureHash, keyToken, nowUnixSeconds,
+                CancellationToken.None);
+            Assert.Equal(ProductionMailboxOwnerEnrollmentStatus.Prepared, prepared.Status);
+            var enrollmentPlan = await ProductionMailboxRouteIssuerAuthoring.AuthorGenesisAsync(
+                intent, prepared.AuthoritativeNowUnixSeconds,
+                Math.Max(nowUnixSeconds, prepared.AuthoritativeNowUnixSeconds),
+                responder.PublicKey, Math.Min(delegation.ExpiresAtUnixSeconds,
+                    prepared.AuthoritativeNowUnixSeconds + 120),
                 (request, destination, _) =>
                 {
                     PublicKeyAuth.SignDetached(request.SigningBytes.ToArray(), issuer.PrivateKey)
                         .CopyTo(destination.Span);
                     return ValueTask.FromResult(64);
-                }, (plan, _) =>
+                }, (request, destination, _) =>
                 {
-                    enrollmentPlan = plan;
-                    return ValueTask.FromResult(true);
+                    PublicKeyAuth.SignDetached(request.SigningBytes.ToArray(), issuer.PrivateKey)
+                        .CopyTo(destination.Span);
+                    return ValueTask.FromResult(64);
                 });
-            var routeKey = Bytes((byte)(201 + variant), 32);
-            var enrolled = await store.CommitEnrollmentAsync(
-                routeKey, enrollmentPlan!, CancellationToken.None);
-            Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted, enrolled.Status);
-            var cursor = ProductionMailboxRouteHistoryAuthoring.CreateInitialCursor(
-                enrollmentState, authority, revocations);
+            var enrollmentResponse = ProductionMailboxOwnerControlHostCodec
+                .EncodeEnrollmentResponse(enrollmentPlan);
+            var enrollmentStatus = await ownerState.CommitOwnerEnrollmentAsync(routeKey,
+                requestId, requestHash, intent.CanonicalDelegationHash, sourceClosureHash,
+                enrollmentPlan, new(Bytes((byte)(231 + variant), 32), responder.PublicKey),
+                enrollmentResponse, prepared.AuthoritativeNowUnixSeconds,
+                CancellationToken.None);
+            Assert.Equal(ProductionMailboxOwnerEnrollmentStatus.Prepared, enrollmentStatus);
+            var verifiedEnrollment = ProductionMailboxRouteContinuityVerifier.VerifyEnrollment(
+                enrollmentPlan.CanonicalDelegation.Span,
+                enrollmentPlan.CanonicalAcceptance.Span, authority, revocations,
+                certificate, verifiedPra,
+                new ProductionMailboxRouteContinuityEnrollmentVerificationContext
+                {
+                    ExpectedNetworkId = delegation.NetworkId,
+                    ExpectedPinnedMrXPublicKeySha256 =
+                        delegation.PinnedMrXPublicKeySha256,
+                    ExpectedRouteDomainHash = delegation.RouteDomainHash,
+                    ExpectedMailboxOwnerEd25519PublicKey =
+                        delegation.MailboxOwnerEd25519PublicKey,
+                    ExpectedBlindedMailboxId = delegation.BlindedMailboxId,
+                    ExpectedBlindedPlacementId = delegation.BlindedPlacementId,
+                    ExpectedSelectionInputCommitment =
+                        delegation.SelectionInputCommitment,
+                    ExpectedPreDelegationRouteOriginLkgHash =
+                        delegation.PreDelegationRouteOriginLkgHash,
+                    ExpectedRouteVerifiedAtUnixSeconds = delegation.RouteVerifiedAtUnixSeconds,
+                    LastDelegationSequence = 0,
+                    LastCanonicalDelegationHash = new byte[32],
+                    NowUnixSeconds = Math.Max(nowUnixSeconds,
+                        prepared.AuthoritativeNowUnixSeconds),
+                    ClockSkewSeconds = 0
+                });
+            var anchor = ProductionMailboxRouteIssuerAuthoring.RestoreHistoricalAnchor(
+                enrollmentPlan.CanonicalDelegation, enrollmentPlan.CanonicalAcceptance,
+                enrollmentPlan.ExpectedPreDelegationRouteOriginLkg,
+                enrollmentPlan.CanonicalEnrolledRouteOriginLkg,
+                enrollmentPlan.CanonicalOwnerControlResponderCertificate,
+                authority, revocations, certificate, verifiedPra,
+                enrollmentPlan.ToProtectedEnrollmentRestoreContext());
+            var cursor = ProductionMailboxRouteHistoryAuthoring.RestoreCursor(
+                enrollmentPlan.CanonicalInitialRouteHistoryCheckpoint.Span, anchor,
+                enrollmentPlan.ToProtectedRouteHistoryRestoreContext());
             var firstPra = NextPra(praValue, verifiedPra.CanonicalHash.ToArray(),
-                owner.PrivateKey, 1);
+                owner.PrivateKey, 1, nowUnixSeconds);
             var firstPlan = ProductionMailboxRouteHistoryAuthoring.AuthorNextBatch(cursor,
                 [OwnerLink(authority, revocations, certificateValue, firstPra)]);
             var firstHash = SHA256.HashData(
                 ProductionMailboxRouteAuthorizationCodec.EncodeAdvertisementV2(firstPra));
-            var secondPra = NextPra(firstPra, firstHash, owner.PrivateKey, 2);
+            var secondPra = NextPra(firstPra, firstHash, owner.PrivateKey, 2, nowUnixSeconds);
             var secondPlan = ProductionMailboxRouteHistoryAuthoring.AuthorNextBatch(
                 firstPlan.NextCursor,
                 [OwnerLink(authority, revocations, certificateValue, secondPra)]);
             return new(routeKey, authority, revocations, certificate, verifiedPra,
-                enrollmentState, cursor, firstPlan, secondPlan, secondPra,
-                owner.PrivateKey, variant);
+                verifiedEnrollment, cursor, enrollmentPlan, firstPlan, secondPlan, secondPra,
+                owner.PrivateKey, responder.PrivateKey, sourceClosureHash, requestId,
+                requestHash, intent.IntentHash.ToArray(), keyToken,
+                Math.Max(nowUnixSeconds, prepared.AuthoritativeNowUnixSeconds), variant);
         }
 
         internal VerifiedProductionMailboxRouteContinuityRevocation VerifyRevocation(
             ProductionMailboxRouteContinuityRevocationReason reason)
         {
-            var delegation = EnrollmentState.Enrollment.Delegation;
+            var delegation = Enrollment.Delegation;
             var value = SignRevocation(new ProductionMailboxRouteContinuityRevocation
             {
                 NetworkId = delegation.NetworkId,
                 RouteDomainHash = delegation.RouteDomainHash,
                 TargetDelegationSerial = delegation.DelegationSerial,
-                TargetCanonicalDelegationHash = EnrollmentState.Enrollment.CanonicalDelegationHash,
+                TargetCanonicalDelegationHash = Enrollment.CanonicalDelegationHash,
                 RevocationGeneration = 1,
                 PreviousCanonicalRevocationHash = new byte[32],
-                RevokedAtUnixSeconds = Now,
+                RevokedAtUnixSeconds = NowUnixSeconds,
                 Reason = reason,
                 OwnerSignature = new byte[64]
             }, OwnerPrivateKey);
             return ProductionMailboxRouteContinuityVerifier.VerifyOwnerRevocation(
                 ProductionMailboxRouteContinuityCodec.EncodeRevocation(value),
-                EnrollmentState.Enrollment, Now, 0);
+                Enrollment, NowUnixSeconds, 0);
         }
 
         internal ProductionMailboxRouteHistoryBatchCommitPlan AuthorCompetingSecondPlan()
@@ -438,35 +508,36 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             VerifiedProductionMailboxRevocationSnapshot revocations,
             ProductionMailboxRouteCertificate certificate,
             ProductionMailboxRouteAdvertisementV2 authorization) => new()
-        {
-            AuthorizationKind = ProductionMailboxRouteAuthorizationKind.OwnerPRA2,
-            CanonicalAuthority = ProductionMailboxAuthorityCodec.Encode(authority.Authority),
-            CanonicalRevocations = ProductionMailboxRevocationSnapshotCodec.Encode(
+            {
+                AuthorizationKind = ProductionMailboxRouteAuthorizationKind.OwnerPRA2,
+                CanonicalAuthority = ProductionMailboxAuthorityCodec.Encode(authority.Authority),
+                CanonicalRevocations = ProductionMailboxRevocationSnapshotCodec.Encode(
                 revocations.Snapshot),
-            CanonicalRouteCertificate = ProductionMailboxRouteAdvertisementCodec
+                CanonicalRouteCertificate = ProductionMailboxRouteAdvertisementCodec
                 .EncodeCertificate(certificate),
-            CanonicalRevocationCheckpoint = ReadOnlyMemory<byte>.Empty,
-            CanonicalTransitionContext = ReadOnlyMemory<byte>.Empty,
-            CanonicalAuthorization = ProductionMailboxRouteAuthorizationCodec
+                CanonicalRevocationCheckpoint = ReadOnlyMemory<byte>.Empty,
+                CanonicalTransitionContext = ReadOnlyMemory<byte>.Empty,
+                CanonicalAuthorization = ProductionMailboxRouteAuthorizationCodec
                 .EncodeAdvertisementV2(authorization)
-        };
+            };
 
         private static ProductionMailboxRouteAdvertisementV2 NextPra(
             ProductionMailboxRouteAdvertisementV2 previous, byte[] previousHash,
-            byte[] ownerPrivateKey, ulong step) => SignPra(previous with
-        {
-            PredecessorAuthorizationKind = ProductionMailboxRouteAuthorizationKind.OwnerPRA2,
-            PredecessorCanonicalRouteAuthorizationHash = previousHash,
-            PredecessorRouteAuthorizationSequence = previous.Sequence,
-            Sequence = previous.Sequence + 1,
-            PublishedAtUnixSeconds = Now + step,
-            ExpiresAtUnixSeconds = Now + 150 + step,
-            OwnerSignature = new byte[64]
-        }, ownerPrivateKey);
+            byte[] ownerPrivateKey, ulong step, ulong nowUnixSeconds) => SignPra(previous with
+            {
+                PredecessorAuthorizationKind = ProductionMailboxRouteAuthorizationKind.OwnerPRA2,
+                PredecessorCanonicalRouteAuthorizationHash = previousHash,
+                PredecessorRouteAuthorizationSequence = previous.Sequence,
+                Sequence = previous.Sequence + 1,
+                PublishedAtUnixSeconds = nowUnixSeconds + step,
+                ExpiresAtUnixSeconds = nowUnixSeconds + 150 + step,
+                OwnerSignature = new byte[64]
+            }, ownerPrivateKey);
 
         private static VerifiedProductionMailboxRouteAdvertisementV2 VerifyPra(
             ProductionMailboxRouteAdvertisementV2 value,
-            VerifiedProductionMailboxAuthority authority, byte[] routeDomain) =>
+            VerifiedProductionMailboxAuthority authority, byte[] routeDomain,
+            ulong nowUnixSeconds) =>
             ProductionMailboxRouteAuthorizationVerifier.VerifyOwnerAuthorization(
                 ProductionMailboxRouteAuthorizationCodec.EncodeAdvertisementV2(value), authority,
                 new ProductionMailboxOwnerRouteAuthorizationVerificationContext
@@ -476,7 +547,7 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                     ExpectedPredecessorKind = value.PredecessorAuthorizationKind,
                     ExpectedPredecessorHash = value.PredecessorCanonicalRouteAuthorizationHash,
                     ExpectedPredecessorSequence = value.PredecessorRouteAuthorizationSequence,
-                    NowUnixSeconds = Now,
+                    NowUnixSeconds = nowUnixSeconds,
                     ClockSkewSeconds = 0
                 });
 
@@ -485,18 +556,24 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         {
             var unsigned = value with { OwnerSignature = Enumerable.Repeat((byte)0xA5, 64).ToArray() };
             var canonical = ProductionMailboxRouteAuthorizationCodec.EncodeAdvertisementV2(unsigned);
-            return unsigned with { OwnerSignature = SignFixed(
+            return unsigned with
+            {
+                OwnerSignature = SignFixed(
                 "Deep/production-mailbox/route-advertisement/v2"u8,
-                canonical.AsSpan(0, 384), privateKey) };
+                canonical.AsSpan(0, 384), privateKey)
+            };
         }
 
         private static ProductionMailboxRouteCertificate SignCertificate(
             ProductionMailboxRouteCertificate value, byte[] privateKey)
         {
             var unsigned = value with { IssuerSignature = new byte[64] };
-            return unsigned with { IssuerSignature = PublicKeyAuth.SignDetached(
+            return unsigned with
+            {
+                IssuerSignature = PublicKeyAuth.SignDetached(
                 ProductionMailboxRouteAdvertisementCodec.GetCertificateSigningBytes(unsigned),
-                privateKey) };
+                privateKey)
+            };
         }
 
         private static ProductionMailboxRouteContinuityDelegation SignDelegation(
@@ -504,9 +581,12 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         {
             var unsigned = value with { OwnerSignature = Enumerable.Repeat((byte)0xA5, 64).ToArray() };
             var canonical = ProductionMailboxRouteContinuityCodec.EncodeDelegation(unsigned);
-            return unsigned with { OwnerSignature = SignFixed(
+            return unsigned with
+            {
+                OwnerSignature = SignFixed(
                 "Deep/production-mailbox/route-continuity-delegation/v1"u8,
-                canonical.AsSpan(0, 488), privateKey) };
+                canonical.AsSpan(0, 488), privateKey)
+            };
         }
 
         private static ProductionMailboxRouteContinuityRevocation SignRevocation(
@@ -514,9 +594,12 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         {
             var unsigned = value with { OwnerSignature = Enumerable.Repeat((byte)0xA5, 64).ToArray() };
             var canonical = ProductionMailboxRouteContinuityCodec.EncodeRevocation(unsigned);
-            return unsigned with { OwnerSignature = SignFixed(
+            return unsigned with
+            {
+                OwnerSignature = SignFixed(
                 "Deep/production-mailbox/route-continuity-revocation/v1"u8,
-                canonical.AsSpan(0, 160), privateKey) };
+                canonical.AsSpan(0, 160), privateKey)
+            };
         }
 
         private static byte[] SignFixed(ReadOnlySpan<byte> domain, ReadOnlySpan<byte> payload,
@@ -563,44 +646,44 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         }
 
         private static ProductionMailboxAuthority AuthorityValue(
-            byte[] issuer, byte[] mrX, byte variant, bool highCounters)
+            byte[] issuer, byte[] mrX, byte variant, bool highCounters, ulong nowUnixSeconds)
         {
             return new ProductionMailboxAuthority
             {
-            DevelopmentOnly = false,
-            Environment = ProductionMailboxAuthorityEnvironment.Production,
-            Transport = ProductionMailboxAuthorityTransport.AuthenticatedMau2,
-            Ownership = ProductionMailboxAuthorityOwnership.OfficialManaged,
-            EndpointPolicy = ProductionMailboxAuthorityEndpointPolicy.PublicHttpsOnly,
-            NetworkId = Bytes((byte)(1 + variant), 16),
-            AuthorityGeneration = highCounters ? 0x8000_0000_0000_0007UL : 7,
-            PreviousAuthorityHash = Bytes((byte)(2 + variant), 32),
-            MailboxIssuerEd25519PublicKey = issuer,
-            MrXApprovalEd25519PublicKey = mrX,
-            Coordinator = Endpoint("https://coord.example.net/", 4),
-            NodeIngress = Endpoint("https://ingress.example.net/mau2/", 6),
-            CurrentEpoch = Epoch(9, 70, Now - 100, Now + 1_000, 8),
-            NextEpoch = Epoch(10, 71, Now + 100, Now + 2_000, 10),
-            Revocation = new ProductionMailboxAuthorityRevocation
-            {
-                SnapshotHash = Bytes(12, 32),
-                HeadHash = Bytes(13, 32),
-                PreviousHeadHash = Bytes(22, 32),
-                Generation = highCounters ? 0x8000_0000_0000_0006UL : 6,
-                IssuedAtUnixSeconds = Now - 20,
-                ExpiresAtUnixSeconds = Now + 500
-            },
-            MrXApproval = new ProductionMailboxAuthorityApproval
-            {
-                AuthorityPayloadHash = Bytes(14, 32),
-                AllowedAndroidSigningCertificateSha256 = [Bytes(15, 32)],
-                AllowedWindowsSigningCertificateSha256 = [Bytes(16, 32)],
-                AndroidReleaseBuildArtifactSha256 = [Bytes(17, 32)],
-                WindowsReleaseBuildArtifactSha256 = [Bytes(18, 32)],
-                RolloutNotBeforeUnixSeconds = Now - 30,
-                RolloutNotAfterUnixSeconds = Now + 500
-            },
-            Signature = new byte[64]
+                DevelopmentOnly = false,
+                Environment = ProductionMailboxAuthorityEnvironment.Production,
+                Transport = ProductionMailboxAuthorityTransport.AuthenticatedMau2,
+                Ownership = ProductionMailboxAuthorityOwnership.OfficialManaged,
+                EndpointPolicy = ProductionMailboxAuthorityEndpointPolicy.PublicHttpsOnly,
+                NetworkId = Bytes((byte)(1 + variant), 16),
+                AuthorityGeneration = highCounters ? 0x8000_0000_0000_0007UL : 7,
+                PreviousAuthorityHash = Bytes((byte)(2 + variant), 32),
+                MailboxIssuerEd25519PublicKey = issuer,
+                MrXApprovalEd25519PublicKey = mrX,
+                Coordinator = Endpoint("https://coord.example.net/", 4),
+                NodeIngress = Endpoint("https://ingress.example.net/mau2/", 6),
+                CurrentEpoch = Epoch(9, 70, nowUnixSeconds - 100, nowUnixSeconds + 1_000, 8),
+                NextEpoch = Epoch(10, 71, nowUnixSeconds + 100, nowUnixSeconds + 2_000, 10),
+                Revocation = new ProductionMailboxAuthorityRevocation
+                {
+                    SnapshotHash = Bytes(12, 32),
+                    HeadHash = Bytes(13, 32),
+                    PreviousHeadHash = Bytes(22, 32),
+                    Generation = highCounters ? 0x8000_0000_0000_0006UL : 6,
+                    IssuedAtUnixSeconds = nowUnixSeconds - 20,
+                    ExpiresAtUnixSeconds = nowUnixSeconds + 500
+                },
+                MrXApproval = new ProductionMailboxAuthorityApproval
+                {
+                    AuthorityPayloadHash = Bytes(14, 32),
+                    AllowedAndroidSigningCertificateSha256 = [Bytes(15, 32)],
+                    AllowedWindowsSigningCertificateSha256 = [Bytes(16, 32)],
+                    AndroidReleaseBuildArtifactSha256 = [Bytes(17, 32)],
+                    WindowsReleaseBuildArtifactSha256 = [Bytes(18, 32)],
+                    RolloutNotBeforeUnixSeconds = nowUnixSeconds - 30,
+                    RolloutNotAfterUnixSeconds = nowUnixSeconds + 500
+                },
+                Signature = new byte[64]
             };
         }
 
@@ -613,20 +696,23 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 { AuthorityPayloadHash = ProductionMailboxAuthorityCodec.ComputePayloadHash(value) },
                 Signature = new byte[64]
             };
-            return bound with { Signature = PublicKeyAuth.SignDetached(
-                ProductionMailboxAuthorityCodec.GetSigningBytes(bound), privateKey) };
+            return bound with
+            {
+                Signature = PublicKeyAuth.SignDetached(
+                ProductionMailboxAuthorityCodec.GetSigningBytes(bound), privateKey)
+            };
         }
 
         private static ProductionMailboxAuthorityEpoch Epoch(ulong epoch, ulong generation,
             ulong from, ulong until, byte seed) => new()
-        {
-            Epoch = epoch,
-            Generation = generation,
-            MembershipCommitment = Bytes(seed, 32),
-            TopologyPlacementCommitment = Bytes((byte)(seed + 1), 32),
-            NotBeforeUnixSeconds = from,
-            NotAfterUnixSeconds = until
-        };
+            {
+                Epoch = epoch,
+                Generation = generation,
+                MembershipCommitment = Bytes(seed, 32),
+                TopologyPlacementCommitment = Bytes((byte)(seed + 1), 32),
+                NotBeforeUnixSeconds = from,
+                NotAfterUnixSeconds = until
+            };
 
         private static ProductionMailboxAuthorityEndpoint Endpoint(string uri, byte seed) => new()
         {
@@ -636,7 +722,7 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         };
     }
 
-    private sealed class PostgresTestDatabase : IAsyncDisposable
+    internal sealed class PostgresTestDatabase : IAsyncDisposable
     {
         private readonly string administrativeConnectionString;
         private readonly string schema;

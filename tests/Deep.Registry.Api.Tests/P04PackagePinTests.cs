@@ -22,28 +22,28 @@ public sealed class P04PackagePinTests
     private static readonly IReadOnlyDictionary<string, ProductionPackage> ProductionPackages =
         new Dictionary<string, ProductionPackage>(StringComparer.Ordinal)
         {
-            ["Deep.Protocol.0.4.0-production.62fd84a.nupkg"] = new(
-                "Deep.Protocol", 218_813,
-                "a1620cd62f12bcf62052c666445be46e453312d4a50d13d2dd44dff0594a0e51",
+            ["Deep.Protocol.0.4.0-production.2eb8b1e.nupkg"] = new(
+                "Deep.Protocol", 218_772,
+                "247a90915853b274f95f2e2aa69b71689f666d95a29150f45152326988104a8b",
                 new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    ["Deep.Protocol.Abstractions"] = "[0.4.0-production.62fd84a]",
-                    ["Deep.Protocol.Protobuf"] = "[0.4.0-production.62fd84a]"
+                    ["Deep.Protocol.Abstractions"] = "[0.4.0-production.2eb8b1e]",
+                    ["Deep.Protocol.Protobuf"] = "[0.4.0-production.2eb8b1e]"
                 }),
-            ["Deep.Protocol.Abstractions.0.4.0-production.62fd84a.nupkg"] = new(
-                "Deep.Protocol.Abstractions", 24_968,
-                "e0cffcf86d2340611a8c3fa68acb7d0d44f4cacd97be3c0059f528375108743c",
+            ["Deep.Protocol.Abstractions.0.4.0-production.2eb8b1e.nupkg"] = new(
+                "Deep.Protocol.Abstractions", 24_930,
+                "66cd9b24bd441daaf9127700d52e577749cb67ed4ba9ab87ce416f1de65dac79",
                 new Dictionary<string, string>(StringComparer.Ordinal)),
-            ["Deep.Protocol.MembershipRoutes.0.4.0-production.62fd84a.nupkg"] = new(
-                "Deep.Protocol.MembershipRoutes", 170_466,
-                "e30511a9ec0541d957094a0be527c689cc6de4a7455bd81bd20b1bbb0082cafb",
+            ["Deep.Protocol.MembershipRoutes.0.4.0-production.2eb8b1e.nupkg"] = new(
+                "Deep.Protocol.MembershipRoutes", 175_350,
+                "cf5651b70f66a0e18b43e40274021fa948414aa300c4ce8ba63889f5638dc5c3",
                 new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    ["Deep.Protocol"] = "[0.4.0-production.62fd84a]"
+                    ["Deep.Protocol"] = "[0.4.0-production.2eb8b1e]"
                 }),
-            ["Deep.Protocol.Protobuf.0.4.0-production.62fd84a.nupkg"] = new(
-                "Deep.Protocol.Protobuf", 50_216,
-                "e10b612ea9913e18ae1f059de37fe9c9a67aadfa6bd4b2cd219a74749d5d403e",
+            ["Deep.Protocol.Protobuf.0.4.0-production.2eb8b1e.nupkg"] = new(
+                "Deep.Protocol.Protobuf", 50_183,
+                "8f8fdd8e0fd7e09e55a7eec95ef190e50d9c7235a769b5407f85adee36d6cfb7",
                 new Dictionary<string, string>(StringComparer.Ordinal))
         };
 
@@ -120,13 +120,13 @@ public sealed class P04PackagePinTests
             var metadata = document.Root.Element(ns + "metadata")!;
             Assert.Equal(pair.Value.Id, metadata.Element(ns + "id")!.Value);
             Assert.True(observedIds.Add(pair.Value.Id));
-            Assert.Equal("0.4.0-production.62fd84a",
+            Assert.Equal("0.4.0-production.2eb8b1e",
                 metadata.Element(ns + "version")!.Value);
             var repository = metadata.Element(ns + "repository")!;
             Assert.Equal("git", repository.Attribute("type")!.Value);
             Assert.Equal("https://github.com/XPointLabs/deep-protocol.git",
                 repository.Attribute("url")!.Value);
-            Assert.Equal("62fd84a36580855a64307bf8020ce6a94d4ac741",
+            Assert.Equal("2eb8b1eb4605216b239f63d1ad8e587a28918134",
                 repository.Attribute("commit")!.Value);
             var internalDependencies = metadata.Descendants(ns + "dependency")
                 .Where(value => value.Attribute("id")?.Value.StartsWith(
@@ -141,9 +141,9 @@ public sealed class P04PackagePinTests
         var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!;
         Assert.Equal("deep-local-package-manifest.v1",
             manifest["schema"]!.GetValue<string>());
-        Assert.Equal("0.4.0-production.62fd84a",
+        Assert.Equal("0.4.0-production.2eb8b1e",
             manifest["packageVersion"]!.GetValue<string>());
-        Assert.Equal("62fd84a36580855a64307bf8020ce6a94d4ac741",
+        Assert.Equal("2eb8b1eb4605216b239f63d1ad8e587a28918134",
             manifest["sourceCommit"]!.GetValue<string>());
         Assert.True(manifest["reproducibleNormalizedBuild"]!.GetValue<bool>());
         Assert.Equal("local-only-not-published",
@@ -201,18 +201,18 @@ public sealed class P04PackagePinTests
             var dependencies = JsonNode.Parse(File.ReadAllText(lockPath))!
                 ["dependencies"]!["net10.0"]!;
             var protocol = dependencies["Deep.Protocol"]!;
-            Assert.Equal("0.4.0-production.62fd84a", protocol["resolved"]!.GetValue<string>());
+            Assert.Equal("0.4.0-production.2eb8b1e", protocol["resolved"]!.GetValue<string>());
             if (protocol["type"]!.GetValue<string>() == "Direct")
             {
                 Assert.Equal(
-                    "[0.4.0-production.62fd84a, 0.4.0-production.62fd84a]",
+                    "[0.4.0-production.2eb8b1e, 0.4.0-production.2eb8b1e]",
                     protocol["requested"]!.GetValue<string>());
             }
             Assert.Equal(
-                "0.4.0-production.62fd84a",
+                "0.4.0-production.2eb8b1e",
                 dependencies["Deep.Protocol.Abstractions"]!["resolved"]!.GetValue<string>());
             Assert.Equal(
-                "0.4.0-production.62fd84a",
+                "0.4.0-production.2eb8b1e",
                 dependencies["Deep.Protocol.Protobuf"]!["resolved"]!.GetValue<string>());
         }
     }

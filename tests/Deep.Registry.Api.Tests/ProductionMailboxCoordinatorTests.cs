@@ -17,6 +17,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Npgsql;
 using Sodium;
 
@@ -2334,6 +2335,55 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
     }
 
+    [Fact]
+    public async Task OwnerControlEndpoint_AuthenticatesAndRateLimitsBeforeReadingBody()
+    {
+        using var fixture = Fixture.Create();
+        var seedPath = Path.Combine(Path.GetDirectoryName(
+            fixture.Options.RouteStateHmacKeyPath)!, "owner-control.seed");
+        File.WriteAllBytes(seedPath, Enumerable.Repeat((byte)0x6D, 32).ToArray());
+        var values = fixture.OptionsDictionary();
+        values["ProductionMailbox:DevelopmentOwnerControlSeedPath"] = seedPath;
+        values["ProductionMailbox:MaximumOwnerControlRequestsPerWindow"] = "1";
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment(Environments.Development);
+            builder.UseSetting("ProductionMailbox:Enabled", "true");
+            builder.ConfigureAppConfiguration((_, configuration) =>
+                configuration.AddInMemoryCollection(values));
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton<TimeProvider>(fixture.TimeProvider);
+                services.RemoveAll<IProductionMailboxOwnerChannelAuthorizer>();
+                services.AddSingleton<IProductionMailboxOwnerChannelAuthorizer>(
+                    new FixedOwnerChannelAuthorizer(null));
+            });
+        });
+        using var client = factory.CreateClient();
+        using var forbidden = await client.PostAsync(
+            "/api/production-mailbox/owner-control/requests",
+            new ByteArrayContent([0x01]));
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, forbidden.StatusCode);
+
+        using var allowedFactory = factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IProductionMailboxOwnerChannelAuthorizer>();
+                services.AddSingleton<IProductionMailboxOwnerChannelAuthorizer>(
+                    new FixedOwnerChannelAuthorizer(Enumerable.Repeat((byte)0x42, 32).ToArray()));
+            }));
+        using var allowedClient = allowedFactory.CreateClient();
+        using var malformed = await allowedClient.PostAsync(
+            "/api/production-mailbox/owner-control/requests",
+            new ByteArrayContent([0x01]));
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, malformed.StatusCode);
+        using var throttled = await allowedClient.PostAsync(
+            "/api/production-mailbox/owner-control/requests",
+            new ByteArrayContent([0x01]));
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, throttled.StatusCode);
+    }
+
     private static IEd25519ExternalSigner ResolveSigner(Dictionary<string, string?> values)
     {
         var configuration = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
@@ -2351,6 +2401,14 @@ public sealed class ProductionMailboxCoordinatorTests
         public string ApplicationName { get; set; } = "tests";
         public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
         public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
+
+    private sealed class FixedOwnerChannelAuthorizer(byte[]? owner)
+        : IProductionMailboxOwnerChannelAuthorizer
+    {
+        public ValueTask<byte[]?> GetAuthenticatedOwnerAsync(
+            HttpContext context, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(owner?.ToArray());
     }
 
     private sealed class InvalidSigner : IEd25519ExternalSigner

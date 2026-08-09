@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Deep.Protocol.DeepExtension.MailboxTopology;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -66,11 +67,48 @@ public static class ProductionMailboxHostingExtensions
                 return new PostgreSqlProductionMailboxStateStore(
                     options.PostgreSqlConnectionString,
                     ProductionMailboxV2PreparedIntegrity.ReadProtectedKey(
-                        options.RouteStateHmacKeyPath));
+                        options.RouteStateHmacKeyPath), OwnerControlLimits(options));
             }
             if (!environment.IsDevelopment() || !options.UseDevelopmentInMemoryState)
                 throw new InvalidOperationException("Non-production mailbox state requires explicit Development in-memory opt-in.");
-            return new InMemoryProductionMailboxStateStore();
+            return new InMemoryProductionMailboxStateStore(ownerControlLimits:
+                OwnerControlLimits(options));
+        });
+        services.AddSingleton(sp =>
+            (IProductionMailboxRouteContinuityStateStore)
+                sp.GetRequiredService<IProductionMailboxStateStore>());
+        services.AddSingleton(sp =>
+            (IProductionMailboxOwnerControlStateStore)
+                sp.GetRequiredService<IProductionMailboxStateStore>());
+        services.TryAddSingleton<IProductionMailboxOwnerChannelAuthorizer,
+            CertificateProductionMailboxOwnerChannelAuthorizer>();
+        services.AddSingleton<IProductionMailboxOwnerControlKeyStore>(sp =>
+            ProductionMailboxOwnerControlKeyStoreFactory.Create(
+                sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value,
+                environment));
+        services.AddHostedService<ProductionMailboxOwnerKeyCleanupService>();
+        services.AddSingleton(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value;
+            var key = ProductionMailboxV2PreparedIntegrity.ReadProtectedKey(
+                options.RouteStateHmacKeyPath);
+            return new ProductionMailboxOwnerControlRateGate(
+                sp.GetRequiredService<TimeProvider>(), key,
+                options.MaximumOwnerControlRequestsPerWindow,
+                options.OwnerControlRequestWindowSeconds);
+        });
+        services.AddTransient(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value;
+            return new ProductionMailboxOwnerControlService(
+                sp.GetRequiredService<IProductionMailboxRouteContinuityStateStore>(),
+                sp.GetRequiredService<IProductionMailboxOwnerControlStateStore>(),
+                sp.GetRequiredService<ProductionMailboxArtifactProvider>(),
+                sp.GetRequiredService<IEd25519ExternalSigner>(),
+                sp.GetRequiredService<IProductionMailboxOwnerControlKeyStore>(),
+                sp.GetRequiredService<TimeProvider>(),
+                ProductionMailboxV2PreparedIntegrity.ReadProtectedKey(
+                    options.RouteStateHmacKeyPath), options.ClockSkewSeconds);
         });
         services.TryAddSingleton<IProductionMailboxInternalAuthorizer, CertificateProductionMailboxInternalAuthorizer>();
         services.AddTransient(sp => new ProductionMailboxCoordinator(
@@ -163,6 +201,50 @@ public static class ProductionMailboxHostingExtensions
             }
         }).WithMetadata(new RequestSizeLimitAttribute(16 * 1024));
 
+        var ownerControl = group.MapGroup("/owner-control");
+        ownerControl.MapPost("/enroll", async (HttpContext context,
+            IProductionMailboxOwnerChannelAuthorizer authorizer,
+            ProductionMailboxOwnerControlRateGate rateGate,
+            ProductionMailboxOwnerControlService service,
+            CancellationToken cancellationToken) =>
+            await OwnerControlAsync(context, authorizer, rateGate,
+                ProductionMailboxMediaTypes.OwnerEnrollmentRequest,
+                ProductionMailboxMediaTypes.OwnerEnrollmentResponse,
+                ProductionMailboxOwnerControlHostCodec.EnrollmentRequestLength,
+                async (body, owner, token) =>
+                    await service.EnrollAsync(body, owner, token), cancellationToken));
+        ownerControl.MapPost("/requests", async (HttpContext context,
+            IProductionMailboxOwnerChannelAuthorizer authorizer,
+            ProductionMailboxOwnerControlRateGate rateGate,
+            ProductionMailboxOwnerControlService service,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await OwnerControlAsync(context, authorizer, rateGate,
+                ProductionMailboxMediaTypes.OwnerControlRequest,
+                ProductionMailboxMediaTypes.OwnerControlResponse,
+                ProductionMailboxOwnerControlConstants.RequestLength,
+                async (body, owner, token) =>
+                {
+                    var value = await service.NoChangeAsync(body, owner, token);
+                    var response = new byte[value.Header.Length + value.Payload.Length];
+                    value.Header.CopyTo(response, 0); value.Payload.CopyTo(response,
+                        value.Header.Length); return response;
+                }, cancellationToken);
+            return result;
+        });
+        ownerControl.MapPost("/revocations", async (HttpContext context,
+            IProductionMailboxOwnerChannelAuthorizer authorizer,
+            ProductionMailboxOwnerControlRateGate rateGate,
+            ProductionMailboxOwnerControlService service,
+            CancellationToken cancellationToken) =>
+            await OwnerControlAsync(context, authorizer, rateGate,
+                ProductionMailboxMediaTypes.OwnerRevocationRequest,
+                null, ProductionMailboxOwnerControlHostCodec.RevocationRequestLength,
+                async (body, owner, token) =>
+                {
+                    await service.RevokeAsync(body, owner, token); return [];
+                }, cancellationToken));
+
         var admin = app.MapGroup("/api/internal/production-mailbox");
         admin.MapPost("/artifacts/reload", async (
             HttpContext context,
@@ -232,5 +314,59 @@ public static class ProductionMailboxHostingExtensions
         if (bytes.Length != length || canonical != value || bytes.AsSpan().IndexOfAnyExcept((byte)0) < 0)
             throw new FormatException();
         return bytes;
+    }
+
+    private static ProductionMailboxOwnerControlStoreLimits OwnerControlLimits(
+        ProductionMailboxOptions options) => new(
+        options.MaximumOwnerControlEntriesPerRoute,
+        options.MaximumOwnerControlEntriesGlobal,
+        options.MaximumOwnerControlStateBytes,
+        options.MaximumOwnerControlGcBatch,
+        options.OwnerControlStatementTimeoutSeconds,
+        options.OwnerControlLockTimeoutSeconds,
+        options.OwnerControlIdleTransactionTimeoutSeconds);
+
+    private static async ValueTask<IResult> OwnerControlAsync(
+        HttpContext context, IProductionMailboxOwnerChannelAuthorizer authorizer,
+        ProductionMailboxOwnerControlRateGate rateGate, string requestMediaType,
+        string? responseMediaType, int exactLength,
+        Func<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>, CancellationToken,
+            ValueTask<byte[]>> action, CancellationToken cancellationToken)
+    {
+        var owner = await authorizer.GetAuthenticatedOwnerAsync(context, cancellationToken);
+        if (owner is null) return Results.StatusCode(StatusCodes.Status403Forbidden);
+        if (!rateGate.TryAcquire(owner))
+            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        var request = context.Request;
+        if (!string.Equals(request.ContentType, requestMediaType, StringComparison.Ordinal)
+            || request.ContentLength != exactLength)
+            return Results.BadRequest();
+        var body = new byte[exactLength]; var offset = 0;
+        while (offset < body.Length)
+        {
+            var read = await request.Body.ReadAsync(body.AsMemory(offset), cancellationToken);
+            if (read == 0) return Results.BadRequest();
+            offset += read;
+        }
+        if (await request.Body.ReadAsync(new byte[1], cancellationToken) != 0)
+            return Results.BadRequest();
+        try
+        {
+            var response = await action(body, owner, cancellationToken);
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.Pragma = "no-cache";
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            if (responseMediaType is null) return Results.NoContent();
+            return Results.Bytes(response, responseMediaType);
+        }
+        catch (UnauthorizedAccessException)
+        { return Results.StatusCode(StatusCodes.Status403Forbidden); }
+        catch (Exception exception) when (exception is InvalidDataException or FormatException)
+        { return Results.BadRequest(); }
+        catch (InvalidOperationException)
+        { return Results.Conflict(); }
+        catch (Exception exception) when (exception is IOException or CryptographicException
+            or OperationCanceledException)
+        { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
     }
 }

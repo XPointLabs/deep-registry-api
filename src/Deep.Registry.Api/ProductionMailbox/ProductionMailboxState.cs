@@ -323,9 +323,15 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
     private byte[]? publishedArtifactClosureHash;
     private readonly List<ulong> challengeTimes = [];
     private long nextOwnerSequence;
+    private readonly ProductionMailboxOwnerControlStoreLimits ownerControlLimits;
 
-    public InMemoryProductionMailboxStateStore(TimeProvider? timeProvider = null) =>
+    public InMemoryProductionMailboxStateStore(TimeProvider? timeProvider = null,
+        ProductionMailboxOwnerControlStoreLimits? ownerControlLimits = null)
+    {
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.ownerControlLimits = ownerControlLimits ?? new();
+        this.ownerControlLimits.Validate();
+    }
 
     internal IReadOnlyList<byte[]> SnapshotOwnerRouteStateKeys() =>
         ownerBundles.Keys.Select(Convert.FromHexString).ToArray();
@@ -1421,9 +1427,12 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
 }
 
 public sealed partial class PostgreSqlProductionMailboxStateStore(
-    string connectionString, ReadOnlyMemory<byte> v2PublicationIntegrityKey = default)
+    string connectionString, ReadOnlyMemory<byte> v2PublicationIntegrityKey = default,
+    ProductionMailboxOwnerControlStoreLimits? ownerControlLimits = null)
     : IProductionMailboxStateStore, IProductionMailboxRouteContinuityStateStore
 {
+    private readonly ProductionMailboxOwnerControlStoreLimits ownerControlLimits =
+        ValidateOwnerControlLimits(ownerControlLimits);
     private readonly SemaphoreSlim initializeGate = new(1, 1);
     private volatile bool initialized;
     internal TimeSpan CommitPromotedOwnerDelayBeforeFinalCapacityCheck { get; set; }

@@ -129,11 +129,6 @@ internal interface IProductionMailboxRouteContinuityStateStore
         VerifiedProductionMailboxRouteSelectionTransition transition,
         CancellationToken cancellationToken);
 
-    ValueTask<ProductionMailboxRouteContinuityCommitResult> CommitEnrollmentAsync(
-        ReadOnlyMemory<byte> routeStateKey,
-        ProductionMailboxRouteContinuityEnrollmentCommitPlan plan,
-        CancellationToken cancellationToken);
-
     ValueTask<ProductionMailboxRouteContinuityCommitResult> CommitVerifiedOwnerRevocationAsync(
         ReadOnlyMemory<byte> routeStateKey,
         VerifiedProductionMailboxRouteContinuityRevocation revocation,
@@ -152,6 +147,10 @@ internal interface IProductionMailboxRouteContinuityStateStore
         CancellationToken cancellationToken);
 
     ValueTask<ProductionMailboxRouteContinuityStateSnapshot?> GetRouteContinuityStateAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        CancellationToken cancellationToken);
+
+    ValueTask<ProductionMailboxRestoredGenesis?> GetRestoredGenesisAsync(
         ReadOnlyMemory<byte> routeStateKey,
         CancellationToken cancellationToken);
 }
@@ -296,16 +295,19 @@ internal sealed class ProductionMailboxFrozenEnrollment
     internal required byte[] CanonicalAcceptanceHash { get; init; }
     internal required byte[] CanonicalEnrolledRouteOriginLkg { get; init; }
     internal required byte[] EnrolledRouteOriginLkgHash { get; init; }
+    internal required byte[] CanonicalAnchorRouteCertificate { get; init; }
+    internal required byte[] CanonicalAnchorRouteAuthorization { get; init; }
+    internal required ProductionMailboxRouteHistoryStateSnapshot InitialHistory { get; init; }
 
     internal static ProductionMailboxFrozenEnrollment Freeze(
-        ProductionMailboxRouteContinuityEnrollmentCommitPlan plan)
+        ProductionMailboxRouteContinuityGenesisCommitPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
         var value = new ProductionMailboxFrozenEnrollment
         {
-            ExpectedOldRouteOriginLkg = plan.ExpectedOldRouteOriginLkg.ToArray(),
-            ExpectedOldRouteOriginLkgHash = plan.ExpectedOldRouteOriginLkgHash.ToArray(),
-            ExpectedOldLocalCommitGeneration = plan.ExpectedOldLocalCommitGeneration,
+            ExpectedOldRouteOriginLkg = plan.ExpectedPreDelegationRouteOriginLkg.ToArray(),
+            ExpectedOldRouteOriginLkgHash = plan.ExpectedPreDelegationRouteOriginLkgHash.ToArray(),
+            ExpectedOldLocalCommitGeneration = plan.ExpectedPreDelegationLocalCommitGeneration,
             ExpectedPreviousDelegationSequence = plan.ExpectedPreviousDelegationSequence,
             ExpectedPreviousDelegationHash = plan.ExpectedPreviousDelegationHash.ToArray(),
             CanonicalDelegation = plan.CanonicalDelegation.ToArray(),
@@ -313,7 +315,11 @@ internal sealed class ProductionMailboxFrozenEnrollment
             CanonicalAcceptance = plan.CanonicalAcceptance.ToArray(),
             CanonicalAcceptanceHash = plan.CanonicalAcceptanceHash.ToArray(),
             CanonicalEnrolledRouteOriginLkg = plan.CanonicalEnrolledRouteOriginLkg.ToArray(),
-            EnrolledRouteOriginLkgHash = plan.EnrolledRouteOriginLkgHash.ToArray()
+            EnrolledRouteOriginLkgHash = plan.EnrolledRouteOriginLkgHash.ToArray(),
+            CanonicalAnchorRouteCertificate = plan.CanonicalAnchorRouteCertificate.ToArray(),
+            CanonicalAnchorRouteAuthorization = plan.CanonicalAnchorRouteAuthorization.ToArray(),
+            InitialHistory = new ProductionMailboxRouteHistoryStateSnapshot(
+                plan.ToProtectedRouteHistoryRestoreContext())
         };
         if (value.ExpectedOldRouteOriginLkg.Length !=
                 ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength
@@ -328,6 +334,10 @@ internal sealed class ProductionMailboxFrozenEnrollment
             || value.CanonicalDelegationHash.Length != 32
             || value.CanonicalAcceptanceHash.Length != 32
             || value.EnrolledRouteOriginLkgHash.Length != 32
+            || value.CanonicalAnchorRouteCertificate.Length !=
+                ProductionMailboxRouteAdvertisementConstants.CanonicalCertificateLength
+            || value.CanonicalAnchorRouteAuthorization.Length !=
+                ProductionMailboxRouteAuthorizationConstants.CanonicalAdvertisementV2Length
             || !Fixed(ProductionMailboxRouteContinuityStateGuard.ComputeRouteOriginLkgHash(
                     value.ExpectedOldRouteOriginLkg),
                 value.ExpectedOldRouteOriginLkgHash)
@@ -386,29 +396,6 @@ public sealed partial class InMemoryProductionMailboxStateStore
         finally { gate.Release(); }
     }
 
-    async ValueTask<ProductionMailboxRouteContinuityCommitResult>
-        IProductionMailboxRouteContinuityStateStore.CommitEnrollmentAsync(
-        ReadOnlyMemory<byte> routeStateKey,
-        ProductionMailboxRouteContinuityEnrollmentCommitPlan plan,
-        CancellationToken cancellationToken)
-    {
-        var frozenRouteStateKey = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
-        var frozen = ProductionMailboxFrozenEnrollment.Freeze(plan);
-        await gate.WaitAsync(cancellationToken);
-        try
-        {
-            var key = Convert.ToHexString(frozenRouteStateKey);
-            routeContinuityStates.TryGetValue(key, out var current);
-            var status = ValidateEnrollmentPredecessor(current, frozen);
-            if (status != ProductionMailboxRouteContinuityCommitStatus.Accepted)
-                return new(status, current);
-            var next = FromEnrollment(frozenRouteStateKey, current, frozen);
-            routeContinuityStates[key] = next;
-            return new(ProductionMailboxRouteContinuityCommitStatus.Accepted, next);
-        }
-        finally { gate.Release(); }
-    }
-
     async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
         IProductionMailboxRouteContinuityStateStore.GetRouteContinuityStateAsync(
             ReadOnlyMemory<byte> routeStateKey,
@@ -420,6 +407,21 @@ public sealed partial class InMemoryProductionMailboxStateStore
         {
             return routeContinuityStates.TryGetValue(Convert.ToHexString(frozenRouteStateKey),
                 out var value) ? Clone(value) : null;
+        }
+        finally { gate.Release(); }
+    }
+
+    async ValueTask<ProductionMailboxRestoredGenesis?>
+        IProductionMailboxRouteContinuityStateStore.GetRestoredGenesisAsync(
+        ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
+    {
+        var key = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!genesisCatalogs.TryGetValue(Convert.ToHexString(key), out var value)) return null;
+            return ProductionMailboxProtectedGenesisCatalog.Restore(
+                value.Payload, value.IntegrityTag, v2PublicationIntegrityKey).RestoreProtocol();
         }
         finally { gate.Release(); }
     }
@@ -570,8 +572,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
             current?.CurrentAuthorizationHash.ToArray() ??
                 delegation.AnchorCanonicalRouteAuthorizationHash.ToArray(),
             current?.CurrentAuthorizationSequence ?? delegation.AnchorRouteAuthorizationSequence,
-            current?.CanonicalRouteCertificate.ToArray() ?? [],
-            current?.CanonicalRouteAuthorization.ToArray() ?? [],
+            current?.CanonicalRouteCertificate.ToArray() ?? value.CanonicalAnchorRouteCertificate,
+            current?.CanonicalRouteAuthorization.ToArray() ?? value.CanonicalAnchorRouteAuthorization,
             current?.CanonicalRevocationCheckpoint.ToArray() ?? [],
             current?.CanonicalTransitionContext.ToArray() ?? [],
             current?.CanonicalSelectionSuccessor.ToArray() ?? [],
@@ -579,7 +581,7 @@ public sealed partial class InMemoryProductionMailboxStateStore
             current?.TransitionTranscriptHash.ToArray() ?? new byte[32],
             value.ExpectedPreviousDelegationSequence + 1,
             value.CanonicalDelegation, value.CanonicalDelegationHash, value.CanonicalAcceptance,
-            value.CanonicalAcceptanceHash, 0, [], new byte[32]);
+            value.CanonicalAcceptanceHash, 0, [], new byte[32], value.InitialHistory);
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
@@ -620,33 +622,6 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         return new(ProductionMailboxRouteContinuityCommitStatus.Accepted, next);
     }
 
-    async ValueTask<ProductionMailboxRouteContinuityCommitResult>
-        IProductionMailboxRouteContinuityStateStore.CommitEnrollmentAsync(
-        ReadOnlyMemory<byte> routeStateKey,
-        ProductionMailboxRouteContinuityEnrollmentCommitPlan plan,
-        CancellationToken cancellationToken)
-    {
-        var frozenRouteStateKey = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
-        var frozen = ProductionMailboxFrozenEnrollment.Freeze(plan);
-        await using var connection = await OpenAsync(cancellationToken);
-        await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(
-            IsolationLevel.ReadCommitted, cancellationToken);
-        await AdvisoryLockAsync(connection, transaction, frozenRouteStateKey, cancellationToken);
-        var current = await ReadRouteContinuityAsync(connection, transaction, frozenRouteStateKey,
-            true, cancellationToken);
-        var status = ValidateEnrollmentPredecessor(current, frozen);
-        if (status != ProductionMailboxRouteContinuityCommitStatus.Accepted)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return new(status, current);
-        }
-        var next = FromEnrollment(frozenRouteStateKey, current, frozen);
-        await UpsertRouteContinuityAsync(connection, transaction, next, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(ProductionMailboxRouteContinuityCommitStatus.Accepted, next);
-    }
-
     async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
         IProductionMailboxRouteContinuityStateStore.GetRouteContinuityStateAsync(
             ReadOnlyMemory<byte> routeStateKey,
@@ -657,6 +632,23 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
         return await ReadRouteContinuityAsync(connection, null, frozenRouteStateKey, false,
             cancellationToken);
+    }
+
+    async ValueTask<ProductionMailboxRestoredGenesis?>
+        IProductionMailboxRouteContinuityStateStore.GetRestoredGenesisAsync(
+        ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
+    {
+        var key = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
+        await using var connection = await OpenAsync(cancellationToken);
+        await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
+        await AdvisoryLockAsync(connection, transaction, key, cancellationToken);
+        var catalog = await ReadGenesisCatalogAsync(connection, transaction, key,
+            v2PreparedIntegrityKey, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return catalog?.RestoreProtocol();
     }
 
     private async ValueTask EnsureRouteContinuitySchemaAsync(
@@ -980,13 +972,38 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         var hasTransition = value.CanonicalSelectionSuccessor.Length != 0;
         if (!hasTransition)
         {
-            if (value.CanonicalRouteCertificate.Length != 0
-                || value.CanonicalRouteAuthorization.Length != 0
-                || value.CanonicalRevocationCheckpoint.Length != 0
+            if (value.CanonicalRevocationCheckpoint.Length != 0
                 || value.CanonicalTransitionContext.Length != 0
                 || value.CanonicalTransitionTranscript.Length != 0
                 || value.TransitionTranscriptHash.Span.IndexOfAnyExcept((byte)0) >= 0)
                 throw new InvalidDataException("Stored bootstrap route state is inconsistent.");
+            if (value.DelegationSequence == 0)
+            {
+                if (value.CanonicalRouteCertificate.Length != 0
+                    || value.CanonicalRouteAuthorization.Length != 0
+                    || value.History is not null)
+                    throw new InvalidDataException(
+                        "Stored owner bootstrap contains a continuity genesis closure.");
+                return;
+            }
+            if (value.History is null
+                || value.CurrentAuthorizationKind !=
+                    ProductionMailboxRouteAuthorizationKind.OwnerPRA2
+                || value.CanonicalRouteCertificate.Length !=
+                    ProductionMailboxRouteAdvertisementConstants.CanonicalCertificateLength
+                || value.CanonicalRouteAuthorization.Length !=
+                    ProductionMailboxRouteAuthorizationConstants.CanonicalAdvertisementV2Length)
+                throw new InvalidDataException(
+                    "Stored continuity genesis closure is incomplete.");
+            _ = ProductionMailboxRouteAdvertisementCodec.DecodeCertificate(
+                value.CanonicalRouteCertificate.Span);
+            var anchor = ProductionMailboxRouteAuthorizationCodec.DecodeAdvertisementV2(
+                value.CanonicalRouteAuthorization.Span);
+            if (!Fixed(SHA256.HashData(value.CanonicalRouteAuthorization.Span),
+                    value.CurrentAuthorizationHash.Span)
+                || anchor.Sequence != value.CurrentAuthorizationSequence)
+                throw new InvalidDataException(
+                    "Stored continuity genesis authorization is inconsistent.");
             return;
         }
 

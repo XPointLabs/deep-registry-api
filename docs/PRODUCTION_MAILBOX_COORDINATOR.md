@@ -258,6 +258,38 @@ client/XNode +25-hour outage E2E and the owner-authenticated fresh-checkpoint la
 exact durable old PMS predates the retained live node schedule. Expired PSS1 is never accepted and
 retired issuer keys are never retained for refresh.
 
+Route Continuity Slice 4A exposes only the authenticated confidential owner host channel. Initial
+enrollment is separate from PMCQ1: the session principal must equal the RCD1 owner, and one
+route-locked commit persists the exact RCD1/RDA1/OCR1, pre- and enrolled ROL1, genesis RHC1, full
+historical PMA1/PMR1/PRC1/PRA2 closure, both Protocol restore contexts, dedicated OCR HSM key
+identity, and the exact response. Every catalog scalar and byte is covered by the protected
+route-state HMAC and reloaded only through Protocol `RestoreHistoricalAnchor`/`RestoreCursor`.
+The published artifact-closure fingerprint is captured before HSM work and rechecked in the final
+transaction; RCD1 and OCR1 expiry and exact OCR public-key identity are rechecked against database
+time before commit. Lost responses are served only from the HMAC-verified durable response after
+Protocol restore and OCR key-health/kill-switch checks.
+
+PMCQ1 supports NoChange only in Slice 4A. Its single live scope is
+HMAC(owner, route domain, current RHC1, operation), independent of requested mode or authorization
+kind. The store commits Prepared, then an immutable database-time Planned header before invoking
+the OCR HSM, then Signed, and finally DeliveryAuthorized. Each phase is included in the protected
+phase HMAC. A fresh locked reread checks request, source RHC/ROL, expiry, response signature and
+OCR health before bytes are sent. DeliveryAuthorized is the send linearization point: an RCR1
+committed before it wins; a later RCR1 cannot retract a socket write already authorized, but it
+terminally fences every future replay. RCR1 operation identity is its exact canonical hash;
+transport request IDs are HMAC-protected correlation tombstones, so the same artifact under a new
+ID replays while the same ID with changed bytes conflicts. PMCQ1 request IDs remain protected
+tombstones through the shorter RCD1/OCR1 horizon; expired active requests and terminal aliases are
+removed only by bounded authenticated GC. Durable per-route/global entry and byte limits are
+checked atomically before new state is admitted; accounting verifies every bounded row, includes
+the unused Prepared-to-committed byte/row headroom, and always reserves one terminal RCR1 slot.
+An OCR key token is persisted before HSM
+allocation; abandoned uncommitted keys are claimed with a durable lease and deleted idempotently,
+while a cleanup claim terminally prevents a late enrollment commit. Request failures never delete
+an OCR key directly: only the durable leased cleanup worker may do so. PostgreSQL owner-control
+transactions enforce bounded statement, lock, and idle-in-transaction timeouts. Slice 4A contains no RHB1 history,
+final-activation, sweep authoring, XNode publication, PMQ, or V1 fallback.
+
 Internal reload, holder revocation, and sanitized runtime counters are under
 `/api/internal/production-mailbox`. They fail closed unless the connection has the configured
 authentication type and the exact pinned client-certificate SHA-256.
@@ -279,4 +311,4 @@ XNode fleet. A configuration mismatch fails closed during reservation; it must n
 lowering the signed reservation after planning.
 
 The exact local protocol closure is recorded in `vendor/pma/package-manifest.json`; it is built
-reproducibly from protocol commit `62fd84a36580855a64307bf8020ce6a94d4ac741` and is not published.
+reproducibly from protocol commit `2eb8b1eb4605216b239f63d1ad8e587a28918134` and is not published.
