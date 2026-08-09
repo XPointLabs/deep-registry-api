@@ -48,31 +48,31 @@
       },
       "Deep.Protocol": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.32b4d14",
-        "contentHash": "X3vS74s4Pfu1tpG1LRuJORE8jOtZ6Gz5RlLSjh+VGa3YWagw92I4wXhcRTnBi9D7KEOdFTFLNMQyiRXMrwHSSQ==",
+        "resolved": "0.4.0-production.cc39def",
+        "contentHash": "b0KwHBLTeNt9hI/UHckbVos6J4xOYkNl4DygB7b/8cFQv9nMB+9RcpAEJWAK5zi98BJUg2HANeWrL5Dzh2mLEQ==",
         "dependencies": {
-          "Deep.Protocol.Abstractions": "[0.4.0-production.32b4d14]",
-          "Deep.Protocol.Protobuf": "[0.4.0-production.32b4d14]",
+          "Deep.Protocol.Abstractions": "[0.4.0-production.cc39def]",
+          "Deep.Protocol.Protobuf": "[0.4.0-production.cc39def]",
           "Sodium.Core": "1.4.1"
         }
       },
       "Deep.Protocol.Abstractions": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.32b4d14",
-        "contentHash": "X22etsgiSpnDrSfyDriwEDsBkbPxeS3wMXMv5XfU2LKEdS7zvOVkrVveE2wtDjO+AQXNDhlsxC/HZSD1gmgjbw=="
+        "resolved": "0.4.0-production.cc39def",
+        "contentHash": "iLD569y0NNuwrZemU46PUbuzU2jB6oJMcDB+TvyEjkRAYJEtmfLCNG7yyaUdoJz3dUm25wXT3xQh97RuDrsYPg=="
       },
       "Deep.Protocol.MembershipRoutes": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.32b4d14",
-        "contentHash": "DhFDtQryAud5aanPnsC6YHArjxERk2AVtVbHlkimvQbStBIwWcwwARgzHa4I7GC+y+HfkNiT6r0fgKzPOYtbFQ==",
+        "resolved": "0.4.0-production.cc39def",
+        "contentHash": "Lszd79KT0K3ORoGiwEg/3azLCaVKHC4HWInrwrfEhWDqe7kCHcRYQ9YbB1zDCVXdM0Vr9X5JwQlppSWIXhK/zA==",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.32b4d14]"
+          "Deep.Protocol": "[0.4.0-production.cc39def]"
         }
       },
       "Deep.Protocol.Protobuf": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.32b4d14",
-        "contentHash": "HAtQOoAlzuPmotttfQkWF7JVmbycpTVeG1J3iszMw8FidxbUr6Q2S5ZFA2kRQ5Lo3QmlIPhnHM1wZSUatZQJWQ==",
+        "resolved": "0.4.0-production.cc39def",
+        "contentHash": "qxwAXR0E05rkBEW2Lolkn65t2vmSyLoa7moY74y1dTnQBUMgxldNtC9riL/HmfbS1T9sL+TBwmlTjKKmMbhbLw==",
         "dependencies": {
           "Google.Protobuf": "3.32.1"
         }
@@ -479,8 +479,8 @@
       "deep.registry.api": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.32b4d14, 0.4.0-production.32b4d14]",
-          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.32b4d14, 0.4.0-production.32b4d14]",
+          "Deep.Protocol": "[0.4.0-production.cc39def, 0.4.0-production.cc39def]",
+          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.cc39def, 0.4.0-production.cc39def]",
           "Npgsql": "[10.0.3, )",
           "Rebex.Elliptic.Ed25519": "[1.2.2, )",
           "Sodium.Core": "[1.4.1, )"
@@ -497,8 +497,8 @@
       "xnode.core": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.32b4d14, 0.4.0-production.32b4d14]",
-          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.32b4d14, 0.4.0-production.32b4d14]",
+          "Deep.Protocol": "[0.4.0-production.cc39def, 0.4.0-production.cc39def]",
+          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.cc39def, 0.4.0-production.cc39def]",
           "Microsoft.Extensions.Logging.Abstractions": "[8.0.0, )",
           "Rebex.Elliptic.Ed25519": "[1.2.2, )",
           "Sodium.Core": "[1.4.1, )"
