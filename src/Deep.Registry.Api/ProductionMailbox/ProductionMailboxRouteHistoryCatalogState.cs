@@ -465,7 +465,8 @@ internal sealed class ProductionMailboxRouteHistoryLookup
         ReadOnlySpan<byte> currentRouteOriginLkgHash,
         ProductionMailboxRouteAuthorizationKind currentAuthorizationKind,
         ulong currentAuthorizationSequence,
-        ReadOnlySpan<byte> currentAuthorizationHash)
+        ReadOnlySpan<byte> currentAuthorizationHash,
+        ulong retentionHorizonUnixSeconds)
     {
         if (status is not ProductionMailboxRouteHistoryLookupStatus.History and
                 not ProductionMailboxRouteHistoryLookupStatus.HeadNoChange ||
@@ -474,6 +475,7 @@ internal sealed class ProductionMailboxRouteHistoryLookup
             routeLocalSourceFingerprint.IndexOfAnyExcept((byte)0) < 0 ||
             currentRouteOriginLkgHash.IndexOfAnyExcept((byte)0) < 0 ||
             currentAuthorizationHash.IndexOfAnyExcept((byte)0) < 0 ||
+            retentionHorizonUnixSeconds is 0 or ulong.MaxValue ||
             (status == ProductionMailboxRouteHistoryLookupStatus.History) != (nextPlan is not null))
             throw new InvalidDataException("Route-history lookup result is inconsistent.");
         Status = status;
@@ -485,6 +487,7 @@ internal sealed class ProductionMailboxRouteHistoryLookup
         CurrentAuthorizationKind = currentAuthorizationKind;
         CurrentAuthorizationSequence = currentAuthorizationSequence;
         this.currentAuthorizationHash = currentAuthorizationHash.ToArray();
+        RetentionHorizonUnixSeconds = retentionHorizonUnixSeconds;
         canonicalNextBatch = nextPlan?.CanonicalBatch.ToArray() ?? [];
         canonicalNextCheckpoint = nextPlan?.NextCursor.CanonicalCheckpoint.ToArray() ?? [];
     }
@@ -500,6 +503,7 @@ internal sealed class ProductionMailboxRouteHistoryLookup
     internal ProductionMailboxRouteAuthorizationKind CurrentAuthorizationKind { get; }
     internal ulong CurrentAuthorizationSequence { get; }
     internal ReadOnlyMemory<byte> CurrentAuthorizationHash => currentAuthorizationHash.ToArray();
+    internal ulong RetentionHorizonUnixSeconds { get; }
     internal ReadOnlyMemory<byte> CanonicalNextBatch => canonicalNextBatch.ToArray();
     internal ReadOnlyMemory<byte> CanonicalNextCheckpoint => canonicalNextCheckpoint.ToArray();
 }
@@ -643,7 +647,11 @@ internal static class ProductionMailboxRouteHistoryCatalogVerifier
             requestedLineage.RouteOriginLkgHash,
             requestedLineage.AuthorizationKind,
             requestedLineage.AuthorizationSequence,
-            requestedLineage.AuthorizationHash)));
+            requestedLineage.AuthorizationHash,
+            Math.Min(genesis.Enrollment.Delegation.ExpiresAtUnixSeconds,
+                ProductionMailboxOwnerControlTransportCodec.DecodeResponderCertificate(
+                    genesis.EnrollmentContext.CanonicalOwnerControlResponderCertificate.Span)
+                .ExpiresAtUnixSeconds))));
     }
 
     private static bool LookupMatches(ProductionMailboxRouteHistoryLookupRequest request,
@@ -861,8 +869,12 @@ public sealed partial class InMemoryProductionMailboxStateStore
             var now = checked((ulong)unix);
             if (now < horizon) return false;
             AuthenticatedOwnerControlGc(now);
+            GcDeliveryLeases(now);
             if (ownerControlRequests.Values.Any(value => Fixed(value.RouteStateKey, route)) ||
                 ownerControlRequestIds.Values.Any(value => Fixed(value.RouteStateKey, route)) ||
+                ownerControlRequestsV2.Values.Any(value => Fixed(value.RouteStateKey.Span, route)) ||
+                ownerControlRequestIdsV2.Values.Any(value => Fixed(value.RouteStateKey.Span, route)) ||
+                ownerDeliveryLeases.Values.Any(value => Fixed(value.RouteStateKey, route)) ||
                 ownerRevocationRequestIds.Values.Any(value => Fixed(value.RouteStateKey, route)) ||
                 ownerEnrollmentRequestIds.Values.Any(value => Fixed(value.RouteStateKey, route)) ||
                 v2Activations.Values.Any(value => Fixed(value.RouteStateKey, route)) ||
@@ -1066,6 +1078,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
         await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureOwnerDeliverySchemaAsync(connection, cancellationToken);
         await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.ReadCommitted, cancellationToken);
@@ -1108,6 +1121,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
         await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureOwnerDeliverySchemaAsync(connection, cancellationToken);
         await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await EnsureV2PublicationSchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
@@ -1164,6 +1178,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         }
         await AuthenticatedOwnerControlGcAsync(connection, transaction, dbNow,
             cancellationToken);
+        await GcPgDeliveryLeasesAsync(connection, transaction, dbNow, cancellationToken);
         if (await HasTerminalRouteLiveReferencesAsync(connection, transaction, route,
                 cancellationToken))
         {
@@ -1189,15 +1204,15 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private async ValueTask<bool> HasRouteHistoryTombstoneAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT CASE WHEN octet_length(protected_payload)=232 THEN protected_payload END,
                    CASE WHEN octet_length(integrity_tag)=32 THEN integrity_tag END
             FROM production_mailbox_route_history_tombstone_v1
-            WHERE route_state_key=@route FOR UPDATE
-            """;
+            WHERE route_state_key=@route
+            """ + (transaction is null ? string.Empty : " FOR UPDATE");
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("route", routeStateKey.ToArray());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1214,7 +1229,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private static async ValueTask InsertRouteHistoryTombstoneAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey,
         ProductionMailboxProtectedRouteTombstone tombstone,
         CancellationToken cancellationToken)
@@ -1232,13 +1247,19 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private static async ValueTask<bool> HasTerminalRouteLiveReferencesAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT EXISTS(
                 SELECT 1 FROM production_mailbox_owner_requests_v1 WHERE route_state_key=@route
                 UNION ALL SELECT 1 FROM production_mailbox_owner_request_ids_v1
+                    WHERE route_state_key=@route
+                UNION ALL SELECT 1 FROM production_mailbox_owner_requests_v2
+                    WHERE route_state_key=@route
+                UNION ALL SELECT 1 FROM production_mailbox_owner_request_ids_v2
+                    WHERE route_state_key=@route
+                UNION ALL SELECT 1 FROM production_mailbox_owner_delivery_leases_v1
                     WHERE route_state_key=@route
                 UNION ALL SELECT 1 FROM production_mailbox_owner_revocation_ids_v1
                     WHERE route_state_key=@route
@@ -1256,7 +1277,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private static async ValueTask DeleteCollectedTerminalRouteAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey, ReadOnlyMemory<byte> enrollmentOperationHash,
         CancellationToken cancellationToken)
     {
@@ -1329,7 +1350,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private async ValueTask<ProductionMailboxRestoredHistoryCatalog> ReadHistoryCatalogAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey,
         ProductionMailboxRouteContinuityStateSnapshot current,
         CancellationToken cancellationToken)
@@ -1349,7 +1370,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private async ValueTask<ProductionMailboxRouteHistoryLookupResult> ReadHistoryLookupAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey,
         ProductionMailboxRouteContinuityStateSnapshot current,
         ProductionMailboxRouteHistoryLookupRequest request,
@@ -1370,15 +1391,15 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private async ValueTask<ProductionMailboxProtectedHistoryManifest?> ReadHistoryManifestAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction,
         ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT CASE WHEN octet_length(protected_payload)=216 THEN protected_payload END,
                    CASE WHEN octet_length(integrity_tag)=32 THEN integrity_tag END
             FROM production_mailbox_route_history_manifest_v1
-            WHERE route_state_key=@route FOR UPDATE
-            """;
+            WHERE route_state_key=@route
+            """ + (transaction is null ? string.Empty : " FOR UPDATE");
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("route", routeStateKey.ToArray());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1391,17 +1412,17 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private async ValueTask<SortedDictionary<ulong, ProductionMailboxProtectedHistoryBatch>>
-        ReadHistoryBatchesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        ReadHistoryBatchesAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction,
             ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT CASE WHEN octet_length(batch_sequence)=8 THEN batch_sequence END,
                    CASE WHEN octet_length(protected_payload) BETWEEN 180 AND 8394420
                         THEN protected_payload END,
                    CASE WHEN octet_length(integrity_tag)=32 THEN integrity_tag END
             FROM production_mailbox_route_history_batch_v1
-            WHERE route_state_key=@route ORDER BY batch_sequence LIMIT 33 FOR UPDATE
-            """;
+            WHERE route_state_key=@route ORDER BY batch_sequence LIMIT 33
+            """ + (transaction is null ? string.Empty : " FOR UPDATE");
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("route", routeStateKey.ToArray());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1422,16 +1443,16 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     }
 
     private async ValueTask<SortedDictionary<ulong, ProductionMailboxProtectedHistoryCheckpoint>>
-        ReadHistoryCheckpointsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        ReadHistoryCheckpointsAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction,
             ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT CASE WHEN octet_length(batch_sequence)=8 THEN batch_sequence END,
                    CASE WHEN octet_length(protected_payload)=908 THEN protected_payload END,
                    CASE WHEN octet_length(integrity_tag)=32 THEN integrity_tag END
             FROM production_mailbox_route_history_checkpoint_v1
-            WHERE route_state_key=@route ORDER BY batch_sequence LIMIT 34 FOR UPDATE
-            """;
+            WHERE route_state_key=@route ORDER BY batch_sequence LIMIT 34
+            """ + (transaction is null ? string.Empty : " FOR UPDATE");
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("route", routeStateKey.ToArray());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

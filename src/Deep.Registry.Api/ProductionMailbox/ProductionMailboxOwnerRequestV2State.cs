@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Data;
+using System.Diagnostics;
 using Deep.Protocol.DeepExtension.MailboxTopology;
 using Npgsql;
 
@@ -14,6 +15,27 @@ internal sealed record ProductionMailboxOwnerRequestV2PlanResult(
     ulong IssuedAtUnixSeconds,
     ulong ExpiresAtUnixSeconds,
     ProductionMailboxProtectedOwnerRequestV2? Record);
+
+internal sealed record ProductionMailboxOwnerRequestV2DeliveryReadResult(
+    ProductionMailboxOwnerRequestStatus Status,
+    ProductionMailboxProtectedOwnerRequestV2? Record,
+    ProductionMailboxRouteHistoryLookup? Lookup);
+
+internal interface IProductionMailboxOwnerRequestV2DeliverySession : IAsyncDisposable
+{
+    ValueTask<ProductionMailboxOwnerRequestV2DeliveryReadResult> ReadAsync(
+        ReadOnlyMemory<byte> activeScope,
+        ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+        VerifiedProductionMailboxOwnerControlRequest request,
+        CancellationToken cancellationToken);
+
+    ValueTask<ProductionMailboxOwnerRequestV2Result> AuthorizeAsync(
+        ReadOnlyMemory<byte> activeScope,
+        ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+        VerifiedProductionMailboxOwnerControlRequest request,
+        ReadOnlyMemory<byte> expectedSourceFingerprint,
+        CancellationToken cancellationToken);
+}
 
 internal interface IProductionMailboxOwnerRequestV2StateStore
 {
@@ -43,6 +65,11 @@ internal interface IProductionMailboxOwnerRequestV2StateStore
         ReadOnlyMemory<byte> canonicalResponseHeader,
         ReadOnlyMemory<byte> canonicalResponseHash,
         ulong nowUnixSeconds,
+        CancellationToken cancellationToken);
+
+    ValueTask<IProductionMailboxOwnerRequestV2DeliverySession> AcquireDeliverySessionAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        TimeSpan timeout,
         CancellationToken cancellationToken);
 }
 
@@ -239,6 +266,123 @@ public sealed partial class InMemoryProductionMailboxStateStore :
             return new(ProductionMailboxOwnerRequestStatus.Prepared, signed);
         }
         finally { gate.Release(); }
+    }
+
+    async ValueTask<IProductionMailboxOwnerRequestV2DeliverySession>
+        IProductionMailboxOwnerRequestV2StateStore.AcquireDeliverySessionAsync(
+        ReadOnlyMemory<byte> routeStateKey, TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var route = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
+        if (timeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        try { await gate.WaitAsync(deadline.Token); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        { throw new TimeoutException("Owner-request route session timed out."); }
+        return new InMemoryOwnerRequestV2DeliverySession(this, route);
+    }
+
+    private sealed class InMemoryOwnerRequestV2DeliverySession(
+        InMemoryProductionMailboxStateStore owner, byte[] route)
+        : IProductionMailboxOwnerRequestV2DeliverySession
+    {
+        private int disposed;
+
+        public ValueTask<ProductionMailboxOwnerRequestV2DeliveryReadResult> ReadAsync(
+            ReadOnlyMemory<byte> activeScope,
+            ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+            VerifiedProductionMailboxOwnerControlRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfDisposed();
+            var scope = V2Exact(activeScope, 32, "active scope");
+            var scopeKey = Convert.ToHexString(scope);
+            if (!owner.ownerControlRequestsV2.TryGetValue(scopeKey, out var stored))
+                return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2DeliveryReadResult(
+                    ProductionMailboxOwnerRequestStatus.MissingState, null, null));
+            var current = owner.RestoreV2(stored);
+            var now = checked((ulong)owner.timeProvider.GetUtcNow().ToUnixTimeSeconds());
+            var status = Validate(current, request, now);
+            if (status != ProductionMailboxOwnerRequestStatus.Prepared)
+                return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2DeliveryReadResult(
+                    status, null, null));
+            var lookup = owner.LookupHistoryUnderGate(route, lookupRequest);
+            if (lookup.Lookup is null || lookup.Status is not
+                    (ProductionMailboxRouteHistoryLookupStatus.History or
+                    ProductionMailboxRouteHistoryLookupStatus.HeadNoChange) ||
+                !V2Fixed(lookup.Lookup.RouteLocalSourceFingerprint.Span,
+                    current.SourceFingerprint.Span))
+                return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2DeliveryReadResult(
+                    ProductionMailboxOwnerRequestStatus.Conflict, null, null));
+            return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2DeliveryReadResult(
+                ProductionMailboxOwnerRequestStatus.Prepared, current, lookup.Lookup));
+        }
+
+        public ValueTask<ProductionMailboxOwnerRequestV2Result> AuthorizeAsync(
+            ReadOnlyMemory<byte> activeScope,
+            ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+            VerifiedProductionMailboxOwnerControlRequest request,
+            ReadOnlyMemory<byte> expectedSourceFingerprint,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfDisposed();
+            var scope = V2Exact(activeScope, 32, "active scope");
+            var expected = V2Exact(expectedSourceFingerprint, 32, "source fingerprint");
+            var scopeKey = Convert.ToHexString(scope);
+            if (!owner.ownerControlRequestsV2.TryGetValue(scopeKey, out var stored))
+                return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2Result(
+                    ProductionMailboxOwnerRequestStatus.MissingState, null));
+            var current = owner.RestoreV2(stored);
+            var now = checked((ulong)owner.timeProvider.GetUtcNow().ToUnixTimeSeconds());
+            var status = Validate(current, request, now);
+            if (status != ProductionMailboxOwnerRequestStatus.Prepared)
+                return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2Result(
+                    status, null));
+            var lookup = owner.LookupHistoryUnderGate(route, lookupRequest);
+            if (lookup.Lookup is null || !V2Fixed(expected,
+                    lookup.Lookup.RouteLocalSourceFingerprint.Span) ||
+                !V2Fixed(expected, current.SourceFingerprint.Span))
+                return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2Result(
+                    ProductionMailboxOwnerRequestStatus.Conflict, null));
+            var authorized = current.AuthorizeDelivery(owner.v2PublicationIntegrityKey);
+            owner.ownerControlRequestsV2[scopeKey] = authorized;
+            return ValueTask.FromResult(new ProductionMailboxOwnerRequestV2Result(
+                ProductionMailboxOwnerRequestStatus.ExactReplay, authorized));
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) == 0) owner.gate.Release();
+            return ValueTask.CompletedTask;
+        }
+
+        private ProductionMailboxOwnerRequestStatus Validate(
+            ProductionMailboxProtectedOwnerRequestV2 current,
+            VerifiedProductionMailboxOwnerControlRequest request, ulong now)
+        {
+            if (!V2Fixed(current.RouteStateKey.Span, route) ||
+                !V2Fixed(current.RequestHash.Span, request.CanonicalHash.Span))
+                return ProductionMailboxOwnerRequestStatus.Conflict;
+            if (current.TerminalRevoked)
+                return ProductionMailboxOwnerRequestStatus.Revoked;
+            if (now >= current.RequestExpiresAtUnixSeconds ||
+                current.PlannedExpiresAtUnixSeconds is null ||
+                now >= current.PlannedExpiresAtUnixSeconds)
+                return ProductionMailboxOwnerRequestStatus.Stale;
+            return current.Phase < ProductionMailboxOwnerRequestV2Phase.Signed
+                ? ProductionMailboxOwnerRequestStatus.MissingState
+                : ProductionMailboxOwnerRequestStatus.Prepared;
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (Volatile.Read(ref disposed) != 0)
+                throw new ObjectDisposedException(nameof(InMemoryOwnerRequestV2DeliverySession));
+        }
     }
 
     private bool SourceStillValidUnderGate(ReadOnlySpan<byte> route,
@@ -578,6 +722,202 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         await UpdateOwnerRequestV2Async(connection, transaction, signed, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new(ProductionMailboxOwnerRequestStatus.Prepared, signed);
+    }
+
+    async ValueTask<IProductionMailboxOwnerRequestV2DeliverySession>
+        IProductionMailboxOwnerRequestV2StateStore.AcquireDeliverySessionAsync(
+        ReadOnlyMemory<byte> routeStateKey, TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var route = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
+        if (timeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        var connection = await OpenAsync(cancellationToken);
+        try
+        {
+            await EnsureOwnerRequestV2DependenciesAsync(connection, cancellationToken);
+            await AcquirePgRouteSessionLockAsync(connection, route, timeout,
+                cancellationToken);
+            return new PostgreSqlOwnerRequestV2DeliverySession(this, connection, route);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    private sealed class PostgreSqlOwnerRequestV2DeliverySession(
+        PostgreSqlProductionMailboxStateStore owner, NpgsqlConnection connection,
+        byte[] route) : IProductionMailboxOwnerRequestV2DeliverySession
+    {
+        private int disposed;
+
+        public async ValueTask<ProductionMailboxOwnerRequestV2DeliveryReadResult> ReadAsync(
+            ReadOnlyMemory<byte> activeScope,
+            ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+            VerifiedProductionMailboxOwnerControlRequest request,
+            CancellationToken cancellationToken)
+        {
+            ThrowIfDisposed();
+            var scope = PgV2Exact(activeScope, 32, "active scope");
+            ProductionMailboxProtectedOwnerRequestV2 record;
+            await using (var transaction = await connection.BeginTransactionAsync(
+                             IsolationLevel.ReadCommitted, cancellationToken))
+            {
+                await owner.ConfigureOwnerControlTransactionAsync(connection, transaction,
+                    cancellationToken);
+                await AdvisoryLockAsync(connection, transaction, route, cancellationToken);
+                var dbNow = await owner.OwnerDbNowAsync(connection, transaction,
+                    cancellationToken);
+                var stored = await owner.ReadOwnerRequestV2Async(connection, transaction,
+                    scope, cancellationToken);
+                if (stored is null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                    return new(ProductionMailboxOwnerRequestStatus.MissingState, null, null);
+                }
+                var current = await ReadRouteContinuityRowAsync(connection, transaction,
+                    route, true, cancellationToken);
+                var status = Validate(stored, request, current, dbNow);
+                await transaction.CommitAsync(cancellationToken);
+                if (status != ProductionMailboxOwnerRequestStatus.Prepared)
+                    return new(status, null, null);
+                record = stored;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var snapshot = await ReadRouteContinuityRowAsync(connection, null, route, false,
+                cancellationToken);
+            if (snapshot is null)
+                return new(ProductionMailboxOwnerRequestStatus.MissingState, null, null);
+            var lookup = await owner.ReadHistoryLookupAsync(connection, null, route, snapshot,
+                lookupRequest, cancellationToken);
+            if (lookup.Lookup is null || lookup.Status is not
+                    (ProductionMailboxRouteHistoryLookupStatus.History or
+                    ProductionMailboxRouteHistoryLookupStatus.HeadNoChange) ||
+                !PgV2Fixed(lookup.Lookup.RouteLocalSourceFingerprint.Span,
+                    record.SourceFingerprint.Span))
+                return new(ProductionMailboxOwnerRequestStatus.Conflict, null, null);
+            return new(ProductionMailboxOwnerRequestStatus.Prepared, record, lookup.Lookup);
+        }
+
+        public async ValueTask<ProductionMailboxOwnerRequestV2Result> AuthorizeAsync(
+            ReadOnlyMemory<byte> activeScope,
+            ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+            VerifiedProductionMailboxOwnerControlRequest request,
+            ReadOnlyMemory<byte> expectedSourceFingerprint,
+            CancellationToken cancellationToken)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(lookupRequest);
+            var scope = PgV2Exact(activeScope, 32, "active scope");
+            var expected = PgV2Exact(expectedSourceFingerprint, 32, "source fingerprint");
+            await using var transaction = await connection.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted, cancellationToken);
+            await owner.ConfigureOwnerControlTransactionAsync(connection, transaction,
+                cancellationToken);
+            await AdvisoryLockAsync(connection, transaction, route, cancellationToken);
+            var dbNow = await owner.OwnerDbNowAsync(connection, transaction,
+                cancellationToken);
+            var record = await owner.ReadOwnerRequestV2Async(connection, transaction, scope,
+                cancellationToken);
+            if (record is null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new(ProductionMailboxOwnerRequestStatus.MissingState, null);
+            }
+            var current = await ReadRouteContinuityRowAsync(connection, transaction, route,
+                true, cancellationToken);
+            var status = Validate(record, request, current, dbNow);
+            if (status != ProductionMailboxOwnerRequestStatus.Prepared ||
+                !PgV2Fixed(record.SourceFingerprint.Span, expected))
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new(status == ProductionMailboxOwnerRequestStatus.Prepared
+                    ? ProductionMailboxOwnerRequestStatus.Conflict : status, null);
+            }
+            var authorized = record.AuthorizeDelivery(owner.v2PreparedIntegrityKey);
+            await UpdateOwnerRequestV2Async(connection, transaction, authorized,
+                cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new(ProductionMailboxOwnerRequestStatus.ExactReplay, authorized);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+            var unlockSucceeded = false;
+            try
+            {
+                await using var command = new NpgsqlCommand(
+                    "SELECT pg_advisory_unlock(hashtextextended(encode(@key,'hex'),0))",
+                    connection);
+                command.Parameters.AddWithValue("key", route);
+                unlockSucceeded = (bool)(await command.ExecuteScalarAsync()
+                    ?? throw new InvalidDataException("Route session unlock failed."));
+            }
+            catch
+            {
+                NpgsqlConnection.ClearPool(connection);
+                throw;
+            }
+            finally
+            {
+                if (!unlockSucceeded) NpgsqlConnection.ClearPool(connection);
+                await connection.DisposeAsync();
+            }
+            if (!unlockSucceeded)
+                throw new InvalidDataException("Route session lock was not owned.");
+        }
+
+        private ProductionMailboxOwnerRequestStatus Validate(
+            ProductionMailboxProtectedOwnerRequestV2 record,
+            VerifiedProductionMailboxOwnerControlRequest request,
+            ProductionMailboxRouteContinuityStateSnapshot? current, ulong dbNow)
+        {
+            if (!PgV2Fixed(record.RouteStateKey.Span, route) ||
+                !PgV2Fixed(record.RequestHash.Span, request.CanonicalHash.Span))
+                return ProductionMailboxOwnerRequestStatus.Conflict;
+            if (record.TerminalRevoked || current?.OwnerRevocationGeneration != 0)
+                return ProductionMailboxOwnerRequestStatus.Revoked;
+            if (current is null) return ProductionMailboxOwnerRequestStatus.MissingState;
+            if (dbNow >= record.RequestExpiresAtUnixSeconds ||
+                record.PlannedExpiresAtUnixSeconds is null ||
+                dbNow >= record.PlannedExpiresAtUnixSeconds)
+                return ProductionMailboxOwnerRequestStatus.Stale;
+            return record.Phase < ProductionMailboxOwnerRequestV2Phase.Signed
+                ? ProductionMailboxOwnerRequestStatus.MissingState
+                : ProductionMailboxOwnerRequestStatus.Prepared;
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (Volatile.Read(ref disposed) != 0)
+                throw new ObjectDisposedException(nameof(PostgreSqlOwnerRequestV2DeliverySession));
+        }
+    }
+
+    private static async ValueTask AcquirePgRouteSessionLockAsync(
+        NpgsqlConnection connection, ReadOnlyMemory<byte> route, TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = Stopwatch.GetTimestamp() + checked((long)(timeout.TotalSeconds *
+            Stopwatch.Frequency));
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var command = new NpgsqlCommand(
+                "SELECT pg_try_advisory_lock(hashtextextended(encode(@key,'hex'),0))",
+                connection);
+            command.Parameters.AddWithValue("key", route.ToArray());
+            if ((bool)(await command.ExecuteScalarAsync(cancellationToken)
+                    ?? throw new InvalidDataException("Route session lock failed.")))
+                return;
+            if (Stopwatch.GetTimestamp() >= deadline)
+                throw new TimeoutException("Owner-request route session timed out.");
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        }
     }
 
     private async ValueTask<ProductionMailboxOwnerRequestStatus>

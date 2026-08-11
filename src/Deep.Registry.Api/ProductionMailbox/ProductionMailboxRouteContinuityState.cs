@@ -768,7 +768,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     private async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
         ReadRouteContinuityAsync(
             NpgsqlConnection connection,
-            NpgsqlTransaction transaction,
+            NpgsqlTransaction? transaction,
             ReadOnlyMemory<byte> routeStateKey,
             bool forUpdate,
             CancellationToken cancellationToken)
@@ -790,7 +790,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     private static async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
         ReadRouteContinuityRowAsync(
             NpgsqlConnection connection,
-            NpgsqlTransaction transaction,
+            NpgsqlTransaction? transaction,
             ReadOnlyMemory<byte> routeStateKey,
             bool forUpdate,
             CancellationToken cancellationToken)

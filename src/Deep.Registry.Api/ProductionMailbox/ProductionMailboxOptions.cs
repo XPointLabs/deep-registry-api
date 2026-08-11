@@ -1,3 +1,5 @@
+using Deep.Protocol.DeepExtension.MailboxTopology;
+
 namespace Deep.Registry.Api.ProductionMailbox;
 
 public sealed class ProductionMailboxOptions
@@ -50,6 +52,13 @@ public sealed class ProductionMailboxOptions
     public uint OwnerControlStatementTimeoutSeconds { get; set; } = 5;
     public uint OwnerControlLockTimeoutSeconds { get; set; } = 2;
     public uint OwnerControlIdleTransactionTimeoutSeconds { get; set; } = 5;
+    public int MaximumOwnerControlDeliveriesGlobal { get; set; } = 16;
+    public int MaximumOwnerControlDeliveriesPerOwner { get; set; } = 2;
+    public int MaximumOwnerControlDeliveriesPerRoute { get; set; } = 1;
+    public long MaximumOwnerControlDeliveryBytes { get; set; } = 64L * 1024 * 1024;
+    public uint OwnerControlAuthorizationReplayTimeoutSeconds { get; set; } = 20;
+    public uint OwnerControlResponseWriteTimeoutSeconds { get; set; } = 30;
+    public uint OwnerControlDeliveryCleanupTimeoutSeconds { get; set; } = 5;
     public bool UseDevelopmentInMemoryState { get; set; }
     public string InternalAdminAuthenticationType { get; set; } = "Certificate";
     public string InternalAdminClientCertificateSha256 { get; set; } = "";
@@ -62,7 +71,11 @@ public sealed record ProductionMailboxOwnerControlStoreLimits(
     int MaximumGcBatch = 256,
     uint StatementTimeoutSeconds = 5,
     uint LockTimeoutSeconds = 2,
-    uint IdleTransactionTimeoutSeconds = 5)
+    uint IdleTransactionTimeoutSeconds = 5,
+    int MaximumDeliveryLeasesGlobal = 16,
+    int MaximumDeliveryLeasesPerOwner = 2,
+    int MaximumDeliveryLeasesPerRoute = 1,
+    long MaximumDeliveryLeaseBytes = 64L * 1024 * 1024)
 {
     internal void Validate()
     {
@@ -74,6 +87,16 @@ public sealed record ProductionMailboxOwnerControlStoreLimits(
             || StatementTimeoutSeconds is < 1 or > 30
             || LockTimeoutSeconds is < 1 or > 30
             || IdleTransactionTimeoutSeconds is < 1 or > 30)
+            throw new InvalidOperationException("Owner-control durable limits are invalid.");
+        if (MaximumDeliveryLeasesGlobal is < 1 or > 4096 ||
+            MaximumDeliveryLeasesPerOwner < 1 ||
+            MaximumDeliveryLeasesPerOwner > MaximumDeliveryLeasesGlobal ||
+            MaximumDeliveryLeasesPerRoute < 1 ||
+            MaximumDeliveryLeasesPerRoute > MaximumDeliveryLeasesPerOwner ||
+            MaximumDeliveryLeaseBytes <
+                ProductionMailboxOwnerControlConstants.ResponseHeaderLength +
+                ProductionMailboxProtectedHistoryResponseReference.MinimumPayloadLength ||
+            MaximumDeliveryLeaseBytes > 4L * 1024 * 1024 * 1024)
             throw new InvalidOperationException("Owner-control durable limits are invalid.");
     }
 }

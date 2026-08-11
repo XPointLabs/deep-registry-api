@@ -341,6 +341,18 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             .GetValue(concrete)!;
         bundles.Remove(Convert.ToHexString(fixture.RouteKey));
 
+        var leaseStore = (IProductionMailboxOwnerControlDeliveryLeaseStore)concrete;
+        var deliveryLease = await leaseStore.TryAcquireDeliveryLeaseAsync(
+            fixture.Enrollment.Delegation.MailboxOwnerEd25519PublicKey,
+            fixture.RouteKey, AdvancedFixture.Bytes(201, 32),
+            ProductionMailboxOwnerControlConstants.ResponseHeaderLength,
+            now + 500, CancellationToken.None);
+        Assert.NotNull(deliveryLease);
+        Assert.False(await concrete.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        await leaseStore.ReleaseDeliveryLeaseAsync(deliveryLease!.LeaseId,
+            CancellationToken.None);
+
         var manifests = (Dictionary<string, ProductionMailboxProtectedHistoryManifest>)
             typeof(InMemoryProductionMailboxStateStore).GetField("routeHistoryManifests",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(concrete)!;
@@ -1086,7 +1098,8 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             IProductionMailboxRouteContinuityStateStore store, byte variant,
             bool highCounters = false, ulong nowUnixSeconds = 1_800_000_000,
             byte[]? sourceArtifactClosureHash = null,
-            ulong delegationLifetimeSeconds = 180)
+            ulong delegationLifetimeSeconds = 180,
+            Func<byte[], byte[], byte[]>? routeStateKeyFactory = null)
         {
             var issuer = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(20 + variant), 32));
             var mrX = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(50 + variant), 32));
@@ -1208,7 +1221,12 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 ProductionMailboxRouteContinuityCodec.EncodeDelegation(delegation),
                 preRolBytes, authority, revocations, certificate, verifiedPra, nowUnixSeconds, 0);
             var responder = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(190 + variant), 32));
-            var routeKey = Bytes((byte)(201 + variant), 32);
+            var routeKey = routeStateKeyFactory is null
+                ? Bytes((byte)(201 + variant), 32)
+                : routeStateKeyFactory(owner.PublicKey,
+                    delegation.RouteDomainHash.ToArray());
+            if (routeKey.Length != 32 || routeKey.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                throw new InvalidDataException("Test route-state key is invalid.");
             var ownerState = Assert.IsAssignableFrom<IProductionMailboxOwnerControlStateStore>(store);
             var requestId = Bytes((byte)(211 + variant), 16);
             var requestHash = SHA256.HashData([

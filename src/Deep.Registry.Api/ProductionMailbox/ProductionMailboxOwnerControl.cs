@@ -231,9 +231,41 @@ internal interface IProductionMailboxOwnerControlStateStore
         ReadOnlyMemory<byte> keyToken, CancellationToken cancellationToken);
 }
 
+internal sealed class ProductionMailboxOwnerRequestV2Authored
+{
+    private readonly byte[] routeStateKey;
+    private readonly byte[] activeScope;
+    private readonly byte[] ownerControlKeyId;
+
+    internal ProductionMailboxOwnerRequestV2Authored(ReadOnlySpan<byte> routeStateKey,
+        ReadOnlySpan<byte> activeScope, ReadOnlySpan<byte> ownerControlKeyId,
+        VerifiedProductionMailboxOwnerControlRequest request,
+        ProductionMailboxRouteHistoryLookupRequest lookupRequest,
+        ProductionMailboxProtectedOwnerRequestV2 record)
+    {
+        this.routeStateKey = routeStateKey.ToArray();
+        this.activeScope = activeScope.ToArray();
+        this.ownerControlKeyId = ownerControlKeyId.ToArray();
+        Request = request ?? throw new ArgumentNullException(nameof(request));
+        LookupRequest = lookupRequest ?? throw new ArgumentNullException(nameof(lookupRequest));
+        Record = record ?? throw new ArgumentNullException(nameof(record));
+    }
+
+    internal ReadOnlyMemory<byte> RouteStateKey => routeStateKey.ToArray();
+    internal ReadOnlyMemory<byte> ActiveScope => activeScope.ToArray();
+    internal ReadOnlyMemory<byte> OwnerControlKeyId => ownerControlKeyId.ToArray();
+    internal VerifiedProductionMailboxOwnerControlRequest Request { get; }
+    internal ProductionMailboxRouteHistoryLookupRequest LookupRequest { get; }
+    internal ProductionMailboxProtectedOwnerRequestV2 Record { get; }
+}
+
 internal sealed class ProductionMailboxOwnerControlService(
     IProductionMailboxRouteContinuityStateStore continuity,
     IProductionMailboxOwnerControlStateStore state,
+    IProductionMailboxOwnerRequestV2StateStore stateV2,
+    IProductionMailboxOwnerControlDeliveryLeaseStore deliveryLeaseStore,
+    ProductionMailboxOwnerControlDeliveryLeaseManager deliveryLeaseManager,
+    ProductionMailboxOwnerControlDeliveryLimits deliveryLimits,
     ProductionMailboxArtifactProvider artifacts,
     IEd25519ExternalSigner issuerSigner,
     IProductionMailboxOwnerControlKeyStore ownerKeys,
@@ -242,6 +274,224 @@ internal sealed class ProductionMailboxOwnerControlService(
     uint clockSkewSeconds)
 {
     private readonly byte[] routeKey = Freeze(routeStateHmacKey, 32, "route-state HMAC key");
+
+    internal async ValueTask<ProductionMailboxOwnerRequestV2Authored> AuthorAdvanceV2Async(
+        ReadOnlyMemory<byte> canonicalRequest, ReadOnlyMemory<byte> authenticatedOwner,
+        CancellationToken cancellationToken)
+    {
+        var owner = Freeze(authenticatedOwner, 32, "authenticated owner");
+        if (canonicalRequest.Length != ProductionMailboxOwnerControlConstants.RequestLength)
+            throw new InvalidDataException("PMCQ1 request length is invalid.");
+        var decoded = ProductionMailboxOwnerControlTransportCodec.DecodeRequest(
+            canonicalRequest.Span);
+        if (!CryptographicOperations.FixedTimeEquals(
+                decoded.MailboxOwnerEd25519PublicKey.Span, owner))
+            throw new UnauthorizedAccessException("PMCQ1 principal differs from owner.");
+        var routeStateKey = Derive("route-state"u8, owner,
+            decoded.RouteDomainHash.ToArray());
+        var lookupRequest = new ProductionMailboxRouteHistoryLookupRequest(
+            decoded.NetworkId, decoded.MailboxOwnerEd25519PublicKey,
+            decoded.RouteDomainHash, decoded.SelectionInputCommitment,
+            decoded.PredecessorRouteOriginLkgHash,
+            decoded.CurrentRouteHistoryCheckpointHash,
+            decoded.CurrentRouteHistoryBatchSequence,
+            decoded.ExpectedAuthorizationKind,
+            decoded.PredecessorAuthorizationSequence,
+            decoded.PredecessorAuthorizationHash);
+        var lookupResult = await continuity.LookupRouteHistoryAsync(routeStateKey,
+            lookupRequest, cancellationToken);
+        if (lookupResult.Status is not (ProductionMailboxRouteHistoryLookupStatus.History or
+                ProductionMailboxRouteHistoryLookupStatus.HeadNoChange) ||
+            lookupResult.Lookup is null)
+            throw new InvalidOperationException("PMCQ1 route-history predecessor conflicts.");
+        var lookup = lookupResult.Lookup;
+        var verified = ProductionMailboxOwnerControlTransportCodec.VerifyRequest(
+            canonicalRequest.Span, lookup.Anchor, lookup.Cursor, Now(), clockSkewSeconds);
+        var activeScope = Derive("active-scope"u8, owner,
+            decoded.RouteDomainHash.ToArray(),
+            decoded.CurrentRouteHistoryCheckpointHash.ToArray(),
+            [(byte)ProductionMailboxOwnerControlOperation.AdvanceOrFinalize]);
+        var prepared = await stateV2.PrepareOwnerRequestV2Async(routeStateKey, activeScope,
+            lookupRequest, lookup.RouteLocalSourceFingerprint, verified,
+            lookup.RetentionHorizonUnixSeconds, Now(), cancellationToken);
+        if (prepared.Status is not (ProductionMailboxOwnerRequestStatus.Prepared or
+                ProductionMailboxOwnerRequestStatus.ExactReplay) || prepared.Record is null)
+            throw new InvalidOperationException("PMCQ1 v2 durable request conflicts.");
+        var storedKey = await state.GetOwnerControlKeyAsync(routeStateKey, cancellationToken)
+            ?? throw new InvalidDataException("Owner-control key identity is missing.");
+        var ocr = ProductionMailboxOwnerControlTransportCodec.DecodeResponderCertificate(
+            lookup.Anchor.CanonicalOwnerControlResponderCertificate.Span);
+        if (!CryptographicOperations.FixedTimeEquals(storedKey.PublicKey.Span,
+                ocr.ResponderEd25519PublicKey.Span))
+            throw new InvalidDataException("Owner-control key identity is split.");
+        if (!ownerKeys.IsSigningEnabled ||
+            !await ownerKeys.IsHealthyAsync(storedKey.KeyId, cancellationToken))
+            throw new InvalidOperationException("Owner-control signer is unavailable.");
+        if (prepared.Status == ProductionMailboxOwnerRequestStatus.ExactReplay)
+            return new(routeStateKey, activeScope, storedKey.KeyId.Span, verified,
+                lookupRequest, prepared.Record);
+
+        var planned = await stateV2.PlanOwnerRequestV2Async(routeStateKey, activeScope,
+            lookupRequest, verified, Now(), cancellationToken);
+        if (planned.Status != ProductionMailboxOwnerRequestStatus.Prepared ||
+            planned.Record is null)
+            throw new InvalidOperationException("PMCR1 v2 response-plan CAS failed.");
+        ReadOnlyMemory<byte> header;
+        ReadOnlyMemory<byte> responseHash;
+        if (lookup.Status == ProductionMailboxRouteHistoryLookupStatus.History)
+        {
+            var response = await ProductionMailboxOwnerControlTransportCodec
+                .AuthorHistoryResponseHeaderAsync(verified, lookup.Anchor, lookup.NextPlan!,
+                    planned.IssuedAtUnixSeconds, planned.ExpiresAtUnixSeconds,
+                    async (signingRequest, destination, token) => await SignIntoAsync(
+                        ownerKeys, storedKey.KeyId, signingRequest.SigningBytes,
+                        destination, token), cancellationToken);
+            header = response.CanonicalHeader;
+            responseHash = response.CanonicalResponseHash;
+        }
+        else
+        {
+            var response = await ProductionMailboxOwnerControlTransportCodec
+                .AuthorNoChangeResponseAsync(verified, lookup.Anchor,
+                    planned.IssuedAtUnixSeconds, planned.ExpiresAtUnixSeconds,
+                    async (signingRequest, destination, token) => await SignIntoAsync(
+                        ownerKeys, storedKey.KeyId, signingRequest.SigningBytes,
+                        destination, token), cancellationToken);
+            header = response.CanonicalHeader;
+            responseHash = response.CanonicalResponseHash;
+        }
+        var recorded = await stateV2.RecordOwnerRequestV2Async(routeStateKey, activeScope,
+            lookupRequest, verified, header, responseHash, Now(), cancellationToken);
+        if (recorded.Status is not (ProductionMailboxOwnerRequestStatus.Prepared or
+                ProductionMailboxOwnerRequestStatus.ExactReplay) || recorded.Record is null)
+            throw new InvalidOperationException("PMCR1 v2 signed-response CAS failed.");
+        return new(routeStateKey, activeScope, storedKey.KeyId.Span, verified,
+            lookupRequest, recorded.Record);
+    }
+
+    internal async ValueTask<ProductionMailboxOwnerControlDeliverySnapshot>
+        AuthorizeAndSnapshotV2Async(ProductionMailboxOwnerRequestV2Authored authored,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(authored);
+        var decoded = ProductionMailboxOwnerControlTransportCodec.DecodeRequest(
+            authored.Request.CanonicalBytes.Span);
+        var record = authored.Record;
+        uint payloadLength = 0;
+        if (record.SourceKind == ProductionMailboxOwnerRequestV2SourceKind.History)
+        {
+            var reference = ProductionMailboxProtectedHistoryResponseReference.Restore(
+                authored.RouteStateKey.Span,
+                decoded.CurrentRouteHistoryCheckpointHash.Span,
+                record.HistoryReference.Span, record.HistoryReferenceTag.Span, routeKey);
+            payloadLength = reference.PayloadLength;
+        }
+        var localLease = await deliveryLeaseManager.AcquireAsync(
+            decoded.MailboxOwnerEd25519PublicKey, authored.RouteStateKey,
+            payloadLength, cancellationToken);
+        ProductionMailboxOwnerControlDurableDeliveryLease? durableLease = null;
+        try
+        {
+            var leaseExpiry = localLease.ExpiresAt.ToUnixTimeSeconds();
+            if (leaseExpiry <= 0)
+                throw new InvalidDataException("Delivery lease horizon is invalid.");
+            durableLease = await deliveryLeaseStore.TryAcquireDeliveryLeaseAsync(
+                decoded.MailboxOwnerEd25519PublicKey, authored.RouteStateKey,
+                authored.ActiveScope, localLease.ReservedBytes, checked((ulong)leaseExpiry),
+                cancellationToken) ?? throw new InvalidOperationException(
+                    "Durable delivery admission is exhausted.");
+            var storedKey = await state.GetOwnerControlKeyAsync(authored.RouteStateKey,
+                cancellationToken) ?? throw new InvalidDataException(
+                    "Owner-control key identity disappeared.");
+            if (!CryptographicOperations.FixedTimeEquals(storedKey.KeyId.Span,
+                    authored.OwnerControlKeyId.Span))
+                throw new InvalidDataException("Owner-control key identity changed.");
+            await using var routeSession = await stateV2.AcquireDeliverySessionAsync(
+                authored.RouteStateKey, deliveryLimits.AuthorizationReplayTimeout,
+                cancellationToken);
+            var deliveryRead = await routeSession.ReadAsync(authored.ActiveScope,
+                authored.LookupRequest, authored.Request, cancellationToken);
+            if (deliveryRead.Status != ProductionMailboxOwnerRequestStatus.Prepared ||
+                deliveryRead.Record is null || deliveryRead.Lookup is null)
+                throw new InvalidOperationException("PMCR1 v2 delivery source is unavailable.");
+            record = deliveryRead.Record;
+            var lookup = deliveryRead.Lookup;
+            var verifiedHeader = ProductionMailboxOwnerControlTransportCodec.VerifyResponseHeader(
+                record.ResponseHeader.Span, authored.Request, lookup.Anchor, Now(),
+                clockSkewSeconds);
+            byte[] batch;
+            byte[] checkpoint;
+            if (record.SourceKind == ProductionMailboxOwnerRequestV2SourceKind.History)
+            {
+                var reference = ProductionMailboxProtectedHistoryResponseReference.Restore(
+                    authored.RouteStateKey.Span,
+                    decoded.CurrentRouteHistoryCheckpointHash.Span,
+                    record.HistoryReference.Span, record.HistoryReferenceTag.Span, routeKey);
+                if (!reference.Matches(lookup))
+                    throw new InvalidDataException("PMCR1 v2 History reference changed.");
+                batch = lookup.CanonicalNextBatch.ToArray();
+                checkpoint = lookup.CanonicalNextCheckpoint.ToArray();
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                hash.AppendData(batch); hash.AppendData(checkpoint);
+                var payloadHash = hash.GetHashAndReset();
+                try
+                {
+                    if (!CryptographicOperations.FixedTimeEquals(
+                            payloadHash, reference.PayloadSha256.Span))
+                        throw new InvalidDataException("PMCR1 v2 History payload changed.");
+                }
+                finally { CryptographicOperations.ZeroMemory(payloadHash); }
+                _ = ProductionMailboxOwnerControlTransportCodec
+                    .VerifyHistoryResponseSegments(verifiedHeader, lookup.NextPlan!,
+                        record.ResponseHash, cancellationToken);
+            }
+            else
+            {
+                var verified = ProductionMailboxOwnerControlTransportCodec.VerifyResponse(
+                    record.ResponseHeader.Span, [], authored.Request, lookup.Anchor,
+                    Now(), clockSkewSeconds);
+                if (!CryptographicOperations.FixedTimeEquals(
+                        verified.CanonicalResponseHash.Span, record.ResponseHash.Span))
+                    throw new InvalidDataException("PMCR1 v2 NoChange response hash changed.");
+                batch = [];
+                checkpoint = [];
+            }
+            if (!ownerKeys.IsSigningEnabled ||
+                !await ownerKeys.IsHealthyAsync(storedKey.KeyId, cancellationToken))
+                throw new InvalidOperationException("Owner-control delivery key is unavailable.");
+            var authorized = await routeSession.AuthorizeAsync(authored.ActiveScope,
+                authored.LookupRequest, authored.Request,
+                lookup.RouteLocalSourceFingerprint, cancellationToken);
+            if (authorized.Status != ProductionMailboxOwnerRequestStatus.ExactReplay ||
+                authorized.Record is null || authorized.Record.Phase !=
+                    ProductionMailboxOwnerRequestV2Phase.DeliveryAuthorized)
+                throw new InvalidOperationException("PMCR1 v2 delivery authorization failed.");
+            record = authorized.Record;
+            if (!ownerKeys.IsSigningEnabled ||
+                !await ownerKeys.IsHealthyAsync(storedKey.KeyId, cancellationToken) ||
+                !localLease.HasRemainingWriteWindow())
+                throw new InvalidOperationException("Owner-control delivery window is unavailable.");
+            return new(record.ResponseHeader.Span, batch, checkpoint, localLease,
+                deliveryLeaseStore, durableLease.LeaseId,
+                deliveryLimits.CleanupTimeout);
+        }
+        catch
+        {
+            if (durableLease is not null)
+            {
+                using var cleanup = new CancellationTokenSource(deliveryLimits.CleanupTimeout);
+                try
+                {
+                    await deliveryLeaseStore.ReleaseDeliveryLeaseAsync(
+                        durableLease.LeaseId, cleanup.Token);
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                { }
+            }
+            await localLease.DisposeAsync();
+            throw;
+        }
+    }
 
     internal async ValueTask<byte[]> EnrollAsync(
         ReadOnlyMemory<byte> canonicalRequest, ReadOnlyMemory<byte> authenticatedOwner,

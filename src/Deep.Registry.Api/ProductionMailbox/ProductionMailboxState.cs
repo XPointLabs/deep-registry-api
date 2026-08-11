@@ -1,4 +1,5 @@
 using System.Data;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Npgsql;
 
@@ -326,11 +327,18 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
     private readonly ProductionMailboxOwnerControlStoreLimits ownerControlLimits;
 
     public InMemoryProductionMailboxStateStore(TimeProvider? timeProvider = null,
-        ProductionMailboxOwnerControlStoreLimits? ownerControlLimits = null)
+        ProductionMailboxOwnerControlStoreLimits? ownerControlLimits = null,
+        ReadOnlyMemory<byte> v2PublicationIntegrityKey = default)
     {
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.ownerControlLimits = ownerControlLimits ?? new();
         this.ownerControlLimits.Validate();
+        this.v2PublicationIntegrityKey = v2PublicationIntegrityKey.IsEmpty
+            ? RandomNumberGenerator.GetBytes(32)
+            : v2PublicationIntegrityKey.Length == 32 &&
+                v2PublicationIntegrityKey.Span.IndexOfAnyExcept((byte)0) >= 0
+                ? v2PublicationIntegrityKey.ToArray()
+                : throw new InvalidDataException("V2 publication integrity key is invalid.");
     }
 
     internal IReadOnlyList<byte[]> SnapshotOwnerRouteStateKeys() =>

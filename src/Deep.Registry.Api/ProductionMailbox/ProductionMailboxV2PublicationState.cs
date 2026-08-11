@@ -372,7 +372,7 @@ internal static class ProductionMailboxV2PhaseIntegrity
 public sealed partial class InMemoryProductionMailboxStateStore :
     IProductionMailboxV2PublicationStateStore
 {
-    private readonly byte[] v2PublicationIntegrityKey = RandomNumberGenerator.GetBytes(32);
+    private readonly byte[] v2PublicationIntegrityKey;
     private readonly Dictionary<string, MutableV2Activation> v2Activations =
         new(StringComparer.Ordinal);
 

@@ -1524,14 +1524,14 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
     }
 
     private static async ValueTask<ProductionMailboxProtectedGenesisCatalog?>
-        ReadGenesisCatalogAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        ReadGenesisCatalogAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction,
             ReadOnlyMemory<byte> routeStateKey, ReadOnlyMemory<byte> key,
             CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT octet_length(protected_payload),protected_payload,integrity_tag,plan_hash
-            FROM production_mailbox_route_genesis_v1 WHERE route_state_key=@key FOR UPDATE
-            """;
+            FROM production_mailbox_route_genesis_v1 WHERE route_state_key=@key
+            """ + (transaction is null ? string.Empty : " FOR UPDATE");
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("key", routeStateKey.ToArray());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -312,6 +312,42 @@ Injected failures after every history write and after tombstone insertion roll b
 transaction. Slice 4B1 exposes no history-refresh endpoint, PMCQ history mode, coordinator
 activation, sweep authorer or XNode publication change; those remain separate review slices.
 
+Route Continuity Slice 4B2 adds the owner-authenticated history-refresh lane without exposing raw
+history mutation. A route-locked PMHL lookup HMAC-verifies the manifest and replays the complete
+genesis-to-current chain through Protocol, retaining only the requested sealed cursor and its
+exact immutable successor plan. A request at the head is eligible for NoChange only while the
+head and route authorization remain byte-exact through DeliveryAuthorized. A request behind the
+head is bound to exactly one retained successor RHB1 and RHC1; a later append may advance the head
+but cannot change that already planned historical response. Ahead, missing, split, terminal or
+wrong-tuple requests fail before responder signing.
+
+History responses use the canonical protected PMHP1 reference (160 bytes) and a clean-break v2
+request journal. PMHP1 binds the current and next sequences, payload length and SHA-256, exact
+RHB1 hash, Protocol-domain RHC1 hash and sealed batch-plan hash. The journal persists Prepared,
+Planned, Signed and DeliveryAuthorized phases with an orthogonal terminal RCR1 tuple, preserving
+the exact shape of the prior phase. Existing v1 rows are never converted or replayed by v2: a live
+authenticated row quarantines that route until expiry, a corrupt row fails closed, and retained
+request-ID tombstones prevent post-expiry fork reuse. Protocol authors and verifies the PMCR1
+header and the full response-domain hash incrementally over separate RHB1 and RHC1 segments; no
+combined history payload is materialized.
+
+Authorization is one bounded operation. PostgreSQL obtains a cancellable dedicated physical
+connector and session advisory route lock, performs only small pin/CAS transactions around the
+full HMAC/Protocol replay, repeats RCR1, RCD1/OCR1 time, source, key identity and response checks,
+and discards the connector if unlock is ambiguous. Before authorization, Registry reserves a
+durable HMAC-protected global/per-owner/per-route weighted delivery lease for the exact header and
+payload bytes. The lease horizon covers replay, authorization, socket-write and cleanup budgets;
+it remains a terminal-GC live reference until independent bounded cleanup. Terminal collection
+and lease admission take the same route lock, so neither can pass the other's final predicate.
+
+The owner-control endpoint authenticates and rate-limits before reading the exact 344-byte PMCQ1.
+It streams the 384-byte PMCR1 header, then RHB1, then RHC1 with an exact Content-Length and bounded
+write deadline. Responses are `no-store, no-transform`, `nosniff`, explicit `identity`, and are
+excluded from ASP.NET response compression. After the response starts, cancellation, timeout or
+I/O failure aborts the connection and never emits a fallback body or second status. Slice 4B2
+still contains no final activation, promotion sweep, XNode publication mutation, PMQ or Session
+compatibility fallback.
+
 Internal reload, holder revocation, and sanitized runtime counters are under
 `/api/internal/production-mailbox`. They fail closed unless the connection has the configured
 authentication type and the exact pinned client-certificate SHA-256.
@@ -333,4 +369,4 @@ XNode fleet. A configuration mismatch fails closed during reservation; it must n
 lowering the signed reservation after planning.
 
 The exact local protocol closure is recorded in `vendor/pma/package-manifest.json`; it is built
-reproducibly from protocol commit `bb4cd70d6166b36c6a46d362c25cbc0f90583882` and is not published.
+reproducibly from protocol commit `586054ae9787a0df620c1da30b588edb89e7f7da` and is not published.

@@ -8,6 +8,26 @@
         "resolved": "6.0.4",
         "contentHash": "lkhqpF8Pu2Y7IiN7OntbsTtdbpR1syMsm2F3IgX6ootA4ffRqWL5jF7XipHuZQTdVuWG/gVAAcf8mjk8Tz0xPg=="
       },
+      "Deep.Protocol": {
+        "type": "Direct",
+        "requested": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
+        "resolved": "0.4.0-production.586054a",
+        "contentHash": "7EMXOSdXVVVWAIDsWn9KRiul5N4N2algXkMqyR5k+0jzdTFL0X9J0imGDdCrft5Ap5oXjWH4A/ZcBt2gVVyXwQ==",
+        "dependencies": {
+          "Deep.Protocol.Abstractions": "[0.4.0-production.586054a]",
+          "Deep.Protocol.Protobuf": "[0.4.0-production.586054a]",
+          "Sodium.Core": "1.4.1"
+        }
+      },
+      "Deep.Protocol.MembershipRoutes": {
+        "type": "Direct",
+        "requested": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
+        "resolved": "0.4.0-production.586054a",
+        "contentHash": "AjD7Okk8puqEL1dBb467Ki+tYxcmwflbd7/lCQnSdwqioX4qkk/hf031cvB90EvbSCs3c2ffcxY/CmNN+alkuA==",
+        "dependencies": {
+          "Deep.Protocol": "[0.4.0-production.586054a]"
+        }
+      },
       "Microsoft.AspNetCore.Mvc.Testing": {
         "type": "Direct",
         "requested": "[10.0.3, )",
@@ -46,33 +66,15 @@
         "resolved": "3.1.4",
         "contentHash": "5mj99LvCqrq3CNi06xYdyIAXOEh+5b33F2nErCzI5zWiDdLHXiPXEWFSUAF8zlIv0ZWqjZNCwHTQeAPYbF3pCg=="
       },
-      "Deep.Protocol": {
-        "type": "Transitive",
-        "resolved": "0.4.0-production.bb4cd70",
-        "contentHash": "yRHU/tDdW5HlLZiVhwn3Iqf+DBVJ4wtRy1QqDm721DZ0aFg972LtIgjJ8S5HkP5p2NhibQOPIFGg61MvNHZy5w==",
-        "dependencies": {
-          "Deep.Protocol.Abstractions": "[0.4.0-production.bb4cd70]",
-          "Deep.Protocol.Protobuf": "[0.4.0-production.bb4cd70]",
-          "Sodium.Core": "1.4.1"
-        }
-      },
       "Deep.Protocol.Abstractions": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.bb4cd70",
-        "contentHash": "NwMEI9mEH8lXbXY31sDd4hncMUsHa57jgjfO7hxeR6AtN/4frl8ZyvggeZfIuDYOnLZ+4w+Tky69zbMjNt0NTg=="
-      },
-      "Deep.Protocol.MembershipRoutes": {
-        "type": "Transitive",
-        "resolved": "0.4.0-production.bb4cd70",
-        "contentHash": "/WtL01qkkzE3yxhZgY2uXq4RH0ZUW2/Pi/hTVA1GoRFkfupxXgyx3uJoNFur6Wo+E0MHS/BQCig466yVmW3h1Q==",
-        "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.bb4cd70]"
-        }
+        "resolved": "0.4.0-production.586054a",
+        "contentHash": "1GtGIoIx5Vtlel5vDn8tUmPFbOORT41eEQsxPDdWp4RAmn7HfCffZa27DH9kwyF9u1hCBgJrqRgQZ2CfyGPT9A=="
       },
       "Deep.Protocol.Protobuf": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.bb4cd70",
-        "contentHash": "KQyzVSWphK7zSOAdKfb3Oq5525Qw6rw95HKvGbjcxHdLylTKfEJmICN84bzd9PWonjzvfkRkVbmAQB8838HT5g==",
+        "resolved": "0.4.0-production.586054a",
+        "contentHash": "DdzyuDE5h5CQx3UlpO7RuwVSvBBTtNHMWJjIsp1Dq2KToNrePE3CwRERFv1Z5BI+bznRk3SGAyB30S8gAc1S9A==",
         "dependencies": {
           "Google.Protobuf": "3.32.1"
         }
@@ -479,8 +481,8 @@
       "deep.registry.api": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.bb4cd70, 0.4.0-production.bb4cd70]",
-          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.bb4cd70, 0.4.0-production.bb4cd70]",
+          "Deep.Protocol": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
+          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
           "Npgsql": "[10.0.3, )",
           "Rebex.Elliptic.Ed25519": "[1.2.2, )",
           "Sodium.Core": "[1.4.1, )"
@@ -497,8 +499,8 @@
       "xnode.core": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.bb4cd70, 0.4.0-production.bb4cd70]",
-          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.bb4cd70, 0.4.0-production.bb4cd70]",
+          "Deep.Protocol": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
+          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
           "Microsoft.Extensions.Logging.Abstractions": "[8.0.0, )",
           "Rebex.Elliptic.Ed25519": "[1.2.2, )",
           "Sodium.Core": "[1.4.1, )"

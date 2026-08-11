@@ -7,6 +7,13 @@ using Deep.Protocol.DeepExtension.MailboxAuthority;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.MailboxTopology;
 using Deep.Registry.Api.ProductionMailbox;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.ResponseCompression;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Sodium;
 using Npgsql;
 
@@ -15,6 +22,227 @@ namespace Deep.Registry.Api.Tests;
 public sealed class ProductionMailboxOwnerControlStateTests
 {
     private const ulong Now = 1_800_000_000;
+
+    [Fact]
+    public async Task OwnerControlService_StreamsOwnedHistorySnapshotWithoutAggregatePayload()
+    {
+        var integrityKey = Bytes(201, 32);
+        var clock = new FixedClock(DateTimeOffset.FromUnixTimeSeconds(checked((long)Now + 3)));
+        var concrete = new InMemoryProductionMailboxStateStore(clock,
+            v2PublicationIntegrityKey: integrityKey);
+        var continuity = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var fixture = await ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture
+            .CreateAsync(continuity, 19, nowUnixSeconds: Now,
+                routeStateKeyFactory: (owner, route) => DeriveRouteStateKey(
+                    integrityKey, owner, route));
+        var restored = await continuity.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.NotNull(restored);
+        var request = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorOwnerDirectRequestAsync(restored.Anchor, restored.Cursor, Bytes(202, 32),
+                Now + 1, Now + 30, RequestSigner(fixture.OwnerPrivateKey));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var limits = new ProductionMailboxOwnerControlDeliveryLimits(4, 2, 1,
+            32 * 1024 * 1024, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(2));
+        var keyId = ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture.Bytes(
+            unchecked((byte)(231 + fixture.Variant)), 32);
+        var keyStore = new FixedOwnerControlKeyStore(keyId, fixture.ResponderPrivateKey);
+        var service = new ProductionMailboxOwnerControlService(continuity,
+            (IProductionMailboxOwnerControlStateStore)concrete,
+            (IProductionMailboxOwnerRequestV2StateStore)concrete,
+            (IProductionMailboxOwnerControlDeliveryLeaseStore)concrete,
+            new ProductionMailboxOwnerControlDeliveryLeaseManager(clock, limits), limits,
+            null!, new RejectingExternalSigner(), keyStore, clock, integrityKey, 0);
+
+        var authored = await service.AuthorAdvanceV2Async(request.CanonicalBytes,
+            fixture.Enrollment.Delegation.MailboxOwnerEd25519PublicKey,
+            CancellationToken.None);
+        await using var snapshot = await service.AuthorizeAndSnapshotV2Async(authored,
+            CancellationToken.None);
+
+        Assert.True(snapshot.IsHistory);
+        Assert.Equal(ProductionMailboxOwnerControlConstants.ResponseHeaderLength +
+            fixture.FirstPlan.CanonicalBatch.Length +
+            fixture.FirstPlan.NextCursor.CanonicalCheckpoint.Length, snapshot.ContentLength);
+        Assert.Equal(fixture.FirstPlan.CanonicalBatch.ToArray(),
+            snapshot.CanonicalRouteHistoryBatch.ToArray());
+        Assert.Equal(fixture.FirstPlan.NextCursor.CanonicalCheckpoint.ToArray(),
+            snapshot.CanonicalRouteHistoryCheckpoint.ToArray());
+        _ = ProductionMailboxOwnerControlTransportCodec.VerifyResponseHeader(
+            snapshot.CanonicalHeader.Span, request, restored.Anchor, Now + 3, 0);
+    }
+
+    [Fact]
+    public async Task OwnerControlEndpoint_StreamsHistoryInOrderAndBypassesGzip()
+    {
+        var integrityKey = Bytes(211, 32);
+        var clock = new FixedClock(DateTimeOffset.FromUnixTimeSeconds(checked((long)Now + 3)));
+        var concrete = new InMemoryProductionMailboxStateStore(clock,
+            v2PublicationIntegrityKey: integrityKey);
+        var continuity = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var fixture = await ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture
+            .CreateAsync(continuity, 20, nowUnixSeconds: Now,
+                routeStateKeyFactory: (owner, route) => DeriveRouteStateKey(
+                    integrityKey, owner, route));
+        var restored = await continuity.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.NotNull(restored);
+        var request = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorOwnerDirectRequestAsync(restored.Anchor, restored.Cursor, Bytes(212, 32),
+                Now + 1, Now + 30, RequestSigner(fixture.OwnerPrivateKey));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var limits = new ProductionMailboxOwnerControlDeliveryLimits(4, 2, 1,
+            32 * 1024 * 1024, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(2));
+        var keyId = ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture.Bytes(
+            unchecked((byte)(231 + fixture.Variant)), 32);
+        var service = new ProductionMailboxOwnerControlService(continuity,
+            (IProductionMailboxOwnerControlStateStore)concrete,
+            (IProductionMailboxOwnerRequestV2StateStore)concrete,
+            (IProductionMailboxOwnerControlDeliveryLeaseStore)concrete,
+            new ProductionMailboxOwnerControlDeliveryLeaseManager(clock, limits), limits,
+            null!, new RejectingExternalSigner(),
+            new FixedOwnerControlKeyStore(keyId, fixture.ResponderPrivateKey),
+            clock, integrityKey, 0);
+        var options = new ProductionMailboxOptions
+        { OwnerControlResponseWriteTimeoutSeconds = 5 };
+        var authorizer = new FixedOwnerAuthorizer(
+            fixture.Enrollment.Delegation.MailboxOwnerEd25519PublicKey.ToArray());
+        var rateGate = new ProductionMailboxOwnerControlRateGate(clock, integrityKey, 4, 60);
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddResponseCompression(compression =>
+            compression.ExcludedMimeTypes =
+                [ProductionMailboxMediaTypes.OwnerControlResponse]);
+        await using var app = builder.Build();
+        app.UseResponseCompression();
+        var abortFeature = new TrackingRequestLifetimeFeature();
+        app.Use(async (context, next) =>
+        {
+            if (context.Request.Headers.ContainsKey("X-Test-Fail-After-Header"))
+            {
+                context.Features.Set<IHttpRequestLifetimeFeature>(abortFeature);
+                context.Response.Body = new ThrowAfterBytesStream(context.Response.Body,
+                    ProductionMailboxOwnerControlConstants.ResponseHeaderLength);
+            }
+            await next();
+        });
+        app.Run(context => ProductionMailboxHostingExtensions.OwnerControlAdvanceAsync(
+            context, authorizer, rateGate, service, options,
+            context.RequestAborted).AsTask());
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/");
+        message.Headers.AcceptEncoding.ParseAdd("gzip");
+        message.Content = new ByteArrayContent(request.CanonicalBytes.ToArray());
+        message.Content.Headers.ContentType = new(
+            ProductionMailboxMediaTypes.OwnerControlRequest);
+        using var response = await client.SendAsync(message,
+            HttpCompletionOption.ResponseHeadersRead);
+        var body = await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("identity", Assert.Single(response.Content.Headers.ContentEncoding));
+        Assert.Equal("no-store, no-transform", response.Headers.CacheControl?.ToString());
+        Assert.Equal(ProductionMailboxMediaTypes.OwnerControlResponse,
+            response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(response.Content.Headers.ContentLength, body.LongLength);
+        Assert.Equal(ProductionMailboxOwnerControlConstants.ResponseHeaderLength +
+            fixture.FirstPlan.CanonicalBatch.Length +
+            fixture.FirstPlan.NextCursor.CanonicalCheckpoint.Length, body.Length);
+        Assert.Equal(fixture.FirstPlan.CanonicalBatch.ToArray(), body.AsSpan(
+            ProductionMailboxOwnerControlConstants.ResponseHeaderLength,
+            fixture.FirstPlan.CanonicalBatch.Length).ToArray());
+        Assert.Equal(fixture.FirstPlan.NextCursor.CanonicalCheckpoint.ToArray(), body.AsSpan(
+            ProductionMailboxOwnerControlConstants.ResponseHeaderLength +
+            fixture.FirstPlan.CanonicalBatch.Length).ToArray());
+
+        using var failing = new HttpRequestMessage(HttpMethod.Post, "/");
+        failing.Headers.Add("X-Test-Fail-After-Header", "1");
+        failing.Content = new ByteArrayContent(request.CanonicalBytes.ToArray());
+        failing.Content.Headers.ContentType = new(
+            ProductionMailboxMediaTypes.OwnerControlRequest);
+        using var failingResponse = await client.SendAsync(failing,
+            HttpCompletionOption.ResponseHeadersRead);
+        var partial = await failingResponse.Content.ReadAsByteArrayAsync();
+        Assert.InRange(partial.Length, 0,
+            ProductionMailboxOwnerControlConstants.ResponseHeaderLength);
+        Assert.True(abortFeature.Aborted);
+    }
+
+    [Fact]
+    public async Task DeliveryLease_WeightsBytesAndSerializesOneRoute()
+    {
+        var manager = new ProductionMailboxOwnerControlDeliveryLeaseManager(
+            TimeProvider.System, new(2, 2, 1, 20_000_000,
+                TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3),
+                TimeSpan.FromSeconds(1)));
+        var owner = Bytes(9, 32);
+        var route = Bytes(10, 32);
+        var first = await manager.AcquireAsync(owner, route, 1_000,
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerControlConstants.ResponseHeaderLength + 1_000,
+            first.ReservedBytes);
+        Assert.True(first.HasRemainingWriteWindow());
+        var secondTask = manager.AcquireAsync(owner, route, 2_000,
+            CancellationToken.None).AsTask();
+        await Task.Delay(50);
+        Assert.False(secondTask.IsCompleted);
+        await first.DisposeAsync();
+        await using var second = await secondTask;
+        Assert.Equal(ProductionMailboxOwnerControlConstants.ResponseHeaderLength + 2_000,
+            second.ReservedBytes);
+
+        using var canceled = new CancellationTokenSource();
+        var blocked = manager.AcquireAsync(owner, route, 1,
+            canceled.Token).AsTask();
+        canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => blocked);
+    }
+
+    [Fact]
+    public async Task DurableDeliveryLease_EnforcesGlobalCapacityAcrossStoreRestart()
+    {
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var limits = new ProductionMailboxOwnerControlStoreLimits(
+            MaximumDeliveryLeasesGlobal: 1, MaximumDeliveryLeasesPerOwner: 1,
+            MaximumDeliveryLeasesPerRoute: 1,
+            MaximumDeliveryLeaseBytes: 16 * 1024 * 1024);
+        var inMemory = (IProductionMailboxOwnerControlDeliveryLeaseStore)
+            new InMemoryProductionMailboxStateStore(ownerControlLimits: limits);
+        var memoryLease = await inMemory.TryAcquireDeliveryLeaseAsync(Bytes(40, 32),
+            Bytes(41, 32), Bytes(42, 32), 1_000, now + 60, CancellationToken.None);
+        Assert.NotNull(memoryLease);
+        Assert.Null(await inMemory.TryAcquireDeliveryLeaseAsync(Bytes(43, 32),
+            Bytes(44, 32), Bytes(45, 32), 1_000, now + 60, CancellationToken.None));
+        await inMemory.ReleaseDeliveryLeaseAsync(memoryLease.LeaseId,
+            CancellationToken.None);
+        Assert.NotNull(await inMemory.TryAcquireDeliveryLeaseAsync(Bytes(43, 32),
+            Bytes(44, 32), Bytes(45, 32), 1_000, now + 60, CancellationToken.None));
+
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await ProductionMailboxRouteContinuityAdvancedStateTests
+            .PostgresTestDatabase.CreateAsync(connectionString);
+        var key = Bytes(46, 32);
+        var pg = (IProductionMailboxOwnerControlDeliveryLeaseStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, key, limits);
+        var first = await pg.TryAcquireDeliveryLeaseAsync(Bytes(47, 32), Bytes(48, 32),
+            Bytes(49, 32), 2_000, now + 60, CancellationToken.None);
+        Assert.NotNull(first);
+        pg = new PostgreSqlProductionMailboxStateStore(database.ConnectionString, key, limits);
+        Assert.Null(await pg.TryAcquireDeliveryLeaseAsync(Bytes(50, 32), Bytes(51, 32),
+            Bytes(52, 32), 2_000, now + 60, CancellationToken.None));
+        await pg.ReleaseDeliveryLeaseAsync(first.LeaseId, CancellationToken.None);
+        Assert.NotNull(await pg.TryAcquireDeliveryLeaseAsync(Bytes(50, 32), Bytes(51, 32),
+            Bytes(52, 32), 2_000, now + 60, CancellationToken.None));
+    }
 
     [Fact]
     public async Task OwnerRequestV2Record_PreservesExactHistoryPhaseAndOrthogonalRevocation()
@@ -234,6 +462,25 @@ public sealed class ProductionMailboxOwnerControlStateTests
             lookupRequest, request, response.CanonicalHeader,
             response.CanonicalResponseHash, now, CancellationToken.None);
         Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, recorded.Status);
+
+        await using (var session = await state.AcquireDeliverySessionAsync(fixture.RouteKey,
+                         TimeSpan.FromSeconds(5), CancellationToken.None))
+        {
+            var contenderStore = (IProductionMailboxOwnerRequestV2StateStore)
+                new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+                    integrityKey);
+            await Assert.ThrowsAsync<TimeoutException>(() => contenderStore
+                .AcquireDeliverySessionAsync(fixture.RouteKey,
+                    TimeSpan.FromMilliseconds(150), CancellationToken.None).AsTask());
+            var read = await session.ReadAsync(Bytes(34, 32), lookupRequest, request,
+                CancellationToken.None);
+            Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, read.Status);
+            Assert.NotNull(read.Lookup);
+            var authorized = await session.AuthorizeAsync(Bytes(34, 32), lookupRequest,
+                request, read.Lookup.RouteLocalSourceFingerprint, CancellationToken.None);
+            Assert.Equal(ProductionMailboxOwnerRequestStatus.ExactReplay,
+                authorized.Status);
+        }
 
         state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
             integrityKey);
@@ -1066,5 +1313,124 @@ public sealed class ProductionMailboxOwnerControlStateTests
         return result;
     }
 
+    private static byte[] DeriveRouteStateKey(byte[] key, byte[] owner, byte[] route)
+    {
+        using var hmac = new HMACSHA256(key);
+        hmac.TransformBlock("route-state"u8.ToArray(), 0, 11, null, 0);
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)owner.Length));
+        hmac.TransformBlock(length.ToArray(), 0, 4, null, 0);
+        hmac.TransformBlock(owner, 0, owner.Length, null, 0);
+        BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)route.Length));
+        hmac.TransformBlock(length.ToArray(), 0, 4, null, 0);
+        hmac.TransformBlock(route, 0, route.Length, null, 0);
+        hmac.TransformFinalBlock([], 0, 0);
+        return hmac.Hash ?? throw new CryptographicException("Test route derivation failed.");
+    }
+
     private enum JournalPhase { Prepared, Planned, Signed, DeliveryAuthorized }
+
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class RejectingExternalSigner : IEd25519ExternalSigner
+    {
+        public ValueTask<byte[]> SignAsync(ReadOnlyMemory<byte> signingBytes,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Issuer signer is outside this test path.");
+    }
+
+    private sealed class FixedOwnerControlKeyStore(byte[] keyId, byte[] privateKey)
+        : IProductionMailboxOwnerControlKeyStore
+    {
+        public bool IsSigningEnabled => true;
+
+        public ValueTask<ProductionMailboxOwnerControlKeyHandle> CreateOrGetAsync(
+            ReadOnlyMemory<byte> idempotencyToken, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Enrollment is outside this test path.");
+
+        public ValueTask<byte[]> SignAsync(ReadOnlyMemory<byte> requestedKeyId,
+            ReadOnlyMemory<byte> signingBytes, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!CryptographicOperations.FixedTimeEquals(keyId, requestedKeyId.Span))
+                throw new InvalidOperationException("Unexpected owner-control key ID.");
+            return ValueTask.FromResult(PublicKeyAuth.SignDetached(
+                signingBytes.ToArray(), privateKey));
+        }
+
+        public ValueTask<bool> IsHealthyAsync(ReadOnlyMemory<byte> requestedKeyId,
+            CancellationToken cancellationToken) => ValueTask.FromResult(
+                CryptographicOperations.FixedTimeEquals(keyId, requestedKeyId.Span));
+
+        public ValueTask<bool> DeleteUncommittedAsync(
+            ReadOnlyMemory<byte> idempotencyToken, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+    }
+
+    private sealed class FixedOwnerAuthorizer(byte[] owner)
+        : IProductionMailboxOwnerChannelAuthorizer
+    {
+        public ValueTask<byte[]?> GetAuthenticatedOwnerAsync(HttpContext context,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<byte[]?>(owner.ToArray());
+    }
+
+    private sealed class TrackingRequestLifetimeFeature : IHttpRequestLifetimeFeature
+    {
+        private readonly CancellationTokenSource aborted = new();
+        public bool Aborted { get; private set; }
+        public CancellationToken RequestAborted
+        {
+            get => aborted.Token;
+            set { }
+        }
+
+        public void Abort()
+        {
+            Aborted = true;
+            aborted.Cancel();
+        }
+    }
+
+    private sealed class ThrowAfterBytesStream(Stream inner, long allowedBytes) : Stream
+    {
+        private long written;
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => written;
+            set => throw new NotSupportedException();
+        }
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            inner.FlushAsync(cancellationToken);
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            Write(buffer.AsSpan(offset, count));
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (written + buffer.Length > allowedBytes)
+                throw new IOException("Injected write failure after response header.");
+            inner.Write(buffer);
+            written += buffer.Length;
+        }
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            if (written + buffer.Length > allowedBytes)
+                throw new IOException("Injected write failure after response header.");
+            await inner.WriteAsync(buffer, cancellationToken);
+            written += buffer.Length;
+        }
+    }
 }
