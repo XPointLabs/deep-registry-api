@@ -290,6 +290,28 @@ an OCR key directly: only the durable leased cleanup worker may do so. PostgreSQ
 transactions enforce bounded statement, lock, and idle-in-transaction timeouts. Slice 4A contains no RHB1 history,
 final-activation, sweep authoring, XNode publication, PMQ, or V1 fallback.
 
+Route Continuity Slice 4B1 is state/catalog infrastructure only. Enrollment seeds a typed,
+domain-HMAC-protected genesis manifest and checkpoint. Each accepted RHB1 appends the exact batch
+and protected checkpoint and atomically advances the manifest plus only the route-authorization
+history substate; selection, PSS2 and publication transcript bytes remain unchanged. Every cold
+load replays the complete bounded genesis-to-head chain through Protocol
+`VerifyNextBatchForCommit` and exact protected restore contexts rather than trusting a stored head.
+Same-sequence exact-hash replay is read-only, while gaps, forks, terminal successors, mixed rows,
+split writes, cap overflow and any artifact/HMAC corruption fail closed. InMemory and PostgreSQL
+use the same per-route limits; PostgreSQL holds the canonical route advisory lock and commits the
+batch, checkpoint, manifest and route-state successor in one transaction.
+
+Terminal collection is an internal concrete-store operation, not an endpoint or background
+network workflow. It first restores the full catalog, verifies the exact owner RCR1 terminal,
+waits for authoritative database time to pass the shorter RCD1/OCR1 horizon, completes
+authenticated owner-control cleanup and proves that no route-scoped owner or V2 publication state
+is live. One transaction then writes a compact protected route tombstone and removes the complete
+route catalog, route state, genesis and enrollment aliases. The permanent tombstone is included in
+bounded accounting, blocks enrollment/history resurrection, and is never evicted as ordinary GC.
+Injected failures after every history write and after tombstone insertion roll back the entire
+transaction. Slice 4B1 exposes no history-refresh endpoint, PMCQ history mode, coordinator
+activation, sweep authorer or XNode publication change; those remain separate review slices.
+
 Internal reload, holder revocation, and sanitized runtime counters are under
 `/api/internal/production-mailbox`. They fail closed unless the connection has the configured
 authentication type and the exact pinned client-certificate SHA-256.

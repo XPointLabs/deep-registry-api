@@ -70,6 +70,139 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
     }
 
     [Fact]
+    public async Task InMemory_HistoryAppendPreservesSelectionAndPublicationBytesExactly()
+    {
+        var concrete = new InMemoryProductionMailboxStateStore();
+        var store = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var fixture = await AdvancedFixture.CreateAsync(store, 37);
+        var current = (await store.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None))!;
+        var transition = ProductionMailboxRouteContinuityStateTests.Transition(
+            current.CanonicalRouteOriginLkg.ToArray(), current.LocalCommitGeneration,
+            current.CurrentAuthorizationHash.ToArray(), current.CurrentAuthorizationSequence,
+            39);
+        var selected = CopyWithSelection(current, transition.CanonicalSuccessor.ToArray(),
+            transition.CanonicalTranscript.ToArray(), transition.TranscriptHash.ToArray());
+        var states = (Dictionary<string, ProductionMailboxRouteContinuityStateSnapshot>)
+            typeof(InMemoryProductionMailboxStateStore).GetField("routeContinuityStates",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(concrete)!;
+        states[Convert.ToHexString(fixture.RouteKey)] = selected;
+
+        var accepted = await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+            fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted, accepted.Status);
+        Assert.Equal(selected.CanonicalSelectionSuccessor.ToArray(),
+            accepted.State!.CanonicalSelectionSuccessor.ToArray());
+        Assert.Equal(selected.CanonicalTransitionTranscript.ToArray(),
+            accepted.State.CanonicalTransitionTranscript.ToArray());
+        Assert.Equal(selected.TransitionTranscriptHash.ToArray(),
+            accepted.State.TransitionTranscriptHash.ToArray());
+        Assert.Equal(fixture.FirstPlan.FinalArtifacts.CanonicalRouteCertificate.ToArray(),
+            accepted.State.CanonicalRouteCertificate.ToArray());
+        Assert.Equal(fixture.FirstPlan.FinalArtifacts.CanonicalOwnerAdvertisement.ToArray(),
+            accepted.State.CanonicalRouteAuthorization.ToArray());
+    }
+
+    [Fact]
+    public async Task InMemory_HistoryCapacityRejectsWholeAppendWithoutPartialEviction()
+    {
+        var limits = new ProductionMailboxOwnerControlStoreLimits(
+            MaximumEntriesPerRoute: 4, MaximumEntriesGlobal: 64);
+        var store = (IProductionMailboxRouteContinuityStateStore)
+            new InMemoryProductionMailboxStateStore(ownerControlLimits: limits);
+        var fixture = await AdvancedFixture.CreateAsync(store, 43);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.FirstPlan.NextCursor, fixture.SecondPlan,
+                CancellationToken.None).AsTask());
+        var durable = await store.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.Equal(1UL, durable!.History!.LastCommittedBatchSequence);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.ExactReplay,
+            (await store.CheckHistoryBatchReplayAsync(fixture.RouteKey, 1,
+                fixture.FirstPlan.CanonicalBatch, CancellationToken.None)).Status);
+    }
+
+    [Fact]
+    public async Task InMemory_TerminalRouteGcRequiresHorizonAndNoLiveRefsThenTombstones()
+    {
+        const ulong now = 1_800_000_000;
+        var clock = new MutableClock(DateTimeOffset.FromUnixTimeSeconds(checked((long)now)));
+        var concrete = new InMemoryProductionMailboxStateStore(clock);
+        var store = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var fixture = await AdvancedFixture.CreateAsync(store, 47, nowUnixSeconds: now);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedOwnerRevocationAsync(fixture.RouteKey,
+                fixture.VerifyRevocation(
+                    ProductionMailboxRouteContinuityRevocationReason.OwnerRevoked),
+                CancellationToken.None)).Status);
+        Assert.False(await concrete.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        clock.Advance(TimeSpan.FromSeconds(400));
+        await concrete.StoreLatestOwnerBundleAsync(fixture.RouteKey, new byte[] { 1 }, now,
+            CancellationToken.None);
+        Assert.False(await concrete.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        var bundles = (System.Collections.IDictionary)typeof(InMemoryProductionMailboxStateStore)
+            .GetField("ownerBundles", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(concrete)!;
+        bundles.Remove(Convert.ToHexString(fixture.RouteKey));
+
+        var manifests = (Dictionary<string, ProductionMailboxProtectedHistoryManifest>)
+            typeof(InMemoryProductionMailboxStateStore).GetField("routeHistoryManifests",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(concrete)!;
+        var routeKey = Convert.ToHexString(fixture.RouteKey);
+        var original = manifests[routeKey];
+        var corruptTag = original.IntegrityTag.ToArray(); corruptTag[0] ^= 1;
+        var ctor = typeof(ProductionMailboxProtectedHistoryManifest).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(byte[]), typeof(byte[])], null)!;
+        manifests[routeKey] = (ProductionMailboxProtectedHistoryManifest)ctor.Invoke(
+            [original.Payload.ToArray(), corruptTag]);
+        await Assert.ThrowsAsync<InvalidDataException>(() => concrete
+            .TryCollectTerminalRouteAsync(fixture.RouteKey, CancellationToken.None).AsTask());
+        var routeStates = (System.Collections.IDictionary)
+            typeof(InMemoryProductionMailboxStateStore).GetField("routeContinuityStates",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(concrete)!;
+        Assert.True(routeStates.Contains(routeKey));
+        manifests[routeKey] = original;
+
+        Assert.True(await concrete.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        Assert.Null(await store.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None));
+        Assert.Null(await store.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None));
+        var owner = (IProductionMailboxOwnerControlStateStore)concrete;
+        var replay = await owner.PrepareOwnerEnrollmentAsync(fixture.RouteKey,
+            fixture.EnrollmentRequestId, fixture.EnrollmentRequestHash,
+            fixture.GenesisPlan.CanonicalDelegationHash,
+            fixture.GenesisIntentHash, fixture.SourceArtifactClosureHash,
+            fixture.OwnerControlKeyToken, now + 401, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerEnrollmentStatus.Revoked, replay.Status);
+
+        var tombstones = (Dictionary<string, ProductionMailboxProtectedRouteTombstone>)
+            typeof(InMemoryProductionMailboxStateStore).GetField("routeHistoryTombstones",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(concrete)!;
+        var tombstone = tombstones[routeKey];
+        var badTombstoneTag = tombstone.IntegrityTag.ToArray(); badTombstoneTag[0] ^= 1;
+        var tombstoneCtor = typeof(ProductionMailboxProtectedRouteTombstone).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(byte[]), typeof(byte[])], null)!;
+        tombstones[routeKey] = (ProductionMailboxProtectedRouteTombstone)tombstoneCtor.Invoke(
+            [tombstone.Payload.ToArray(), badTombstoneTag]);
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.GetRouteContinuityStateAsync(fixture.RouteKey,
+                CancellationToken.None).AsTask());
+    }
+
+    [Fact]
     public async Task RawHistoryReplay_PreflightsBoundsBeforeAllocationOrStoreAccess()
     {
         var store = (IProductionMailboxRouteContinuityStateStore)
@@ -228,6 +361,308 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             store.GetRouteContinuityStateAsync(fixture.RouteKey, CancellationToken.None).AsTask());
     }
 
+    [Fact]
+    public async Task PostgreSql_ColdCatalogAndCurrentRouteArtifactsRejectSplitWithValidSelection()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var integrityKey = AdvancedFixture.Bytes(244, 32);
+        var store = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, integrityKey);
+        var fixture = await AdvancedFixture.CreateAsync(store, 151,
+            nowUnixSeconds: checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var durable = (await store.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None))!;
+        var transition = ProductionMailboxRouteContinuityStateTests.Transition(
+            durable.CanonicalRouteOriginLkg.ToArray(), durable.LocalCommitGeneration,
+            durable.CurrentAuthorizationHash.ToArray(), durable.CurrentAuthorizationSequence,
+            157);
+        var successor = transition.CanonicalSuccessor.ToArray();
+        var transcript = transition.CanonicalTranscript.ToArray();
+        var transcriptHash = transition.TranscriptHash.ToArray();
+
+        await using var connection = new NpgsqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await ExecuteAsync("""
+            UPDATE production_mailbox_route_continuity_v2
+            SET canonical_selection_successor=@value,
+                canonical_transition_transcript=@transcript,
+                transition_transcript_hash=@transcriptHash
+            WHERE route_state_key=@key
+            """, successor, transcript, transcriptHash);
+        var selected = await store.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.Equal(successor, selected!.CanonicalSelectionSuccessor.ToArray());
+
+        foreach (var mutation in new[]
+                 {
+                     ("canonical_route_certificate", Flip(
+                         durable.CanonicalRouteCertificate.ToArray())),
+                     ("canonical_route_authorization", Flip(
+                         durable.CanonicalRouteAuthorization.ToArray())),
+                     ("canonical_revocation_checkpoint", AdvancedFixture.Bytes(161, 320)),
+                     ("canonical_transition_context", AdvancedFixture.Bytes(163, 408))
+                 })
+        {
+            await ExecuteColumnAsync(mutation.Item1, mutation.Item2);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                store.GetRouteContinuityStateAsync(fixture.RouteKey,
+                    CancellationToken.None).AsTask());
+            var restored = mutation.Item1 switch
+            {
+                "canonical_route_certificate" => durable.CanonicalRouteCertificate.ToArray(),
+                "canonical_route_authorization" => durable.CanonicalRouteAuthorization.ToArray(),
+                "canonical_revocation_checkpoint" => [],
+                _ => []
+            };
+            await ExecuteColumnAsync(mutation.Item1, restored);
+        }
+
+        byte[] protectedBatch;
+        await using (var read = new NpgsqlCommand("""
+            SELECT protected_payload FROM production_mailbox_route_history_batch_v1
+            WHERE route_state_key=@key
+            """, connection))
+        {
+            read.Parameters.AddWithValue("key", fixture.RouteKey);
+            protectedBatch = (byte[])(await read.ExecuteScalarAsync())!;
+        }
+        await using (var corrupt = new NpgsqlCommand("""
+            UPDATE production_mailbox_route_history_batch_v1
+            SET protected_payload=@payload WHERE route_state_key=@key
+            """, connection))
+        {
+            corrupt.Parameters.AddWithValue("key", fixture.RouteKey);
+            corrupt.Parameters.AddWithValue("payload", Flip(protectedBatch));
+            Assert.Equal(1, await corrupt.ExecuteNonQueryAsync());
+        }
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.GetRouteContinuityStateAsync(fixture.RouteKey,
+                CancellationToken.None).AsTask());
+
+        async ValueTask ExecuteColumnAsync(string column, byte[] value)
+        {
+            if (column is not ("canonical_route_certificate" or
+                "canonical_route_authorization" or "canonical_revocation_checkpoint" or
+                "canonical_transition_context"))
+                throw new InvalidOperationException("Unexpected test column.");
+            await using var command = new NpgsqlCommand($"""
+                UPDATE production_mailbox_route_continuity_v2 SET {column}=@value
+                WHERE route_state_key=@key
+                """, connection);
+            command.Parameters.AddWithValue("key", fixture.RouteKey);
+            command.Parameters.AddWithValue("value", value);
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+
+        async ValueTask ExecuteAsync(string sql, byte[] value, byte[] transcriptBytes,
+            byte[] transcriptHashBytes)
+        {
+            await using var command = new NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue("key", fixture.RouteKey);
+            command.Parameters.AddWithValue("value", value);
+            command.Parameters.AddWithValue("transcript", transcriptBytes);
+            command.Parameters.AddWithValue("transcriptHash", transcriptHashBytes);
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+
+        static byte[] Flip(byte[] value)
+        {
+            value[^1] ^= 1;
+            return value;
+        }
+    }
+
+    [Fact]
+    public async Task PostgreSql_HistoryCapacityRollsBackWholeAppendAndRetainsColdHead()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var limits = new ProductionMailboxOwnerControlStoreLimits(
+            MaximumEntriesPerRoute: 4, MaximumEntriesGlobal: 64);
+        var integrityKey = AdvancedFixture.Bytes(246, 32);
+        var store = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+                integrityKey, limits);
+        var fixture = await AdvancedFixture.CreateAsync(store, 171,
+            nowUnixSeconds: checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.FirstPlan.NextCursor, fixture.SecondPlan,
+                CancellationToken.None).AsTask());
+        var restarted = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+                integrityKey, limits);
+        var durable = await restarted.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.Equal(1UL, durable!.History!.LastCommittedBatchSequence);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.ExactReplay,
+            (await restarted.CheckHistoryBatchReplayAsync(fixture.RouteKey, 1,
+                fixture.FirstPlan.CanonicalBatch, CancellationToken.None)).Status);
+    }
+
+    [Fact]
+    public async Task PostgreSql_HistoryCommitFaultsRollbackEveryDurableBoundary()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var integrityKey = AdvancedFixture.Bytes(248, 32);
+        byte[]? source = null;
+        var variant = (byte)181;
+        foreach (var point in Enum.GetValues<ProductionMailboxRouteHistoryCommitFaultPoint>()
+                     .Where(value => value != ProductionMailboxRouteHistoryCommitFaultPoint.None))
+        {
+            var concrete = new PostgreSqlProductionMailboxStateStore(
+                database.ConnectionString, integrityKey);
+            var store = (IProductionMailboxRouteContinuityStateStore)concrete;
+            var fixture = await AdvancedFixture.CreateAsync(store, variant++,
+                nowUnixSeconds: checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+                sourceArtifactClosureHash: source);
+            source ??= fixture.SourceArtifactClosureHash;
+            concrete.RouteHistoryCommitFaultPoint = point;
+            await Assert.ThrowsAsync<IOException>(() =>
+                store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                    fixture.InitialCursor, fixture.FirstPlan,
+                    CancellationToken.None).AsTask());
+            var restarted = (IProductionMailboxRouteContinuityStateStore)
+                new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+                    integrityKey);
+            var durable = await restarted.GetRouteContinuityStateAsync(fixture.RouteKey,
+                CancellationToken.None);
+            Assert.Equal(0UL, durable!.History!.LastCommittedBatchSequence);
+            await AssertHistoryRowsAsync(database.ConnectionString, fixture.RouteKey,
+                batches: 0, checkpoints: 1);
+            Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+                (await restarted.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                    fixture.InitialCursor, fixture.FirstPlan,
+                    CancellationToken.None)).Status);
+        }
+    }
+
+    [Fact]
+    public async Task PostgreSql_TerminalRouteGcRollsBackRestartsAndRejectsTamper()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var integrityKey = AdvancedFixture.Bytes(250, 32);
+        var concrete = new PostgreSqlProductionMailboxStateStore(
+            database.ConnectionString, integrityKey);
+        var store = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var fixture = await AdvancedFixture.CreateAsync(store, 201,
+            nowUnixSeconds: now, delegationLifetimeSeconds: 4);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedOwnerRevocationAsync(fixture.RouteKey,
+                fixture.VerifyRevocation(
+                    ProductionMailboxRouteContinuityRevocationReason.OwnerRevoked),
+                CancellationToken.None)).Status);
+        Assert.False(await concrete.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        await concrete.StoreLatestOwnerBundleAsync(fixture.RouteKey, new byte[] { 1 }, now,
+            CancellationToken.None);
+        Assert.False(await concrete.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        await using (var connection = new NpgsqlConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var delete = new NpgsqlCommand(
+                "DELETE FROM production_mailbox_owner_route_state WHERE route_state_key=@route",
+                connection);
+            delete.Parameters.AddWithValue("route", fixture.RouteKey);
+            Assert.Equal(1, await delete.ExecuteNonQueryAsync());
+        }
+        concrete.ThrowAfterRouteTombstoneInsertOnce = true;
+        await Assert.ThrowsAsync<IOException>(() => concrete.TryCollectTerminalRouteAsync(
+            fixture.RouteKey, CancellationToken.None).AsTask());
+        var restarted = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+            integrityKey);
+        var restartedState = (IProductionMailboxRouteContinuityStateStore)restarted;
+        Assert.NotNull(await restartedState.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None));
+        Assert.True(await restarted.TryCollectTerminalRouteAsync(fixture.RouteKey,
+            CancellationToken.None));
+        Assert.Null(await restartedState.GetRouteContinuityStateAsync(fixture.RouteKey,
+            CancellationToken.None));
+        Assert.Null(await restartedState.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None));
+        await AssertHistoryRowsAsync(database.ConnectionString, fixture.RouteKey,
+            batches: 0, checkpoints: 0, manifests: 0, tombstones: 1);
+
+        await using (var connection = new NpgsqlConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var corrupt = new NpgsqlCommand("""
+                UPDATE production_mailbox_route_history_tombstone_v1
+                SET integrity_tag=set_byte(integrity_tag,0,get_byte(integrity_tag,0)#1)
+                WHERE route_state_key=@route
+                """, connection);
+            corrupt.Parameters.AddWithValue("route", fixture.RouteKey);
+            Assert.Equal(1, await corrupt.ExecuteNonQueryAsync());
+        }
+        var corruptRestart = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, integrityKey);
+        await Assert.ThrowsAsync<InvalidDataException>(() => corruptRestart
+            .GetRouteContinuityStateAsync(fixture.RouteKey, CancellationToken.None).AsTask());
+    }
+
+    private static async ValueTask AssertHistoryRowsAsync(string connectionString,
+        byte[] route, int batches, int checkpoints, int manifests = 1, int tombstones = 0)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        foreach (var item in new[]
+                 {
+                     ("production_mailbox_route_history_manifest_v1", manifests),
+                     ("production_mailbox_route_history_batch_v1", batches),
+                     ("production_mailbox_route_history_checkpoint_v1", checkpoints),
+                     ("production_mailbox_route_history_tombstone_v1", tombstones)
+                 })
+        {
+            await using var command = new NpgsqlCommand(
+                $"SELECT count(*) FROM {item.Item1} WHERE route_state_key=@route", connection);
+            command.Parameters.AddWithValue("route", route);
+            Assert.Equal(item.Item2, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        }
+    }
+
+    private sealed class MutableClock(DateTimeOffset value) : TimeProvider
+    {
+        private DateTimeOffset current = value;
+        public override DateTimeOffset GetUtcNow() => current;
+        internal void Advance(TimeSpan delta) => current += delta;
+    }
+
+    private static ProductionMailboxRouteContinuityStateSnapshot CopyWithSelection(
+        ProductionMailboxRouteContinuityStateSnapshot current, byte[] successor,
+        byte[] transcript, byte[] transcriptHash) => new(
+            current.RouteStateKey.ToArray(), current.CanonicalRouteOriginLkg.ToArray(),
+            current.RouteOriginLkgHash.ToArray(), current.LocalCommitGeneration,
+            current.CurrentAuthorizationKind, current.CurrentAuthorizationHash.ToArray(),
+            current.CurrentAuthorizationSequence, current.CanonicalRouteCertificate.ToArray(),
+            current.CanonicalRouteAuthorization.ToArray(),
+            current.CanonicalRevocationCheckpoint.ToArray(),
+            current.CanonicalTransitionContext.ToArray(), successor, transcript, transcriptHash,
+            current.DelegationSequence, current.CanonicalDelegation.ToArray(),
+            current.CanonicalDelegationHash.ToArray(),
+            current.CanonicalDelegationAcceptance.ToArray(),
+            current.CanonicalDelegationAcceptanceHash.ToArray(),
+            current.OwnerRevocationGeneration, current.CanonicalOwnerRevocation.ToArray(),
+            current.CanonicalOwnerRevocationHash.ToArray(), current.History);
+
     internal sealed record AdvancedFixture(
         byte[] RouteKey,
         VerifiedProductionMailboxAuthority Authority,
@@ -253,7 +688,8 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         internal static async ValueTask<AdvancedFixture> CreateAsync(
             IProductionMailboxRouteContinuityStateStore store, byte variant,
             bool highCounters = false, ulong nowUnixSeconds = 1_800_000_000,
-            byte[]? sourceArtifactClosureHash = null)
+            byte[]? sourceArtifactClosureHash = null,
+            ulong delegationLifetimeSeconds = 180)
         {
             var issuer = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(20 + variant), 32));
             var mrX = PublicKeyAuth.GenerateKeyPair(Bytes((byte)(50 + variant), 32));
@@ -368,7 +804,7 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 LastActivationSequence = 16,
                 IssuedAtUnixSeconds = nowUnixSeconds - 4,
                 NotBeforeUnixSeconds = nowUnixSeconds - 3,
-                ExpiresAtUnixSeconds = nowUnixSeconds + 180,
+                ExpiresAtUnixSeconds = checked(nowUnixSeconds + delegationLifetimeSeconds),
                 OwnerSignature = new byte[64]
             }, owner.PrivateKey);
             var intent = ProductionMailboxRouteIssuerAuthoring.VerifyGenesisIntent(

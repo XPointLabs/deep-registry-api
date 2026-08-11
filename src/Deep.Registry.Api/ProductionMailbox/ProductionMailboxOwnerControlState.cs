@@ -455,6 +455,9 @@ public sealed partial class InMemoryProductionMailboxStateStore :
         try
         {
             var routeHex = Convert.ToHexString(route);
+            if (HasRouteHistoryTombstone(route))
+                return new(ProductionMailboxOwnerEnrollmentStatus.Revoked,
+                    nowUnixSeconds, null);
             publishedArtifactClosureHash ??= source.ToArray();
             if (!Fixed(publishedArtifactClosureHash, source))
                 return new(ProductionMailboxOwnerEnrollmentStatus.Conflict,
@@ -491,6 +494,7 @@ public sealed partial class InMemoryProductionMailboxStateStore :
                         v2PublicationIntegrityKey);
                     ValidateEnrollmentReplay(current, existing.PlanHash!, existing.PublicKey!,
                         existing.CanonicalResponse, verifiedCatalog, nowUnixSeconds);
+                    _ = RestoreHistoryCatalog(route, current);
                 }
                 if (mapped is null)
                 {
@@ -574,10 +578,23 @@ public sealed partial class InMemoryProductionMailboxStateStore :
                 || nowUnixSeconds < record.AcceptedAtUnixSeconds)
                 return ProductionMailboxOwnerEnrollmentStatus.Conflict;
             if (record.CanonicalResponse is not null)
+            {
+                var replayRouteHex = Convert.ToHexString(route);
+                if (!routeContinuityStates.TryGetValue(replayRouteHex, out var replayState) ||
+                    !genesisCatalogs.TryGetValue(replayRouteHex, out var replayCatalog))
+                    throw new InvalidDataException(
+                        "Completed owner enrollment durable closure is split.");
+                var verifiedCatalog = ProductionMailboxProtectedGenesisCatalog.Restore(
+                    replayCatalog.Payload, replayCatalog.IntegrityTag,
+                    v2PublicationIntegrityKey);
+                ValidateEnrollmentReplay(replayState, record.PlanHash!, record.PublicKey!,
+                    record.CanonicalResponse, verifiedCatalog, nowUnixSeconds);
+                _ = RestoreHistoryCatalog(route, replayState);
                 return Fixed(record.CanonicalResponse, response)
                     && Fixed(record.PlanHash!, plan.PlanHash.Span)
                     ? ProductionMailboxOwnerEnrollmentStatus.ExactReplay
                     : ProductionMailboxOwnerEnrollmentStatus.Conflict;
+            }
             var delegation = ProductionMailboxRouteContinuityCodec.DecodeDelegation(
                 plan.CanonicalDelegation.Span);
             var ocr = ProductionMailboxOwnerControlTransportCodec.DecodeResponderCertificate(
@@ -593,16 +610,17 @@ public sealed partial class InMemoryProductionMailboxStateStore :
                 return status == ProductionMailboxRouteContinuityCommitStatus.ExactReplay
                     ? ProductionMailboxOwnerEnrollmentStatus.Conflict
                     : ProductionMailboxOwnerEnrollmentStatus.Revoked;
+            var aliasKey = EnrollmentRequestKey(route, requestIdBytes);
+            if (!ownerEnrollmentRequestIds.TryGetValue(aliasKey, out var alias))
+                throw new InvalidDataException("Enrollment request alias disappeared.");
+            VerifyEnrollmentAliasTag(alias);
+            SeedHistoryCatalog(route, catalog, frozen.InitialHistory);
             routeContinuityStates[routeHex] = FromEnrollment(route, current, frozen);
             genesisCatalogs[routeHex] = catalog;
             record.CanonicalResponse = response;
             record.PlanHash = plan.PlanHash.ToArray();
             record.KeyId = keyId; record.PublicKey = publicKey;
             record.IntegrityTag = ComputeEnrollmentTag(record);
-            var aliasKey = EnrollmentRequestKey(route, requestIdBytes);
-            if (!ownerEnrollmentRequestIds.TryGetValue(aliasKey, out var alias))
-                throw new InvalidDataException("Enrollment request alias disappeared.");
-            VerifyEnrollmentAliasTag(alias);
             alias.RetainUntilUnixSeconds = Math.Min(
                 ProductionMailboxRouteContinuityCodec.DecodeDelegation(
                     plan.CanonicalDelegation.Span).ExpiresAtUnixSeconds,
@@ -1550,11 +1568,18 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
         await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.ReadCommitted, cancellationToken);
         await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
         await AdvisoryLockAsync(connection, transaction, route, cancellationToken);
         var dbNow = await OwnerDbNowAsync(connection, transaction, cancellationToken);
+        if (await HasRouteHistoryTombstoneAsync(connection, transaction, route,
+                cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new(ProductionMailboxOwnerEnrollmentStatus.Revoked, dbNow, null);
+        }
         var published = await EnsurePublishedArtifactClosureAsync(connection, transaction,
             source, cancellationToken);
         if (!OwnerFixed(published, source))
@@ -1676,6 +1701,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
         await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.ReadCommitted, cancellationToken);
         await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
@@ -1696,6 +1722,14 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         }
         if (record.Response is not null)
         {
+            var replayState = await ReadRouteContinuityAsync(connection, transaction, route,
+                true, cancellationToken) ?? throw new InvalidDataException(
+                    "Completed owner enrollment route state is missing.");
+            var replayCatalog = await ReadGenesisCatalogAsync(connection, transaction, route,
+                v2PreparedIntegrityKey, cancellationToken) ?? throw new InvalidDataException(
+                    "Completed owner enrollment protected catalog is missing.");
+            InMemoryProductionMailboxStateStore.ValidateEnrollmentReplay(replayState,
+                record.PlanHash!, record.PublicKey!, record.Response, replayCatalog, dbNow);
             await transaction.CommitAsync(cancellationToken);
             return OwnerFixed(record.Response, response) && OwnerFixed(record.PlanHash!,
                 plan.PlanHash.Span)
@@ -1730,10 +1764,12 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         if (await ReadGenesisCatalogAsync(connection, transaction, route,
                 v2PreparedIntegrityKey, cancellationToken) is not null)
             throw new InvalidDataException("Genesis catalog exists before enrollment commit.");
-        await UpsertRouteContinuityAsync(connection, transaction,
-            FromEnrollment(route, current, frozen), cancellationToken);
         await InsertGenesisCatalogAsync(connection, transaction, route, catalog,
             cancellationToken);
+        await InsertHistoryGenesisAsync(connection, transaction, route, catalog,
+            frozen.InitialHistory, cancellationToken);
+        await UpsertRouteContinuityAsync(connection, transaction,
+            FromEnrollment(route, current, frozen), cancellationToken);
         var completed = record with
         {
             Response = response,
@@ -2684,63 +2720,63 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
             switch (key.Kind)
             {
                 case 1:
-                {
-                    var value = await ReadOwnerEnrollmentAsync(connection, transaction,
-                        key.Route, key.Key, cancellationToken)
-                        ?? throw new InvalidDataException(
-                            "Owner enrollment disappeared during capacity scan.");
-                    VerifyOwnerEnrollment(value);
-                    bytes = checked(bytes + OwnerEnrollmentAccountingBytes(value));
-                    if (value.Response is null)
                     {
-                        globalCount++;
-                        if (OwnerFixed(value.Route, route.Span)) routeCount++;
+                        var value = await ReadOwnerEnrollmentAsync(connection, transaction,
+                            key.Route, key.Key, cancellationToken)
+                            ?? throw new InvalidDataException(
+                                "Owner enrollment disappeared during capacity scan.");
+                        VerifyOwnerEnrollment(value);
+                        bytes = checked(bytes + OwnerEnrollmentAccountingBytes(value));
+                        if (value.Response is null)
+                        {
+                            globalCount++;
+                            if (OwnerFixed(value.Route, route.Span)) routeCount++;
+                        }
+                        break;
                     }
-                    break;
-                }
                 case 2:
-                {
-                    var value = await ReadOwnerRequestAsync(connection, transaction, key.Key,
-                        cancellationToken) ?? throw new InvalidDataException(
-                            "Owner request disappeared during capacity scan.");
-                    VerifyOwnerRequest(value);
-                    bytes = checked(bytes + OwnerRequestAccountingBytes(value));
-                    break;
-                }
+                    {
+                        var value = await ReadOwnerRequestAsync(connection, transaction, key.Key,
+                            cancellationToken) ?? throw new InvalidDataException(
+                                "Owner request disappeared during capacity scan.");
+                        VerifyOwnerRequest(value);
+                        bytes = checked(bytes + OwnerRequestAccountingBytes(value));
+                        break;
+                    }
                 case 3:
-                {
-                    var value = await ReadOwnerRequestAliasAsync(connection, transaction,
-                        key.Route, key.Key, cancellationToken) ?? throw new InvalidDataException(
-                            "Owner request alias disappeared during capacity scan.");
-                    VerifyOwnerRequestAlias(value);
-                    bytes = checked(bytes + OwnerRequestAliasAccountingBytes(value));
-                    break;
-                }
+                    {
+                        var value = await ReadOwnerRequestAliasAsync(connection, transaction,
+                            key.Route, key.Key, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner request alias disappeared during capacity scan.");
+                        VerifyOwnerRequestAlias(value);
+                        bytes = checked(bytes + OwnerRequestAliasAccountingBytes(value));
+                        break;
+                    }
                 case 4:
-                {
-                    var value = await ReadOwnerRevocationAliasAsync(connection, transaction,
-                        key.Route, key.Key, cancellationToken) ?? throw new InvalidDataException(
-                            "Owner revocation alias disappeared during capacity scan.");
-                    VerifyOwnerRevocationAlias(value);
-                    bytes = checked(bytes + OwnerRevocationAliasAccountingBytes(value));
-                    break;
-                }
+                    {
+                        var value = await ReadOwnerRevocationAliasAsync(connection, transaction,
+                            key.Route, key.Key, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner revocation alias disappeared during capacity scan.");
+                        VerifyOwnerRevocationAlias(value);
+                        bytes = checked(bytes + OwnerRevocationAliasAccountingBytes(value));
+                        break;
+                    }
                 case 5:
-                {
-                    var value = await ReadOwnerEnrollmentAliasAsync(connection, transaction,
-                        key.Route, key.Key, cancellationToken) ?? throw new InvalidDataException(
-                            "Owner enrollment alias disappeared during capacity scan.");
-                    bytes = checked(bytes + OwnerEnrollmentAliasAccountingBytes(value));
-                    break;
-                }
+                    {
+                        var value = await ReadOwnerEnrollmentAliasAsync(connection, transaction,
+                            key.Route, key.Key, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner enrollment alias disappeared during capacity scan.");
+                        bytes = checked(bytes + OwnerEnrollmentAliasAccountingBytes(value));
+                        break;
+                    }
                 case 6:
-                {
-                    var value = await ReadGenesisCatalogAsync(connection, transaction, key.Route,
-                        v2PreparedIntegrityKey, cancellationToken) ?? throw new InvalidDataException(
-                            "Genesis catalog disappeared during capacity scan.");
-                    bytes = checked(bytes + OwnerGenesisAccountingBytes(value));
-                    break;
-                }
+                    {
+                        var value = await ReadGenesisCatalogAsync(connection, transaction, key.Route,
+                            v2PreparedIntegrityKey, cancellationToken) ?? throw new InvalidDataException(
+                                "Genesis catalog disappeared during capacity scan.");
+                        bytes = checked(bytes + OwnerGenesisAccountingBytes(value));
+                        break;
+                    }
                 default:
                     throw new InvalidDataException("Owner-control capacity kind is invalid.");
             }
@@ -2863,26 +2899,26 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
             switch (kind)
             {
                 case PgOwnerAliasKind.Request:
-                {
-                    var value = await ReadOwnerRequestAliasAsync(connection, transaction,
-                        key.Route, key.Id, cancellationToken) ?? throw new InvalidDataException(
-                            "Owner request alias disappeared during authenticated GC.");
-                    VerifyOwnerRequestAlias(value); retainUntil = value.RetainUntil; break;
-                }
+                    {
+                        var value = await ReadOwnerRequestAliasAsync(connection, transaction,
+                            key.Route, key.Id, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner request alias disappeared during authenticated GC.");
+                        VerifyOwnerRequestAlias(value); retainUntil = value.RetainUntil; break;
+                    }
                 case PgOwnerAliasKind.Enrollment:
-                {
-                    var value = await ReadOwnerEnrollmentAliasAsync(connection, transaction,
-                        key.Route, key.Id, cancellationToken) ?? throw new InvalidDataException(
-                            "Owner enrollment alias disappeared during authenticated GC.");
-                    retainUntil = value.RetainUntil; break;
-                }
+                    {
+                        var value = await ReadOwnerEnrollmentAliasAsync(connection, transaction,
+                            key.Route, key.Id, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner enrollment alias disappeared during authenticated GC.");
+                        retainUntil = value.RetainUntil; break;
+                    }
                 case PgOwnerAliasKind.Revocation:
-                {
-                    var value = await ReadOwnerRevocationAliasAsync(connection, transaction,
-                        key.Route, key.Id, cancellationToken) ?? throw new InvalidDataException(
-                            "Owner revocation alias disappeared during authenticated GC.");
-                    VerifyOwnerRevocationAlias(value); retainUntil = value.RetainUntil; break;
-                }
+                    {
+                        var value = await ReadOwnerRevocationAliasAsync(connection, transaction,
+                            key.Route, key.Id, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner revocation alias disappeared during authenticated GC.");
+                        VerifyOwnerRevocationAlias(value); retainUntil = value.RetainUntil; break;
+                    }
                 default: throw new InvalidOperationException("Owner alias kind is invalid.");
             }
             if (retainUntil > nowUnixSeconds) continue;

@@ -385,6 +385,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
         try
         {
             var key = Convert.ToHexString(frozenRouteStateKey);
+            if (HasRouteHistoryTombstone(frozenRouteStateKey))
+                return new(ProductionMailboxRouteContinuityCommitStatus.Terminal, null);
             routeContinuityStates.TryGetValue(key, out var current);
             var status = ValidateTransitionPredecessor(current, frozen);
             if (status != ProductionMailboxRouteContinuityCommitStatus.Accepted)
@@ -405,8 +407,15 @@ public sealed partial class InMemoryProductionMailboxStateStore
         await gate.WaitAsync(cancellationToken);
         try
         {
-            return routeContinuityStates.TryGetValue(Convert.ToHexString(frozenRouteStateKey),
-                out var value) ? Clone(value) : null;
+            if (!routeContinuityStates.TryGetValue(Convert.ToHexString(frozenRouteStateKey),
+                    out var value))
+            {
+                _ = HasRouteHistoryTombstone(frozenRouteStateKey);
+                return null;
+            }
+            if (value.History is not null && value.DelegationSequence != 0)
+                _ = RestoreHistoryCatalog(frozenRouteStateKey, value);
+            return Clone(value);
         }
         finally { gate.Release(); }
     }
@@ -605,9 +614,17 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
             expectedCanonicalOldRouteOriginLkg, transition);
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
         await AdvisoryLockAsync(connection, transaction, frozenRouteStateKey, cancellationToken);
+        if (await HasRouteHistoryTombstoneAsync(connection, transaction,
+                frozenRouteStateKey, cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new(ProductionMailboxRouteContinuityCommitStatus.Terminal, null);
+        }
         var current = await ReadRouteContinuityAsync(connection, transaction, frozenRouteStateKey,
             true, cancellationToken);
         var status = ValidateTransitionPredecessor(current, frozen);
@@ -630,8 +647,15 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         var frozenRouteStateKey = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
-        return await ReadRouteContinuityAsync(connection, null, frozenRouteStateKey, false,
-            cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
+        await AdvisoryLockAsync(connection, transaction, frozenRouteStateKey, cancellationToken);
+        var current = await ReadRouteContinuityAsync(connection, transaction,
+            frozenRouteStateKey, true, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return current;
     }
 
     async ValueTask<ProductionMailboxRestoredGenesis?>
@@ -721,10 +745,32 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         finally { routeContinuityInitializeGate.Release(); }
     }
 
-    private static async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
+    private async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
         ReadRouteContinuityAsync(
             NpgsqlConnection connection,
-            NpgsqlTransaction? transaction,
+            NpgsqlTransaction transaction,
+            ReadOnlyMemory<byte> routeStateKey,
+            bool forUpdate,
+            CancellationToken cancellationToken)
+    {
+        var result = await ReadRouteContinuityRowAsync(connection, transaction,
+            routeStateKey, forUpdate, cancellationToken);
+        if (result is null)
+        {
+            _ = await HasRouteHistoryTombstoneAsync(connection, transaction, routeStateKey,
+                cancellationToken);
+            return null;
+        }
+        if (result?.History is not null)
+            _ = await ReadHistoryCatalogAsync(connection, transaction, routeStateKey,
+                result, cancellationToken);
+        return result;
+    }
+
+    private static async ValueTask<ProductionMailboxRouteContinuityStateSnapshot?>
+        ReadRouteContinuityRowAsync(
+            NpgsqlConnection connection,
+            NpgsqlTransaction transaction,
             ReadOnlyMemory<byte> routeStateKey,
             bool forUpdate,
             CancellationToken cancellationToken)
@@ -919,7 +965,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         return BinaryPrimitives.ReadUInt64BigEndian(value);
     }
 
-    private static void ValidateStoredState(ProductionMailboxRouteContinuityStateSnapshot value)
+    internal static void ValidateStoredState(ProductionMailboxRouteContinuityStateSnapshot value)
     {
         if (value.CanonicalRouteOriginLkg.Length !=
                 ProductionMailboxRouteContinuityConstants.CanonicalRouteOriginLkgLength
@@ -967,7 +1013,51 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         }
 
         ValidateStoredOwnerRevocation(value);
-        value.History?.ValidateAgainst(value);
+        var history = value.History;
+        history?.ValidateAgainst(value);
+
+        if (history is not null && history.LastCommittedBatchSequence != 0)
+        {
+            if (!Fixed(history.CurrentRouteOriginLkgHash.Span,
+                    value.RouteOriginLkgHash.Span) ||
+                value.CanonicalRouteCertificate.Length !=
+                    ProductionMailboxRouteAdvertisementConstants.CanonicalCertificateLength ||
+                !Fixed(SHA256.HashData(value.CanonicalRouteAuthorization.Span),
+                    value.CurrentAuthorizationHash.Span))
+                throw new InvalidDataException(
+                    "Stored historical route authorization is inconsistent.");
+            _ = ProductionMailboxRouteAdvertisementCodec.DecodeCertificate(
+                value.CanonicalRouteCertificate.Span);
+            if (value.CurrentAuthorizationKind ==
+                ProductionMailboxRouteAuthorizationKind.OwnerPRA2)
+            {
+                _ = ProductionMailboxRouteAuthorizationCodec.DecodeAdvertisementV2(
+                    value.CanonicalRouteAuthorization.Span);
+                if (value.CanonicalRevocationCheckpoint.Length != 0 ||
+                    value.CanonicalTransitionContext.Length != 0)
+                    throw new InvalidDataException(
+                        "Stored historical owner authorization carries delegated artifacts.");
+            }
+            else
+            {
+                _ = ProductionMailboxRouteAuthorizationCodec.DecodeContinuityActivation(
+                    value.CanonicalRouteAuthorization.Span);
+                _ = ProductionMailboxRouteContinuityCodec.DecodeRevocationCheckpoint(
+                    value.CanonicalRevocationCheckpoint.Span);
+                _ = ProductionMailboxRouteAuthorizationCodec.DecodeTransitionContext(
+                    value.CanonicalTransitionContext.Span);
+            }
+            if (value.CanonicalSelectionSuccessor.Length != 0)
+                _ = ProductionMailboxSelectionSuccessorV2Codec.Decode(
+                    value.CanonicalSelectionSuccessor.Span);
+            if (value.CanonicalTransitionTranscript.Length == 0
+                ? value.TransitionTranscriptHash.Span.IndexOfAnyExcept((byte)0) >= 0
+                : !Fixed(SHA256.HashData(value.CanonicalTransitionTranscript.Span),
+                    value.TransitionTranscriptHash.Span))
+                throw new InvalidDataException(
+                    "Stored selection/publication transcript is inconsistent.");
+            return;
+        }
 
         var hasTransition = value.CanonicalSelectionSuccessor.Length != 0;
         if (!hasTransition)

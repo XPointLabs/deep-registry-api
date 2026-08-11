@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.DeepExtension.MailboxTopology;
 
@@ -5,6 +6,7 @@ namespace Deep.Registry.Api.ProductionMailbox;
 
 internal sealed class ProductionMailboxRouteHistoryStateSnapshot
 {
+    internal const int ProtectedEncodingLength = 860;
     private readonly byte[] canonicalCheckpoint;
     private readonly byte[] canonicalCheckpointHash;
     private readonly byte[] lastCommittedBatchHash;
@@ -78,6 +80,71 @@ internal sealed class ProductionMailboxRouteHistoryStateSnapshot
             CurrentAuthorityGeneration, currentCanonicalAuthorityHash,
             CurrentRevocationGeneration, currentRevocationHeadHash,
             currentRevocationSnapshotHash);
+
+    internal byte[] EncodeProtected()
+    {
+        var encoded = new byte[ProtectedEncodingLength];
+        "RHS1"u8.CopyTo(encoded);
+        var offset = 4;
+        Put(canonicalCheckpoint); Put(canonicalCheckpointHash);
+        BinaryPrimitives.WriteUInt64BigEndian(encoded.AsSpan(offset, 8),
+            LastCommittedBatchSequence); offset += 8;
+        Put(lastCommittedBatchHash); Put(currentRouteOriginLkgHash);
+        Put(enrollmentCanonicalDelegationHash); Put(enrollmentCanonicalAcceptanceHash);
+        Put(networkId); Put(routeDomainHash); Put(delegationHistoryBinding);
+        Put(pinnedMrXPublicKeySha256);
+        BinaryPrimitives.WriteUInt64BigEndian(encoded.AsSpan(offset, 8),
+            CurrentAuthorityGeneration); offset += 8;
+        Put(currentCanonicalAuthorityHash);
+        BinaryPrimitives.WriteUInt64BigEndian(encoded.AsSpan(offset, 8),
+            CurrentRevocationGeneration); offset += 8;
+        Put(currentRevocationHeadHash); Put(currentRevocationSnapshotHash);
+        if (offset != encoded.Length)
+            throw new InvalidDataException("Protected RHC1 encoding length is inconsistent.");
+        return encoded;
+
+        void Put(ReadOnlySpan<byte> value)
+        {
+            value.CopyTo(encoded.AsSpan(offset, value.Length));
+            offset += value.Length;
+        }
+    }
+
+    internal static ProductionMailboxRouteHistoryStateSnapshot DecodeProtected(
+        ReadOnlySpan<byte> encoded)
+    {
+        if (encoded.Length != ProtectedEncodingLength ||
+            !encoded[..4].SequenceEqual("RHS1"u8))
+            throw new InvalidDataException("Protected RHC1 encoding is invalid.");
+        var owned = encoded.ToArray();
+        var offset = 4;
+        byte[] Take(int length)
+        {
+            var value = owned.AsSpan(offset, length).ToArray();
+            offset += length;
+            return value;
+        }
+        var checkpoint = Take(ProductionMailboxRouteContinuityConstants
+            .CanonicalRouteHistoryCheckpointLength);
+        var checkpointHash = Take(32);
+        var sequence = BinaryPrimitives.ReadUInt64BigEndian(owned.AsSpan(offset, 8));
+        offset += 8;
+        var lastHash = Take(32); var rolHash = Take(32); var delegationHash = Take(32);
+        var acceptanceHash = Take(32); var network = Take(16); var route = Take(32);
+        var binding = Take(32); var mrx = Take(32);
+        var authorityGeneration = BinaryPrimitives.ReadUInt64BigEndian(
+            owned.AsSpan(offset, 8)); offset += 8;
+        var authorityHash = Take(32);
+        var revocationGeneration = BinaryPrimitives.ReadUInt64BigEndian(
+            owned.AsSpan(offset, 8)); offset += 8;
+        var revocationHead = Take(32); var revocationSnapshot = Take(32);
+        if (offset != encoded.Length)
+            throw new InvalidDataException("Protected RHC1 encoding has trailing bytes.");
+        return new(new ProductionMailboxRouteHistoryProtectedRestoreContext(
+            checkpoint, checkpointHash, sequence, lastHash, rolHash, delegationHash,
+            acceptanceHash, network, route, binding, mrx, authorityGeneration,
+            authorityHash, revocationGeneration, revocationHead, revocationSnapshot));
+    }
 
     internal bool Exact(ProductionMailboxRouteHistoryStateSnapshot other) =>
         other is not null && LastCommittedBatchSequence == other.LastCommittedBatchSequence &&
@@ -178,8 +245,15 @@ internal sealed class ProductionMailboxFrozenHistoryBatch
 
     internal required byte[] CanonicalBatch { get; init; }
     internal required byte[] CanonicalBatchHash { get; init; }
+    internal required byte[] PlanHash { get; init; }
     internal required ProductionMailboxRouteHistoryStateSnapshot ExpectedCurrent { get; init; }
     internal required ProductionMailboxRouteHistoryStateSnapshot Next { get; init; }
+    internal required ulong CumulativeVerifiedRouteLinkCount { get; init; }
+    internal required ulong CumulativeCanonicalPayloadBytes { get; init; }
+    internal required bool IsTerminal { get; init; }
+    internal required ProductionMailboxRouteHistoryDurableRouteState NextDurableRouteState
+    { get; init; }
+    internal required ProductionMailboxRouteHistoryFinalArtifacts FinalArtifacts { get; init; }
 
     internal static ProductionMailboxFrozenHistoryBatch Freeze(
         VerifiedProductionMailboxRouteHistoryCursor expectedCurrent,
@@ -215,8 +289,21 @@ internal sealed class ProductionMailboxFrozenHistoryBatch
         {
             CanonicalBatch = batch,
             CanonicalBatchHash = hash,
+            PlanHash = verifiedPlan.PlanHash.ToArray(),
             ExpectedCurrent = expected,
-            Next = plannedNext
+            Next = plannedNext,
+            CumulativeVerifiedRouteLinkCount =
+                verifiedPlan.NextCumulativeState.CumulativeVerifiedRouteLinkCount,
+            CumulativeCanonicalPayloadBytes =
+                verifiedPlan.NextCumulativeState.CumulativeCanonicalPayloadBytes,
+            IsTerminal = verifiedPlan.NextCumulativeState.CumulativeCommittedBatchCount ==
+                    ProductionMailboxRouteContinuityConstants.MaximumHistoryBatchCount ||
+                verifiedPlan.NextCumulativeState.CumulativeVerifiedRouteLinkCount ==
+                    ProductionMailboxRouteContinuityConstants.MaximumHistoryRouteLinkCount ||
+                verifiedPlan.NextCumulativeState.CumulativeCanonicalPayloadBytes ==
+                    ProductionMailboxRouteContinuityConstants.MaximumHistoryPayloadBytes,
+            NextDurableRouteState = verifiedPlan.NextDurableRouteState,
+            FinalArtifacts = verifiedPlan.FinalArtifacts
         };
     }
 
@@ -250,6 +337,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
         {
             var key = Convert.ToHexString(keyBytes);
             routeContinuityStates.TryGetValue(key, out var current);
+            if (current?.History is not null)
+                _ = RestoreHistoryCatalog(keyBytes, current);
             var status = ValidateOwnerRevocationPredecessor(current, frozen);
             if (status != ProductionMailboxRouteContinuityCommitStatus.Accepted)
                 return new(status, current is null ? null : Clone(current));
@@ -274,10 +363,19 @@ public sealed partial class InMemoryProductionMailboxStateStore
         {
             var key = Convert.ToHexString(keyBytes);
             routeContinuityStates.TryGetValue(key, out var current);
+            ProductionMailboxRestoredHistoryCatalog? restored = null;
+            if (current?.History is not null)
+                restored = RestoreHistoryCatalog(keyBytes, current);
             var status = ValidateHistoryPredecessor(current, frozen);
+            if (status == ProductionMailboxRouteContinuityCommitStatus.Accepted &&
+                restored?.Manifest.Terminal == true)
+                status = ProductionMailboxRouteContinuityCommitStatus.Terminal;
             if (status != ProductionMailboxRouteContinuityCommitStatus.Accepted)
                 return new(status, current is null ? null : Clone(current));
-            var next = FromHistory(current!, frozen.Next);
+            if (restored is null)
+                throw new InvalidDataException("Route-history genesis catalog is missing.");
+            var next = FromHistory(current!, frozen);
+            AppendHistoryCatalog(keyBytes, restored, frozen);
             routeContinuityStates[key] = next;
             return new(ProductionMailboxRouteContinuityCommitStatus.Accepted, Clone(next));
         }
@@ -297,6 +395,8 @@ public sealed partial class InMemoryProductionMailboxStateStore
         try
         {
             routeContinuityStates.TryGetValue(Convert.ToHexString(keyBytes), out var current);
+            if (current?.History is not null)
+                _ = RestoreHistoryCatalog(keyBytes, current);
             return ReplayResult(current, replay.Sequence, replay.Hash);
         }
         finally { gate.Release(); }
@@ -383,11 +483,29 @@ public sealed partial class InMemoryProductionMailboxStateStore
 
     internal static ProductionMailboxRouteContinuityStateSnapshot FromHistory(
         ProductionMailboxRouteContinuityStateSnapshot current,
-        ProductionMailboxRouteHistoryStateSnapshot history) => CopyWith(current,
-            ownerRevocationGeneration: current.OwnerRevocationGeneration,
-            canonicalOwnerRevocation: current.CanonicalOwnerRevocation.ToArray(),
-            canonicalOwnerRevocationHash: current.CanonicalOwnerRevocationHash.ToArray(),
-            history: history);
+        ProductionMailboxFrozenHistoryBatch batch)
+    {
+        var durable = batch.NextDurableRouteState;
+        var artifacts = batch.FinalArtifacts;
+        var authorization = durable.AuthorizationKind ==
+            ProductionMailboxRouteAuthorizationKind.OwnerPRA2
+            ? artifacts.CanonicalOwnerAdvertisement.ToArray()
+            : artifacts.CanonicalContinuityActivation.ToArray();
+        return new(current.RouteStateKey.ToArray(), durable.CanonicalRouteOriginLkg.ToArray(),
+            durable.CanonicalRouteOriginLkgHash.ToArray(), durable.LocalCommitGeneration,
+            durable.AuthorizationKind, durable.CanonicalAuthorizationHash.ToArray(),
+            durable.AuthorizationSequence, artifacts.CanonicalRouteCertificate.ToArray(),
+            authorization, artifacts.CanonicalRevocationCheckpoint.ToArray(),
+            artifacts.CanonicalTransitionContext.ToArray(),
+            current.CanonicalSelectionSuccessor.ToArray(),
+            current.CanonicalTransitionTranscript.ToArray(),
+            current.TransitionTranscriptHash.ToArray(), current.DelegationSequence,
+            current.CanonicalDelegation.ToArray(), current.CanonicalDelegationHash.ToArray(),
+            current.CanonicalDelegationAcceptance.ToArray(),
+            current.CanonicalDelegationAcceptanceHash.ToArray(),
+            current.OwnerRevocationGeneration, current.CanonicalOwnerRevocation.ToArray(),
+            current.CanonicalOwnerRevocationHash.ToArray(), batch.Next);
+    }
 
     internal static ProductionMailboxRouteContinuityCommitResult ReplayResult(
         ProductionMailboxRouteContinuityStateSnapshot? current, ulong sequence,
@@ -457,13 +575,40 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     {
         var key = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
         var frozen = ProductionMailboxFrozenHistoryBatch.Freeze(expectedCurrent, plan);
-        return await MutateAdvancedAsync(key, current =>
+        await using var connection = await OpenAsync(cancellationToken);
+        await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
+        await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            System.Data.IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
+        await AdvisoryLockAsync(connection, transaction, key, cancellationToken);
+        var current = await ReadRouteContinuityRowAsync(connection, transaction, key, true,
+            cancellationToken);
+        ProductionMailboxRestoredHistoryCatalog? restored = null;
+        if (current?.History is not null)
+            restored = await ReadHistoryCatalogAsync(connection, transaction, key, current,
+                cancellationToken);
+        var status = InMemoryProductionMailboxStateStore.ValidateHistoryPredecessor(
+            current, frozen);
+        if (status == ProductionMailboxRouteContinuityCommitStatus.Accepted &&
+            restored?.Manifest.Terminal == true)
+            status = ProductionMailboxRouteContinuityCommitStatus.Terminal;
+        if (status != ProductionMailboxRouteContinuityCommitStatus.Accepted)
         {
-            var status = InMemoryProductionMailboxStateStore.ValidateHistoryPredecessor(
-                current, frozen);
-            return (status, status == ProductionMailboxRouteContinuityCommitStatus.Accepted
-                ? InMemoryProductionMailboxStateStore.FromHistory(current!, frozen.Next) : current);
-        }, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new(status, current);
+        }
+        if (restored is null)
+            throw new InvalidDataException("Route-history genesis catalog is missing.");
+        var next = InMemoryProductionMailboxStateStore.FromHistory(current!, frozen);
+        await AppendHistoryCatalogAsync(connection, transaction, key, restored, frozen,
+            cancellationToken);
+        await UpsertRouteContinuityAsync(connection, transaction, next, cancellationToken);
+        ThrowRouteHistoryCommitFault(
+            ProductionMailboxRouteHistoryCommitFaultPoint.AfterRouteState);
+        await transaction.CommitAsync(cancellationToken);
+        return new(ProductionMailboxRouteContinuityCommitStatus.Accepted, next);
     }
 
     async ValueTask<ProductionMailboxRouteContinuityCommitResult>
@@ -477,8 +622,11 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
         var replay = ProductionMailboxFrozenHistoryBatch.FreezeReplay(batchSequence, canonicalBatch);
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
+        await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             System.Data.IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
         await AdvisoryLockAsync(connection, transaction, key, cancellationToken);
         var current = await ReadRouteContinuityAsync(connection, transaction, key, true,
             cancellationToken);
@@ -497,8 +645,11 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
     {
         await using var connection = await OpenAsync(cancellationToken);
         await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
+        await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             System.Data.IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
         await AdvisoryLockAsync(connection, transaction, routeStateKey, cancellationToken);
         var current = await ReadRouteContinuityAsync(connection, transaction, routeStateKey,
             true, cancellationToken);

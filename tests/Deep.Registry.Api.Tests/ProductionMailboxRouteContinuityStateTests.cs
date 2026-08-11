@@ -35,7 +35,7 @@ public sealed class ProductionMailboxRouteContinuityStateTests
                 method.Name.Contains("RouteContinuity", StringComparison.Ordinal));
     }
 
-    private static VerifiedProductionMailboxRouteSelectionTransition Transition(
+    internal static VerifiedProductionMailboxRouteSelectionTransition Transition(
         byte[] oldRol, ulong oldLocalGeneration, byte[] predecessorHash,
         ulong predecessorSequence, byte seed, bool delegated = false,
         ProductionMailboxRouteAuthorizationKind predecessorKind =
@@ -285,14 +285,14 @@ public sealed class ProductionMailboxRouteContinuityStateTests
 
     private static ProductionMailboxAuthorityEpoch Epoch(
         ulong epoch, ulong generation, byte seed, ulong from, ulong until) => new()
-    {
-        Epoch = epoch,
-        Generation = generation,
-        MembershipCommitment = Bytes(seed, 32),
-        TopologyPlacementCommitment = Bytes((byte)(seed + 1), 32),
-        NotBeforeUnixSeconds = from,
-        NotAfterUnixSeconds = until
-    };
+        {
+            Epoch = epoch,
+            Generation = generation,
+            MembershipCommitment = Bytes(seed, 32),
+            TopologyPlacementCommitment = Bytes((byte)(seed + 1), 32),
+            NotBeforeUnixSeconds = from,
+            NotAfterUnixSeconds = until
+        };
 
     [UnsafeAccessor(UnsafeAccessorKind.Constructor)]
     private static extern VerifiedProductionMailboxRouteSelectionTransition CreateTransition(
