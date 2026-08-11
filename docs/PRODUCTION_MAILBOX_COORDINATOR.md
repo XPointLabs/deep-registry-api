@@ -333,4 +333,4 @@ XNode fleet. A configuration mismatch fails closed during reservation; it must n
 lowering the signed reservation after planning.
 
 The exact local protocol closure is recorded in `vendor/pma/package-manifest.json`; it is built
-reproducibly from protocol commit `588229f6beed9266382b17ce3c8b9303e3d36b2a` and is not published.
+reproducibly from protocol commit `bb4cd70d6166b36c6a46d362c25cbc0f90583882` and is not published.
