@@ -43,6 +43,50 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         Assert.NotEqual(genesisHead.Lookup.RouteLocalSourceFingerprint.ToArray(),
             firstHistory.Lookup.RouteLocalSourceFingerprint.ToArray());
 
+        var responseReferenceKey = AdvancedFixture.Bytes(91, 32);
+        var responseReference = ProductionMailboxProtectedHistoryResponseReference.Create(
+            fixture.RouteKey, fixture.InitialCursor.CanonicalCheckpointHash.Span,
+            firstHistory.Lookup, responseReferenceKey);
+        Assert.Equal(ProductionMailboxProtectedHistoryResponseReference.CanonicalLength,
+            responseReference.CanonicalBytes.Length);
+        Assert.Equal(0UL, responseReference.CurrentBatchSequence);
+        Assert.Equal(1UL, responseReference.NextBatchSequence);
+        Assert.Equal(
+            checked((uint)(fixture.FirstPlan.CanonicalBatch.Length +
+                ProductionMailboxRouteContinuityConstants.CanonicalRouteHistoryCheckpointLength)),
+            responseReference.PayloadLength);
+        Assert.Equal(fixture.FirstPlan.CanonicalBatchHash.ToArray(),
+            responseReference.CanonicalBatchHash.ToArray());
+        Assert.Equal(fixture.FirstPlan.NextCursor.CanonicalCheckpointHash.ToArray(),
+            responseReference.CanonicalNextCheckpointHash.ToArray());
+        Assert.Equal(fixture.FirstPlan.PlanHash.ToArray(),
+            responseReference.BatchCommitPlanHash.ToArray());
+        var restoredReference = ProductionMailboxProtectedHistoryResponseReference.Restore(
+            fixture.RouteKey, fixture.InitialCursor.CanonicalCheckpointHash.Span,
+            responseReference.CanonicalBytes.Span, responseReference.IntegrityTag.Span,
+            responseReferenceKey);
+        Assert.True(responseReference.Exact(restoredReference));
+        var referenceCopy = responseReference.CanonicalBytes.ToArray();
+        referenceCopy[^1] ^= 1;
+        Assert.NotEqual(referenceCopy, responseReference.CanonicalBytes.ToArray());
+        var badTag = responseReference.IntegrityTag.ToArray();
+        badTag[0] ^= 1;
+        Assert.Throws<InvalidDataException>(() =>
+            ProductionMailboxProtectedHistoryResponseReference.Restore(
+                fixture.RouteKey, fixture.InitialCursor.CanonicalCheckpointHash.Span,
+                responseReference.CanonicalBytes.Span, badTag, responseReferenceKey));
+        foreach (var invalidCanonical in InvalidHistoryReferences(
+                     responseReference.CanonicalBytes.ToArray()))
+        {
+            var matchingTag = HistoryReferenceTag(fixture.RouteKey,
+                fixture.InitialCursor.CanonicalCheckpointHash.Span, invalidCanonical,
+                responseReferenceKey);
+            Assert.Throws<InvalidDataException>(() =>
+                ProductionMailboxProtectedHistoryResponseReference.Restore(
+                    fixture.RouteKey, fixture.InitialCursor.CanonicalCheckpointHash.Span,
+                    invalidCanonical, matchingTag, responseReferenceKey));
+        }
+
         var immutableFingerprint = firstHistory.Lookup.RouteLocalSourceFingerprint.ToArray();
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
             (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
@@ -965,6 +1009,55 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
                 delegation.AnchorRouteAuthorizationSequence),
             authorizationHash ?? (durable?.CanonicalAuthorizationHash.ToArray() ??
                 delegation.AnchorCanonicalRouteAuthorizationHash.ToArray()));
+    }
+
+    private static IReadOnlyList<byte[]> InvalidHistoryReferences(byte[] valid)
+    {
+        var result = new List<byte[]>(5);
+        var reserved = valid.ToArray();
+        reserved[6] = 1;
+        result.Add(reserved);
+
+        var sameSequence = valid.ToArray();
+        sameSequence.AsSpan(16, 8).Clear();
+        result.Add(sameSequence);
+
+        var shortPayload = valid.ToArray();
+        BinaryPrimitives.WriteUInt32BigEndian(shortPayload.AsSpan(24, 4),
+            ProductionMailboxProtectedHistoryResponseReference.MinimumPayloadLength - 1);
+        result.Add(shortPayload);
+
+        var longPayload = valid.ToArray();
+        BinaryPrimitives.WriteUInt32BigEndian(longPayload.AsSpan(24, 4),
+            ProductionMailboxProtectedHistoryResponseReference.MaximumPayloadLength + 1);
+        result.Add(longPayload);
+
+        var zeroPlanHash = valid.ToArray();
+        zeroPlanHash.AsSpan(128, 32).Clear();
+        result.Add(zeroPlanHash);
+        return result;
+    }
+
+    private static byte[] HistoryReferenceTag(ReadOnlySpan<byte> routeStateKey,
+        ReadOnlySpan<byte> currentCheckpointHash, ReadOnlySpan<byte> canonical,
+        ReadOnlySpan<byte> integrityKey)
+    {
+        var input = new byte[
+            "Deep/registry/production-mailbox/owner-control/history-response-reference/v1"u8
+                .Length + routeStateKey.Length + currentCheckpointHash.Length + canonical.Length];
+        var offset = 0;
+        Append("Deep/registry/production-mailbox/owner-control/history-response-reference/v1"u8);
+        Append(routeStateKey);
+        Append(currentCheckpointHash);
+        Append(canonical);
+        try { return HMACSHA256.HashData(integrityKey, input); }
+        finally { CryptographicOperations.ZeroMemory(input); }
+
+        void Append(ReadOnlySpan<byte> value)
+        {
+            value.CopyTo(input.AsSpan(offset));
+            offset += value.Length;
+        }
     }
 
     internal sealed record AdvancedFixture(
