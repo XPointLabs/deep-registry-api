@@ -13,6 +13,149 @@ namespace Deep.Registry.Api.Tests;
 public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
 {
     [Fact]
+    public async Task InMemory_HistoryLookupRetainsExactCursorPlanAndImmutableFingerprint()
+    {
+        var store = (IProductionMailboxRouteContinuityStateStore)
+            new InMemoryProductionMailboxStateStore();
+        var fixture = await AdvancedFixture.CreateAsync(store, 23);
+        var genesisRequest = LookupRequest(fixture, fixture.InitialCursor, null);
+
+        var genesisHead = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisRequest, CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.HeadNoChange,
+            genesisHead.Status);
+        Assert.NotNull(genesisHead.Lookup);
+        Assert.Null(genesisHead.Lookup.NextPlan);
+        Assert.Empty(genesisHead.Lookup.CanonicalNextBatch.ToArray());
+
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var firstHistory = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisRequest, CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History, firstHistory.Status);
+        Assert.Equal(fixture.FirstPlan.PlanHash.ToArray(),
+            firstHistory.Lookup!.NextPlan!.PlanHash.ToArray());
+        Assert.Equal(fixture.FirstPlan.CanonicalBatch.ToArray(),
+            firstHistory.Lookup.CanonicalNextBatch.ToArray());
+        Assert.Equal(fixture.FirstPlan.NextCursor.CanonicalCheckpoint.ToArray(),
+            firstHistory.Lookup.CanonicalNextCheckpoint.ToArray());
+        Assert.NotEqual(genesisHead.Lookup.RouteLocalSourceFingerprint.ToArray(),
+            firstHistory.Lookup.RouteLocalSourceFingerprint.ToArray());
+
+        var immutableFingerprint = firstHistory.Lookup.RouteLocalSourceFingerprint.ToArray();
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.FirstPlan.NextCursor, fixture.SecondPlan,
+                CancellationToken.None)).Status);
+        var afterLaterAppend = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisRequest, CancellationToken.None);
+        Assert.Equal(immutableFingerprint,
+            afterLaterAppend.Lookup!.RouteLocalSourceFingerprint.ToArray());
+
+        var middle = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            LookupRequest(fixture, fixture.FirstPlan.NextCursor, fixture.FirstPlan),
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History, middle.Status);
+        Assert.Equal(fixture.SecondPlan.PlanHash.ToArray(),
+            middle.Lookup!.NextPlan!.PlanHash.ToArray());
+        var head = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            LookupRequest(fixture, fixture.SecondPlan.NextCursor, fixture.SecondPlan),
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.HeadNoChange, head.Status);
+
+        var returned = afterLaterAppend.Lookup.CanonicalNextBatch.ToArray();
+        returned[^1] ^= 1;
+        Assert.Equal(fixture.FirstPlan.CanonicalBatch.ToArray(),
+            afterLaterAppend.Lookup.CanonicalNextBatch.ToArray());
+        var fingerprint = afterLaterAppend.Lookup.RouteLocalSourceFingerprint.ToArray();
+        fingerprint[0] ^= 1;
+        Assert.Equal(immutableFingerprint,
+            afterLaterAppend.Lookup.RouteLocalSourceFingerprint.ToArray());
+    }
+
+    [Fact]
+    public async Task InMemory_HistoryLookupAheadWrongTupleHighU64AndRevocationFailClosed()
+    {
+        var store = (IProductionMailboxRouteContinuityStateStore)
+            new InMemoryProductionMailboxStateStore();
+        var fixture = await AdvancedFixture.CreateAsync(store, 25);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+
+        var ahead = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            LookupRequest(fixture, fixture.FirstPlan.NextCursor, fixture.FirstPlan,
+                batchSequence: 2), CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.Ahead, ahead.Status);
+        Assert.Null(ahead.Lookup);
+
+        foreach (var wrong in new[]
+                 {
+                     LookupRequest(fixture, fixture.InitialCursor, null,
+                         checkpointHash: AdvancedFixture.Bytes(17, 32)),
+                     LookupRequest(fixture, fixture.InitialCursor, null,
+                         routeOriginHash: AdvancedFixture.Bytes(19, 32)),
+                     LookupRequest(fixture, fixture.InitialCursor, null,
+                         authorizationHash: AdvancedFixture.Bytes(21, 32)),
+                     LookupRequest(fixture, fixture.InitialCursor, null,
+                         authorizationSequence: 1UL << 63),
+                     LookupRequest(fixture, fixture.InitialCursor, null,
+                         networkId: AdvancedFixture.Bytes(27, 16)),
+                     LookupRequest(fixture, fixture.InitialCursor, null,
+                         selectionCommitment: AdvancedFixture.Bytes(29, 32))
+                 })
+        {
+            var mismatch = await store.LookupRouteHistoryAsync(fixture.RouteKey, wrong,
+                CancellationToken.None);
+            Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.PredecessorMismatch,
+                mismatch.Status);
+            Assert.Null(mismatch.Lookup);
+        }
+        Assert.Throws<InvalidDataException>(() => LookupRequest(fixture,
+            fixture.InitialCursor, null, batchSequence: ulong.MaxValue));
+
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedOwnerRevocationAsync(fixture.RouteKey,
+                fixture.VerifyRevocation(
+                    ProductionMailboxRouteContinuityRevocationReason.OwnerRevoked),
+                CancellationToken.None)).Status);
+        var revoked = await store.LookupRouteHistoryAsync(fixture.RouteKey,
+            LookupRequest(fixture, fixture.InitialCursor, null), CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.Revoked, revoked.Status);
+    }
+
+    [Fact]
+    public async Task InMemory_HistoryLookupRejectsGapAndProtectedCorruption()
+    {
+        var concrete = new InMemoryProductionMailboxStateStore();
+        var store = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var fixture = await AdvancedFixture.CreateAsync(store, 27);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await store.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var all = (Dictionary<string, SortedDictionary<ulong,
+            ProductionMailboxProtectedHistoryBatch>>)typeof(InMemoryProductionMailboxStateStore)
+            .GetField("routeHistoryBatches", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(concrete)!;
+        var rows = all[Convert.ToHexString(fixture.RouteKey)];
+        var original = rows[1]; rows.Remove(1);
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.LookupRouteHistoryAsync(
+            fixture.RouteKey, LookupRequest(fixture, fixture.InitialCursor, null),
+            CancellationToken.None).AsTask());
+        rows[1] = original;
+        var tag = original.IntegrityTag.ToArray(); tag[0] ^= 1;
+        var ctor = typeof(ProductionMailboxProtectedHistoryBatch).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(byte[]), typeof(byte[])], null)!;
+        rows[1] = (ProductionMailboxProtectedHistoryBatch)ctor.Invoke(
+            [original.Payload.ToArray(), tag]);
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.LookupRouteHistoryAsync(
+            fixture.RouteKey, LookupRequest(fixture, fixture.InitialCursor, null),
+            CancellationToken.None).AsTask());
+    }
+
+    [Fact]
     public async Task InMemory_SealedHistoryAndRevocationCas_ReplayForkAndTerminalExactly()
     {
         var store = (IProductionMailboxRouteContinuityStateStore)
@@ -241,6 +384,137 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
         gate.Release();
         var result = await pending;
         Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.ExactReplay, result.Status);
+    }
+
+    [Fact]
+    public async Task PostgreSql_HistoryLookupColdRestartAppendRaceGapAndCorruption()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var integrityKey = AdvancedFixture.Bytes(238, 32);
+        var firstStore = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, integrityKey);
+        var fixture = await AdvancedFixture.CreateAsync(firstStore, 87,
+            nowUnixSeconds: checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+        var genesisRequest = LookupRequest(fixture, fixture.InitialCursor, null);
+
+        var otherStore = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, integrityKey);
+        var lookupTask = firstStore.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisRequest, CancellationToken.None).AsTask();
+        var appendTask = otherStore.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+            fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None).AsTask();
+        await Task.WhenAll(lookupTask, appendTask);
+        var racedLookup = await lookupTask;
+        var racedAppend = await appendTask;
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            racedAppend.Status);
+        Assert.Contains(racedLookup.Status, new[]
+        {
+            ProductionMailboxRouteHistoryLookupStatus.HeadNoChange,
+            ProductionMailboxRouteHistoryLookupStatus.History
+        });
+
+        var restarted = (IProductionMailboxRouteContinuityStateStore)
+            new PostgreSqlProductionMailboxStateStore(database.ConnectionString, integrityKey);
+        var first = await restarted.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisRequest, CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History, first.Status);
+        Assert.Equal(fixture.FirstPlan.PlanHash.ToArray(),
+            first.Lookup!.NextPlan!.PlanHash.ToArray());
+        var immutableFingerprint = first.Lookup.RouteLocalSourceFingerprint.ToArray();
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await restarted.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.FirstPlan.NextCursor, fixture.SecondPlan,
+                CancellationToken.None)).Status);
+        var afterAppend = await otherStore.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisRequest, CancellationToken.None);
+        Assert.Equal(immutableFingerprint,
+            afterAppend.Lookup!.RouteLocalSourceFingerprint.ToArray());
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History,
+            (await restarted.LookupRouteHistoryAsync(fixture.RouteKey,
+                LookupRequest(fixture, fixture.FirstPlan.NextCursor, fixture.FirstPlan),
+                CancellationToken.None)).Status);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.HeadNoChange,
+            (await restarted.LookupRouteHistoryAsync(fixture.RouteKey,
+                LookupRequest(fixture, fixture.SecondPlan.NextCursor, fixture.SecondPlan),
+                CancellationToken.None)).Status);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.Ahead,
+            (await restarted.LookupRouteHistoryAsync(fixture.RouteKey,
+                LookupRequest(fixture, fixture.SecondPlan.NextCursor, fixture.SecondPlan,
+                    batchSequence: 3), CancellationToken.None)).Status);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.PredecessorMismatch,
+            (await restarted.LookupRouteHistoryAsync(fixture.RouteKey,
+                LookupRequest(fixture, fixture.InitialCursor, null,
+                    checkpointHash: AdvancedFixture.Bytes(85, 32)),
+                CancellationToken.None)).Status);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.PredecessorMismatch,
+            (await restarted.LookupRouteHistoryAsync(fixture.RouteKey,
+                LookupRequest(fixture, fixture.InitialCursor, null,
+                    authorizationSequence: (1UL << 63) + 7),
+                CancellationToken.None)).Status);
+
+        var sequence = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(sequence, 1);
+        byte[] payload; byte[] tag;
+        await using (var connection = new NpgsqlConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using (var read = new NpgsqlCommand("""
+                SELECT protected_payload,integrity_tag
+                FROM production_mailbox_route_history_batch_v1
+                WHERE route_state_key=@route AND batch_sequence=@sequence
+                """, connection))
+            {
+                read.Parameters.AddWithValue("route", fixture.RouteKey);
+                read.Parameters.AddWithValue("sequence", sequence);
+                await using var reader = await read.ExecuteReaderAsync();
+                Assert.True(await reader.ReadAsync());
+                payload = reader.GetFieldValue<byte[]>(0);
+                tag = reader.GetFieldValue<byte[]>(1);
+            }
+            await using (var delete = new NpgsqlCommand("""
+                DELETE FROM production_mailbox_route_history_batch_v1
+                WHERE route_state_key=@route AND batch_sequence=@sequence
+                """, connection))
+            {
+                delete.Parameters.AddWithValue("route", fixture.RouteKey);
+                delete.Parameters.AddWithValue("sequence", sequence);
+                Assert.Equal(1, await delete.ExecuteNonQueryAsync());
+            }
+        }
+        await Assert.ThrowsAsync<InvalidDataException>(() => restarted.LookupRouteHistoryAsync(
+            fixture.RouteKey, genesisRequest, CancellationToken.None).AsTask());
+        await using (var connection = new NpgsqlConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var insert = new NpgsqlCommand("""
+                INSERT INTO production_mailbox_route_history_batch_v1(
+                    route_state_key,batch_sequence,protected_payload,integrity_tag)
+                VALUES(@route,@sequence,@payload,@tag)
+                """, connection);
+            insert.Parameters.AddWithValue("route", fixture.RouteKey);
+            insert.Parameters.AddWithValue("sequence", sequence);
+            insert.Parameters.AddWithValue("payload", payload);
+            insert.Parameters.AddWithValue("tag", tag);
+            Assert.Equal(1, await insert.ExecuteNonQueryAsync());
+        }
+        tag[0] ^= 1;
+        await using (var connection = new NpgsqlConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var update = new NpgsqlCommand("""
+                UPDATE production_mailbox_route_history_batch_v1 SET integrity_tag=@tag
+                WHERE route_state_key=@route AND batch_sequence=@sequence
+                """, connection);
+            update.Parameters.AddWithValue("tag", tag);
+            update.Parameters.AddWithValue("route", fixture.RouteKey);
+            update.Parameters.AddWithValue("sequence", sequence);
+            Assert.Equal(1, await update.ExecuteNonQueryAsync());
+        }
+        await Assert.ThrowsAsync<InvalidDataException>(() => restarted.LookupRouteHistoryAsync(
+            fixture.RouteKey, genesisRequest, CancellationToken.None).AsTask());
     }
 
     [Fact]
@@ -662,6 +936,36 @@ public sealed class ProductionMailboxRouteContinuityAdvancedStateTests
             current.CanonicalDelegationAcceptanceHash.ToArray(),
             current.OwnerRevocationGeneration, current.CanonicalOwnerRevocation.ToArray(),
             current.CanonicalOwnerRevocationHash.ToArray(), current.History);
+
+    private static ProductionMailboxRouteHistoryLookupRequest LookupRequest(
+        AdvancedFixture fixture,
+        VerifiedProductionMailboxRouteHistoryCursor cursor,
+        ProductionMailboxRouteHistoryBatchCommitPlan? producingPlan,
+        ulong? batchSequence = null,
+        byte[]? checkpointHash = null,
+        byte[]? routeOriginHash = null,
+        ulong? authorizationSequence = null,
+        byte[]? authorizationHash = null,
+        byte[]? networkId = null,
+        byte[]? selectionCommitment = null)
+    {
+        var delegation = fixture.Enrollment.Delegation;
+        var durable = producingPlan?.NextDurableRouteState;
+        return new(
+            networkId ?? delegation.NetworkId.ToArray(),
+            delegation.MailboxOwnerEd25519PublicKey,
+            delegation.RouteDomainHash,
+            selectionCommitment ?? delegation.SelectionInputCommitment.ToArray(),
+            routeOriginHash ?? (durable?.CanonicalRouteOriginLkgHash.ToArray() ??
+                cursor.ToProtectedRestoreContext().CurrentRouteOriginLkgHash.ToArray()),
+            checkpointHash ?? cursor.CanonicalCheckpointHash.ToArray(),
+            batchSequence ?? cursor.LastCommittedBatchSequence,
+            durable?.AuthorizationKind ?? delegation.AnchorAuthorizationKind,
+            authorizationSequence ?? (durable?.AuthorizationSequence ??
+                delegation.AnchorRouteAuthorizationSequence),
+            authorizationHash ?? (durable?.CanonicalAuthorizationHash.ToArray() ??
+                delegation.AnchorCanonicalRouteAuthorizationHash.ToArray()));
+    }
 
     internal sealed record AdvancedFixture(
         byte[] RouteKey,

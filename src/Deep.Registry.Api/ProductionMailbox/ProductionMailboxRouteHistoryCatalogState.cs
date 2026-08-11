@@ -381,6 +381,129 @@ internal sealed record ProductionMailboxRestoredHistoryCatalog(
     ProductionMailboxRouteHistoryBatchCommitPlan? HeadPlan,
     ProductionMailboxRouteHistoryStateSnapshot HeadCheckpoint);
 
+internal sealed class ProductionMailboxRouteHistoryLookupRequest
+{
+    private readonly byte[] networkId;
+    private readonly byte[] mailboxOwnerEd25519PublicKey;
+    private readonly byte[] routeDomainHash;
+    private readonly byte[] selectionInputCommitment;
+    private readonly byte[] predecessorRouteOriginLkgHash;
+    private readonly byte[] currentCheckpointHash;
+    private readonly byte[] predecessorAuthorizationHash;
+
+    internal ProductionMailboxRouteHistoryLookupRequest(
+        ReadOnlyMemory<byte> networkId,
+        ReadOnlyMemory<byte> mailboxOwnerEd25519PublicKey,
+        ReadOnlyMemory<byte> routeDomainHash,
+        ReadOnlyMemory<byte> selectionInputCommitment,
+        ReadOnlyMemory<byte> predecessorRouteOriginLkgHash,
+        ReadOnlyMemory<byte> currentCheckpointHash,
+        ulong currentBatchSequence,
+        ProductionMailboxRouteAuthorizationKind expectedAuthorizationKind,
+        ulong predecessorAuthorizationSequence,
+        ReadOnlyMemory<byte> predecessorAuthorizationHash)
+    {
+        this.networkId = Exact(networkId, 16, "network ID");
+        this.mailboxOwnerEd25519PublicKey = Exact(mailboxOwnerEd25519PublicKey, 32,
+            "mailbox-owner key");
+        this.routeDomainHash = Exact(routeDomainHash, 32, "route-domain hash");
+        this.selectionInputCommitment = Exact(selectionInputCommitment, 32,
+            "selection commitment");
+        this.predecessorRouteOriginLkgHash = Exact(predecessorRouteOriginLkgHash, 32,
+            "route-origin hash");
+        this.currentCheckpointHash = Exact(currentCheckpointHash, 32,
+            "checkpoint hash");
+        this.predecessorAuthorizationHash = Exact(predecessorAuthorizationHash, 32,
+            "authorization hash");
+        if (currentBatchSequence > ProductionMailboxRouteHistoryCatalogLimits.MaximumBatches)
+            throw new InvalidDataException("Route-history lookup sequence exceeds its bound.");
+        if (expectedAuthorizationKind is not ProductionMailboxRouteAuthorizationKind.OwnerPRA2
+                and not ProductionMailboxRouteAuthorizationKind.DelegatedRCA1 ||
+            predecessorAuthorizationSequence == ulong.MaxValue)
+            throw new InvalidDataException("Route-history lookup authorization is invalid.");
+        CurrentBatchSequence = currentBatchSequence;
+        ExpectedAuthorizationKind = expectedAuthorizationKind;
+        PredecessorAuthorizationSequence = predecessorAuthorizationSequence;
+    }
+
+    internal ReadOnlyMemory<byte> NetworkId => networkId.ToArray();
+    internal ReadOnlyMemory<byte> MailboxOwnerEd25519PublicKey =>
+        mailboxOwnerEd25519PublicKey.ToArray();
+    internal ReadOnlyMemory<byte> RouteDomainHash => routeDomainHash.ToArray();
+    internal ReadOnlyMemory<byte> SelectionInputCommitment => selectionInputCommitment.ToArray();
+    internal ReadOnlyMemory<byte> PredecessorRouteOriginLkgHash =>
+        predecessorRouteOriginLkgHash.ToArray();
+    internal ReadOnlyMemory<byte> CurrentCheckpointHash => currentCheckpointHash.ToArray();
+    internal ulong CurrentBatchSequence { get; }
+    internal ProductionMailboxRouteAuthorizationKind ExpectedAuthorizationKind { get; }
+    internal ulong PredecessorAuthorizationSequence { get; }
+    internal ReadOnlyMemory<byte> PredecessorAuthorizationHash =>
+        predecessorAuthorizationHash.ToArray();
+
+    private static byte[] Exact(ReadOnlyMemory<byte> value, int length, string name)
+    {
+        if (value.Length != length || value.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new InvalidDataException($"Route-history lookup {name} is invalid.");
+        return value.ToArray();
+    }
+}
+
+internal sealed class ProductionMailboxRouteHistoryLookup
+{
+    private readonly byte[] routeLocalSourceFingerprint;
+    private readonly byte[] currentRouteOriginLkgHash;
+    private readonly byte[] currentAuthorizationHash;
+    private readonly byte[] canonicalNextBatch;
+    private readonly byte[] canonicalNextCheckpoint;
+
+    internal ProductionMailboxRouteHistoryLookup(
+        ProductionMailboxRouteHistoryLookupStatus status,
+        VerifiedProductionMailboxHistoricalRouteAnchor anchor,
+        VerifiedProductionMailboxRouteHistoryCursor cursor,
+        ProductionMailboxRouteHistoryBatchCommitPlan? nextPlan,
+        ReadOnlySpan<byte> routeLocalSourceFingerprint,
+        ReadOnlySpan<byte> currentRouteOriginLkgHash,
+        ProductionMailboxRouteAuthorizationKind currentAuthorizationKind,
+        ulong currentAuthorizationSequence,
+        ReadOnlySpan<byte> currentAuthorizationHash)
+    {
+        if (status is not ProductionMailboxRouteHistoryLookupStatus.History and
+                not ProductionMailboxRouteHistoryLookupStatus.HeadNoChange ||
+            routeLocalSourceFingerprint.Length != 32 ||
+            currentRouteOriginLkgHash.Length != 32 || currentAuthorizationHash.Length != 32 ||
+            routeLocalSourceFingerprint.IndexOfAnyExcept((byte)0) < 0 ||
+            currentRouteOriginLkgHash.IndexOfAnyExcept((byte)0) < 0 ||
+            currentAuthorizationHash.IndexOfAnyExcept((byte)0) < 0 ||
+            (status == ProductionMailboxRouteHistoryLookupStatus.History) != (nextPlan is not null))
+            throw new InvalidDataException("Route-history lookup result is inconsistent.");
+        Status = status;
+        Anchor = anchor ?? throw new ArgumentNullException(nameof(anchor));
+        Cursor = cursor ?? throw new ArgumentNullException(nameof(cursor));
+        NextPlan = nextPlan;
+        this.routeLocalSourceFingerprint = routeLocalSourceFingerprint.ToArray();
+        this.currentRouteOriginLkgHash = currentRouteOriginLkgHash.ToArray();
+        CurrentAuthorizationKind = currentAuthorizationKind;
+        CurrentAuthorizationSequence = currentAuthorizationSequence;
+        this.currentAuthorizationHash = currentAuthorizationHash.ToArray();
+        canonicalNextBatch = nextPlan?.CanonicalBatch.ToArray() ?? [];
+        canonicalNextCheckpoint = nextPlan?.NextCursor.CanonicalCheckpoint.ToArray() ?? [];
+    }
+
+    internal ProductionMailboxRouteHistoryLookupStatus Status { get; }
+    internal VerifiedProductionMailboxHistoricalRouteAnchor Anchor { get; }
+    internal VerifiedProductionMailboxRouteHistoryCursor Cursor { get; }
+    internal ProductionMailboxRouteHistoryBatchCommitPlan? NextPlan { get; }
+    internal ReadOnlyMemory<byte> RouteLocalSourceFingerprint =>
+        routeLocalSourceFingerprint.ToArray();
+    internal ReadOnlyMemory<byte> CurrentRouteOriginLkgHash =>
+        currentRouteOriginLkgHash.ToArray();
+    internal ProductionMailboxRouteAuthorizationKind CurrentAuthorizationKind { get; }
+    internal ulong CurrentAuthorizationSequence { get; }
+    internal ReadOnlyMemory<byte> CurrentAuthorizationHash => currentAuthorizationHash.ToArray();
+    internal ReadOnlyMemory<byte> CanonicalNextBatch => canonicalNextBatch.ToArray();
+    internal ReadOnlyMemory<byte> CanonicalNextCheckpoint => canonicalNextCheckpoint.ToArray();
+}
+
 internal static class ProductionMailboxRouteHistoryCatalogVerifier
 {
     internal static ProductionMailboxRestoredHistoryCatalog Restore(
@@ -391,6 +514,34 @@ internal static class ProductionMailboxRouteHistoryCatalogVerifier
         IReadOnlyDictionary<ulong, ProductionMailboxProtectedHistoryBatch> batchRows,
         IReadOnlyDictionary<ulong, ProductionMailboxProtectedHistoryCheckpoint> checkpointRows,
         ReadOnlySpan<byte> integrityKey)
+        => RestoreCore(route, current, genesisProtected, manifestProtected, batchRows,
+            checkpointRows, integrityKey, null).Catalog;
+
+    internal static ProductionMailboxRouteHistoryLookupResult Lookup(
+        ReadOnlySpan<byte> route,
+        ProductionMailboxRouteContinuityStateSnapshot current,
+        ProductionMailboxProtectedGenesisCatalog genesisProtected,
+        ProductionMailboxProtectedHistoryManifest manifestProtected,
+        IReadOnlyDictionary<ulong, ProductionMailboxProtectedHistoryBatch> batchRows,
+        IReadOnlyDictionary<ulong, ProductionMailboxProtectedHistoryCheckpoint> checkpointRows,
+        ReadOnlySpan<byte> integrityKey,
+        ProductionMailboxRouteHistoryLookupRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return RestoreCore(route, current, genesisProtected, manifestProtected, batchRows,
+            checkpointRows, integrityKey, request).Lookup ?? throw new InvalidDataException(
+                "Route-history lookup result was not materialized.");
+    }
+
+    private static RestoredWithLookup RestoreCore(
+        ReadOnlySpan<byte> route,
+        ProductionMailboxRouteContinuityStateSnapshot current,
+        ProductionMailboxProtectedGenesisCatalog genesisProtected,
+        ProductionMailboxProtectedHistoryManifest manifestProtected,
+        IReadOnlyDictionary<ulong, ProductionMailboxProtectedHistoryBatch> batchRows,
+        IReadOnlyDictionary<ulong, ProductionMailboxProtectedHistoryCheckpoint> checkpointRows,
+        ReadOnlySpan<byte> integrityKey,
+        ProductionMailboxRouteHistoryLookupRequest? request)
     {
         var genesis = ProductionMailboxProtectedGenesisCatalog.Restore(
             genesisProtected.Payload, genesisProtected.IntegrityTag, integrityKey)
@@ -415,6 +566,10 @@ internal static class ProductionMailboxRouteHistoryCatalogVerifier
         if (!genesisCheckpoint.Exact(expectedGenesis))
             throw new InvalidDataException("Route-history genesis checkpoint is split.");
         var cursor = genesis.Cursor;
+        var requestedCursor = request?.CurrentBatchSequence == 0 ? cursor : null;
+        var requestedLineage = request?.CurrentBatchSequence == 0
+            ? LookupLineage.FromGenesis(genesis) : null;
+        ProductionMailboxRouteHistoryBatchCommitPlan? requestedNextPlan = null;
         ProductionMailboxRouteHistoryBatchCommitPlan? headPlan = null;
         ulong retainedBytes = 0;
         for (ulong sequence = 1; sequence <= manifest.HeadSequence; sequence++)
@@ -441,6 +596,15 @@ internal static class ProductionMailboxRouteHistoryCatalogVerifier
             retainedBytes = checked(retainedBytes + (ulong)batch.CanonicalBatch.Length);
             cursor = verified.NextCursor;
             headPlan = verified;
+            if (request is not null && sequence == request.CurrentBatchSequence)
+            {
+                requestedCursor = cursor;
+                requestedLineage = LookupLineage.FromPlan(verified);
+            }
+            if (request is not null && request.CurrentBatchSequence <
+                    ProductionMailboxRouteHistoryCatalogLimits.MaximumBatches &&
+                sequence == request.CurrentBatchSequence + 1)
+                requestedNextPlan = verified;
         }
         var head = new ProductionMailboxRouteHistoryStateSnapshot(
             cursor.ToProtectedRestoreContext());
@@ -454,7 +618,101 @@ internal static class ProductionMailboxRouteHistoryCatalogVerifier
             throw new InvalidDataException("Route-history manifest head is inconsistent.");
         InMemoryProductionMailboxStateStore.ValidateHistoryHeadAgainstRouteState(
             current, genesis, headPlan, head);
-        return new(manifest, cursor, headPlan, head);
+        var catalog = new ProductionMailboxRestoredHistoryCatalog(
+            manifest, cursor, headPlan, head);
+        if (request is null) return new(catalog, null);
+        if (current.OwnerRevocationGeneration != 0)
+            return new(catalog, new(ProductionMailboxRouteHistoryLookupStatus.Revoked, null));
+        if (request.CurrentBatchSequence > manifest.HeadSequence)
+            return new(catalog, new(ProductionMailboxRouteHistoryLookupStatus.Ahead, null));
+        if (requestedCursor is null || requestedLineage is null)
+            throw new InvalidDataException("Route-history requested cursor was not retained.");
+        if (!LookupMatches(request, genesis, requestedCursor, requestedLineage))
+            return new(catalog, new(
+                ProductionMailboxRouteHistoryLookupStatus.PredecessorMismatch, null));
+        var status = request.CurrentBatchSequence == manifest.HeadSequence
+            ? ProductionMailboxRouteHistoryLookupStatus.HeadNoChange
+            : ProductionMailboxRouteHistoryLookupStatus.History;
+        if ((status == ProductionMailboxRouteHistoryLookupStatus.History) !=
+                (requestedNextPlan is not null))
+            throw new InvalidDataException("Route-history successor lookup is incomplete.");
+        var fingerprint = ComputeLookupFingerprint(route, genesis, manifest, request,
+            requestedLineage, requestedNextPlan, status);
+        return new(catalog, new(status, new ProductionMailboxRouteHistoryLookup(status,
+            genesis.Anchor, requestedCursor, requestedNextPlan, fingerprint,
+            requestedLineage.RouteOriginLkgHash,
+            requestedLineage.AuthorizationKind,
+            requestedLineage.AuthorizationSequence,
+            requestedLineage.AuthorizationHash)));
+    }
+
+    private static bool LookupMatches(ProductionMailboxRouteHistoryLookupRequest request,
+        ProductionMailboxRestoredGenesis genesis,
+        VerifiedProductionMailboxRouteHistoryCursor cursor,
+        LookupLineage lineage)
+    {
+        var delegation = genesis.Enrollment.Delegation;
+        return cursor.LastCommittedBatchSequence == request.CurrentBatchSequence &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                cursor.CanonicalCheckpointHash.Span, request.CurrentCheckpointHash.Span) &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                lineage.RouteOriginLkgHash, request.PredecessorRouteOriginLkgHash.Span) &&
+            lineage.AuthorizationKind == request.ExpectedAuthorizationKind &&
+            lineage.AuthorizationSequence == request.PredecessorAuthorizationSequence &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                lineage.AuthorizationHash, request.PredecessorAuthorizationHash.Span) &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                delegation.NetworkId.Span, request.NetworkId.Span) &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                delegation.MailboxOwnerEd25519PublicKey.Span,
+                request.MailboxOwnerEd25519PublicKey.Span) &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                delegation.RouteDomainHash.Span, request.RouteDomainHash.Span) &&
+            ProductionMailboxProtectedHistoryManifest.Fixed(
+                delegation.SelectionInputCommitment.Span,
+                request.SelectionInputCommitment.Span);
+    }
+
+    private static byte[] ComputeLookupFingerprint(ReadOnlySpan<byte> route,
+        ProductionMailboxRestoredGenesis genesis,
+        ProductionMailboxProtectedHistoryManifest manifest,
+        ProductionMailboxRouteHistoryLookupRequest request,
+        LookupLineage lineage,
+        ProductionMailboxRouteHistoryBatchCommitPlan? nextPlan,
+        ProductionMailboxRouteHistoryLookupStatus status)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(status == ProductionMailboxRouteHistoryLookupStatus.History
+            ? "Deep/registry/production-mailbox/route-history-lookup/history/v1"u8
+            : "Deep/registry/production-mailbox/route-history-lookup/head/v1"u8);
+        Append(route); Append(manifest.GenesisPlanHash.Span);
+        Append(genesis.Enrollment.CanonicalDelegationHash.Span);
+        Append(genesis.Enrollment.CanonicalAcceptanceHash.Span);
+        Append(request.NetworkId.Span); Append(request.MailboxOwnerEd25519PublicKey.Span);
+        Append(request.RouteDomainHash.Span); Append(request.SelectionInputCommitment.Span);
+        AppendU64(request.CurrentBatchSequence); Append(request.CurrentCheckpointHash.Span);
+        Append(lineage.RouteOriginLkgHash); hash.AppendData([(byte)lineage.AuthorizationKind]);
+        AppendU64(lineage.AuthorizationSequence); Append(lineage.AuthorizationHash);
+        if (nextPlan is not null)
+        {
+            AppendU64(nextPlan.NextCursor.LastCommittedBatchSequence);
+            Append(nextPlan.CanonicalBatchHash.Span);
+            Append(nextPlan.NextCursor.CanonicalCheckpointHash.Span);
+            Append(nextPlan.PlanHash.Span);
+        }
+        else
+        {
+            AppendU64(manifest.HeadSequence); Append(manifest.HeadCheckpointHash.Span);
+            Append(manifest.HeadBatchHash.Span);
+        }
+        return hash.GetHashAndReset();
+
+        void Append(ReadOnlySpan<byte> value) => hash.AppendData(value);
+        void AppendU64(ulong value)
+        {
+            Span<byte> encoded = stackalloc byte[8];
+            BinaryPrimitives.WriteUInt64BigEndian(encoded, value); hash.AppendData(encoded);
+        }
     }
 
     private static ProductionMailboxRouteHistoryStateSnapshot RestoreCheckpoint(
@@ -471,6 +729,49 @@ internal static class ProductionMailboxRouteHistoryCatalogVerifier
             throw new InvalidDataException("Route-history checkpoint route/sequence is split.");
         return checkpoint.Checkpoint;
     }
+
+    private sealed record RestoredWithLookup(
+        ProductionMailboxRestoredHistoryCatalog Catalog,
+        ProductionMailboxRouteHistoryLookupResult? Lookup);
+
+    private sealed class LookupLineage
+    {
+        private LookupLineage(ReadOnlySpan<byte> routeOriginLkgHash,
+            ProductionMailboxRouteAuthorizationKind authorizationKind,
+            ulong authorizationSequence, ReadOnlySpan<byte> authorizationHash)
+        {
+            RouteOriginLkgHash = routeOriginLkgHash.ToArray();
+            AuthorizationKind = authorizationKind;
+            AuthorizationSequence = authorizationSequence;
+            AuthorizationHash = authorizationHash.ToArray();
+        }
+
+        internal byte[] RouteOriginLkgHash { get; }
+        internal ProductionMailboxRouteAuthorizationKind AuthorizationKind { get; }
+        internal ulong AuthorizationSequence { get; }
+        internal byte[] AuthorizationHash { get; }
+
+        internal static LookupLineage FromGenesis(ProductionMailboxRestoredGenesis genesis)
+        {
+            var delegation = genesis.Enrollment.Delegation;
+            var hash = genesis.Cursor.ToProtectedRestoreContext()
+                .CurrentRouteOriginLkgHash.ToArray();
+            if (!ProductionMailboxProtectedHistoryManifest.Fixed(
+                    hash, genesis.Value.Fields[17]))
+                throw new InvalidDataException("Genesis route-history lineage is split.");
+            return new(hash, delegation.AnchorAuthorizationKind,
+                delegation.AnchorRouteAuthorizationSequence,
+                delegation.AnchorCanonicalRouteAuthorizationHash.Span);
+        }
+
+        internal static LookupLineage FromPlan(
+            ProductionMailboxRouteHistoryBatchCommitPlan plan)
+        {
+            var value = plan.NextDurableRouteState;
+            return new(value.CanonicalRouteOriginLkgHash.Span, value.AuthorizationKind,
+                value.AuthorizationSequence, value.CanonicalAuthorizationHash.Span);
+        }
+    }
 }
 
 public sealed partial class InMemoryProductionMailboxStateStore
@@ -483,6 +784,34 @@ public sealed partial class InMemoryProductionMailboxStateStore
         ProductionMailboxProtectedHistoryCheckpoint>> routeHistoryCheckpoints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ProductionMailboxProtectedRouteTombstone>
         routeHistoryTombstones = new(StringComparer.Ordinal);
+
+    async ValueTask<ProductionMailboxRouteHistoryLookupResult>
+        IProductionMailboxRouteContinuityStateStore.LookupRouteHistoryAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        ProductionMailboxRouteHistoryLookupRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var route = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var key = Convert.ToHexString(route);
+            if (HasRouteHistoryTombstone(route))
+                return new(ProductionMailboxRouteHistoryLookupStatus.Terminal, null);
+            if (!routeContinuityStates.TryGetValue(key, out var current))
+                return new(ProductionMailboxRouteHistoryLookupStatus.MissingState, null);
+            PostgreSqlProductionMailboxStateStore.ValidateStoredState(current);
+            if (!genesisCatalogs.TryGetValue(key, out var genesis) ||
+                !routeHistoryManifests.TryGetValue(key, out var manifest) ||
+                !routeHistoryBatches.TryGetValue(key, out var batches) ||
+                !routeHistoryCheckpoints.TryGetValue(key, out var checkpoints))
+                throw new InvalidDataException("Route-history lookup catalog is incomplete.");
+            return ProductionMailboxRouteHistoryCatalogVerifier.Lookup(route, current,
+                genesis, manifest, batches, checkpoints, v2PublicationIntegrityKey, request);
+        }
+        finally { gate.Release(); }
+    }
 
     internal async ValueTask<bool> TryCollectTerminalRouteAsync(
         ReadOnlyMemory<byte> routeStateKey, CancellationToken cancellationToken)
@@ -719,6 +1048,41 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
 {
     private readonly SemaphoreSlim routeHistoryInitializeGate = new(1, 1);
     private volatile bool routeHistoryInitialized;
+
+    async ValueTask<ProductionMailboxRouteHistoryLookupResult>
+        IProductionMailboxRouteContinuityStateStore.LookupRouteHistoryAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        ProductionMailboxRouteHistoryLookupRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var route = ProductionMailboxRouteContinuityStateGuard.FreezeKey(routeStateKey);
+        await using var connection = await OpenAsync(cancellationToken);
+        await EnsureRouteContinuitySchemaAsync(connection, cancellationToken);
+        await EnsureOwnerControlSchemaAsync(connection, cancellationToken);
+        await EnsureRouteHistorySchemaAsync(connection, cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        await ConfigureOwnerControlTransactionAsync(connection, transaction, cancellationToken);
+        await AdvisoryLockAsync(connection, transaction, route, cancellationToken);
+        if (await HasRouteHistoryTombstoneAsync(connection, transaction, route,
+                cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new(ProductionMailboxRouteHistoryLookupStatus.Terminal, null);
+        }
+        var current = await ReadRouteContinuityAsync(connection, transaction, route, true,
+            cancellationToken);
+        if (current is null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new(ProductionMailboxRouteHistoryLookupStatus.MissingState, null);
+        }
+        var result = await ReadHistoryLookupAsync(connection, transaction, route, current,
+            request, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return result;
+    }
     internal ProductionMailboxRouteHistoryCommitFaultPoint RouteHistoryCommitFaultPoint
     { get; set; }
     internal bool ThrowAfterRouteTombstoneInsertOnce { get; set; }
@@ -976,6 +1340,27 @@ public sealed partial class PostgreSqlProductionMailboxStateStore
             routeStateKey, cancellationToken);
         return ProductionMailboxRouteHistoryCatalogVerifier.Restore(routeStateKey.Span,
             current, genesis, manifest, batches, checkpoints, v2PreparedIntegrityKey);
+    }
+
+    private async ValueTask<ProductionMailboxRouteHistoryLookupResult> ReadHistoryLookupAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        ReadOnlyMemory<byte> routeStateKey,
+        ProductionMailboxRouteContinuityStateSnapshot current,
+        ProductionMailboxRouteHistoryLookupRequest request,
+        CancellationToken cancellationToken)
+    {
+        var genesis = await ReadGenesisCatalogAsync(connection, transaction, routeStateKey,
+            v2PreparedIntegrityKey, cancellationToken) ?? throw new InvalidDataException(
+                "Route-history genesis catalog is missing.");
+        var manifest = await ReadHistoryManifestAsync(connection, transaction, routeStateKey,
+            cancellationToken) ?? throw new InvalidDataException(
+                "Route-history manifest is missing.");
+        var batches = await ReadHistoryBatchesAsync(connection, transaction, routeStateKey,
+            cancellationToken);
+        var checkpoints = await ReadHistoryCheckpointsAsync(connection, transaction,
+            routeStateKey, cancellationToken);
+        return ProductionMailboxRouteHistoryCatalogVerifier.Lookup(routeStateKey.Span,
+            current, genesis, manifest, batches, checkpoints, v2PreparedIntegrityKey, request);
     }
 
     private async ValueTask<ProductionMailboxProtectedHistoryManifest?> ReadHistoryManifestAsync(

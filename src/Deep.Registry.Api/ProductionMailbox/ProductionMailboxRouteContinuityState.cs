@@ -121,6 +121,21 @@ internal sealed record ProductionMailboxRouteContinuityCommitResult(
     ProductionMailboxRouteContinuityCommitStatus Status,
     ProductionMailboxRouteContinuityStateSnapshot? State);
 
+internal enum ProductionMailboxRouteHistoryLookupStatus
+{
+    History,
+    HeadNoChange,
+    MissingState,
+    Ahead,
+    PredecessorMismatch,
+    Revoked,
+    Terminal
+}
+
+internal sealed record ProductionMailboxRouteHistoryLookupResult(
+    ProductionMailboxRouteHistoryLookupStatus Status,
+    ProductionMailboxRouteHistoryLookup? Lookup);
+
 internal interface IProductionMailboxRouteContinuityStateStore
 {
     ValueTask<ProductionMailboxRouteContinuityCommitResult> CommitVerifiedTransitionAsync(
@@ -152,6 +167,11 @@ internal interface IProductionMailboxRouteContinuityStateStore
 
     ValueTask<ProductionMailboxRestoredGenesis?> GetRestoredGenesisAsync(
         ReadOnlyMemory<byte> routeStateKey,
+        CancellationToken cancellationToken);
+
+    ValueTask<ProductionMailboxRouteHistoryLookupResult> LookupRouteHistoryAsync(
+        ReadOnlyMemory<byte> routeStateKey,
+        ProductionMailboxRouteHistoryLookupRequest request,
         CancellationToken cancellationToken);
 }
 
