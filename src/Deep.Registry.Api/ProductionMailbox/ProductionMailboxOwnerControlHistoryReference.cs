@@ -139,6 +139,37 @@ internal sealed class ProductionMailboxProtectedHistoryResponseReference
         return Fixed(canonical, other.canonical) && Fixed(integrityTag, other.integrityTag);
     }
 
+    internal bool Matches(ProductionMailboxRouteHistoryLookup lookup)
+    {
+        ArgumentNullException.ThrowIfNull(lookup);
+        if (lookup.Status != ProductionMailboxRouteHistoryLookupStatus.History ||
+            lookup.NextPlan is null ||
+            CurrentBatchSequence != lookup.Cursor.LastCommittedBatchSequence ||
+            NextBatchSequence != lookup.NextPlan.NextCursor.LastCommittedBatchSequence ||
+            !Fixed(CanonicalBatchHash.Span, lookup.NextPlan.CanonicalBatchHash.Span) ||
+            !Fixed(CanonicalNextCheckpointHash.Span,
+                lookup.NextPlan.NextCursor.CanonicalCheckpointHash.Span) ||
+            !Fixed(BatchCommitPlanHash.Span, lookup.NextPlan.PlanHash.Span))
+            return false;
+        var batch = lookup.CanonicalNextBatch.ToArray();
+        var checkpoint = lookup.CanonicalNextCheckpoint.ToArray();
+        try
+        {
+            if (checked((uint)(batch.Length + checkpoint.Length)) != PayloadLength)
+                return false;
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            hash.AppendData(batch); hash.AppendData(checkpoint);
+            var computed = hash.GetHashAndReset();
+            try { return Fixed(PayloadSha256.Span, computed); }
+            finally { CryptographicOperations.ZeroMemory(computed); }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(batch);
+            CryptographicOperations.ZeroMemory(checkpoint);
+        }
+    }
+
     private static void ValidateCanonical(ReadOnlySpan<byte> value)
     {
         if (value.Length != CanonicalLength || !value[..4].SequenceEqual(Magic) ||

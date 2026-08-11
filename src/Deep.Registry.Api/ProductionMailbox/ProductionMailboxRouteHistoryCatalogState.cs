@@ -796,21 +796,27 @@ public sealed partial class InMemoryProductionMailboxStateStore
         await gate.WaitAsync(cancellationToken);
         try
         {
-            var key = Convert.ToHexString(route);
-            if (HasRouteHistoryTombstone(route))
-                return new(ProductionMailboxRouteHistoryLookupStatus.Terminal, null);
-            if (!routeContinuityStates.TryGetValue(key, out var current))
-                return new(ProductionMailboxRouteHistoryLookupStatus.MissingState, null);
-            PostgreSqlProductionMailboxStateStore.ValidateStoredState(current);
-            if (!genesisCatalogs.TryGetValue(key, out var genesis) ||
-                !routeHistoryManifests.TryGetValue(key, out var manifest) ||
-                !routeHistoryBatches.TryGetValue(key, out var batches) ||
-                !routeHistoryCheckpoints.TryGetValue(key, out var checkpoints))
-                throw new InvalidDataException("Route-history lookup catalog is incomplete.");
-            return ProductionMailboxRouteHistoryCatalogVerifier.Lookup(route, current,
-                genesis, manifest, batches, checkpoints, v2PublicationIntegrityKey, request);
+            return LookupHistoryUnderGate(route, request);
         }
         finally { gate.Release(); }
+    }
+
+    private ProductionMailboxRouteHistoryLookupResult LookupHistoryUnderGate(
+        ReadOnlySpan<byte> route, ProductionMailboxRouteHistoryLookupRequest request)
+    {
+        var key = Convert.ToHexString(route);
+        if (HasRouteHistoryTombstone(route))
+            return new(ProductionMailboxRouteHistoryLookupStatus.Terminal, null);
+        if (!routeContinuityStates.TryGetValue(key, out var current))
+            return new(ProductionMailboxRouteHistoryLookupStatus.MissingState, null);
+        PostgreSqlProductionMailboxStateStore.ValidateStoredState(current);
+        if (!genesisCatalogs.TryGetValue(key, out var genesis) ||
+            !routeHistoryManifests.TryGetValue(key, out var manifest) ||
+            !routeHistoryBatches.TryGetValue(key, out var batches) ||
+            !routeHistoryCheckpoints.TryGetValue(key, out var checkpoints))
+            throw new InvalidDataException("Route-history lookup catalog is incomplete.");
+        return ProductionMailboxRouteHistoryCatalogVerifier.Lookup(route, current,
+            genesis, manifest, batches, checkpoints, v2PublicationIntegrityKey, request);
     }
 
     internal async ValueTask<bool> TryCollectTerminalRouteAsync(

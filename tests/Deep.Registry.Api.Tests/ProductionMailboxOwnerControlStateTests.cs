@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections;
 using System.Diagnostics;
 using System.Reflection;
+using System.Security.Cryptography;
 using Deep.Protocol.DeepExtension.MailboxAuthority;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.MailboxTopology;
@@ -14,6 +15,246 @@ namespace Deep.Registry.Api.Tests;
 public sealed class ProductionMailboxOwnerControlStateTests
 {
     private const ulong Now = 1_800_000_000;
+
+    [Fact]
+    public async Task OwnerRequestV2Record_PreservesExactHistoryPhaseAndOrthogonalRevocation()
+    {
+        var continuity = (IProductionMailboxRouteContinuityStateStore)
+            new InMemoryProductionMailboxStateStore();
+        var fixture = await ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture
+            .CreateAsync(continuity, 16, nowUnixSeconds: Now);
+        var restored = await continuity.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.NotNull(restored);
+        var request = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorOwnerDirectRequestAsync(restored.Anchor, restored.Cursor, Bytes(17, 32),
+                Now, Now + 30, RequestSigner(fixture.OwnerPrivateKey));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var delegation = fixture.Enrollment.Delegation;
+        var lookup = await continuity.LookupRouteHistoryAsync(fixture.RouteKey,
+            new ProductionMailboxRouteHistoryLookupRequest(delegation.NetworkId,
+                delegation.MailboxOwnerEd25519PublicKey, delegation.RouteDomainHash,
+                delegation.SelectionInputCommitment,
+                fixture.InitialCursor.ToProtectedRestoreContext().CurrentRouteOriginLkgHash,
+                fixture.InitialCursor.CanonicalCheckpointHash, 0,
+                delegation.AnchorAuthorizationKind,
+                delegation.AnchorRouteAuthorizationSequence,
+                delegation.AnchorCanonicalRouteAuthorizationHash), CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History, lookup.Status);
+
+        var integrityKey = Bytes(18, 32);
+        var scope = Bytes(19, 32);
+        var reference = ProductionMailboxProtectedHistoryResponseReference.Create(
+            fixture.RouteKey, fixture.InitialCursor.CanonicalCheckpointHash.Span,
+            lookup.Lookup!, integrityKey);
+        var prepared = ProductionMailboxProtectedOwnerRequestV2.CreatePrepared(
+            fixture.RouteKey, scope, request, lookup.Lookup!, reference, integrityKey);
+        Assert.Equal(ProductionMailboxOwnerRequestV2Phase.Prepared, prepared.Phase);
+        Assert.Equal(ProductionMailboxOwnerRequestV2SourceKind.History, prepared.SourceKind);
+
+        var planned = prepared.Plan(Now + 1, Now + 20, integrityKey);
+        var response = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorHistoryResponseHeaderAsync(request, restored.Anchor, fixture.FirstPlan,
+                Now + 1, Now + 20, ResponseSigner(fixture.ResponderPrivateKey));
+        var signed = planned.RecordSigned(response.CanonicalHeader.Span,
+            response.CanonicalResponseHash.Span, integrityKey);
+        var authorized = signed.AuthorizeDelivery(integrityKey);
+        Assert.Equal(ProductionMailboxOwnerRequestV2Phase.DeliveryAuthorized,
+            authorized.Phase);
+        var verifiedRevocation = fixture.VerifyRevocation(
+            ProductionMailboxRouteContinuityRevocationReason.OwnerRevoked);
+        var canonicalRevocation = verifiedRevocation.CanonicalBytes.ToArray();
+        var revocationHash = verifiedRevocation.CanonicalHash.ToArray();
+        var revoked = authorized.Revoke(canonicalRevocation, revocationHash, integrityKey);
+        Assert.True(revoked.TerminalRevoked);
+        Assert.Equal(ProductionMailboxOwnerRequestV2Phase.DeliveryAuthorized, revoked.Phase);
+        Assert.Equal(response.CanonicalHeader.ToArray(), revoked.ResponseHeader.ToArray());
+        Assert.Equal(canonicalRevocation, revoked.CanonicalTerminalRevocation.ToArray());
+
+        var restoredRecord = ProductionMailboxProtectedOwnerRequestV2.Restore(
+            revoked.RouteStateKey.Span, revoked.ActiveScope.Span,
+            revoked.CanonicalRequest.Span, revoked.RequestHash.Span, revoked.SourceKind,
+            revoked.SourceFingerprint.Span, revoked.RequestExpiresAtUnixSeconds,
+            revoked.PlannedIssuedAtUnixSeconds, revoked.PlannedExpiresAtUnixSeconds,
+            revoked.HistoryReference.Span, revoked.HistoryReferenceTag.Span,
+            revoked.ResponseHeader.Span, revoked.ResponseHash.Span, revoked.Phase,
+            revoked.CanonicalTerminalRevocation.Span, revoked.TerminalRevocationHash.Span,
+            revoked.IntegrityTag.Span, integrityKey);
+        Assert.True(revoked.Exact(restoredRecord));
+
+        var badTag = revoked.IntegrityTag.ToArray();
+        badTag[0] ^= 1;
+        Assert.Throws<InvalidDataException>(() =>
+            ProductionMailboxProtectedOwnerRequestV2.Restore(
+                revoked.RouteStateKey.Span, revoked.ActiveScope.Span,
+                revoked.CanonicalRequest.Span, revoked.RequestHash.Span, revoked.SourceKind,
+                revoked.SourceFingerprint.Span, revoked.RequestExpiresAtUnixSeconds,
+                revoked.PlannedIssuedAtUnixSeconds, revoked.PlannedExpiresAtUnixSeconds,
+                revoked.HistoryReference.Span, revoked.HistoryReferenceTag.Span,
+                revoked.ResponseHeader.Span, revoked.ResponseHash.Span, revoked.Phase,
+                revoked.CanonicalTerminalRevocation.Span,
+                revoked.TerminalRevocationHash.Span, badTag, integrityKey));
+    }
+
+    [Fact]
+    public async Task InMemoryOwnerRequestV2_HistorySurvivesLaterHeadButNoChangeDoesNot()
+    {
+        var concrete = new InMemoryProductionMailboxStateStore();
+        var continuity = (IProductionMailboxRouteContinuityStateStore)concrete;
+        var state = (IProductionMailboxOwnerRequestV2StateStore)concrete;
+        var fixture = await ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture
+            .CreateAsync(continuity, 26, nowUnixSeconds: Now);
+        var restored = await continuity.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.NotNull(restored);
+        var genesisRequest = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorOwnerDirectRequestAsync(restored.Anchor, restored.Cursor, Bytes(27, 32),
+                Now, Now + 60, RequestSigner(fixture.OwnerPrivateKey));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var genesisLookupRequest = HistoryLookupRequest(fixture, fixture.InitialCursor, null);
+        var historyLookup = await continuity.LookupRouteHistoryAsync(fixture.RouteKey,
+            genesisLookupRequest, CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History, historyLookup.Status);
+        var historyPrepared = await state.PrepareOwnerRequestV2Async(fixture.RouteKey,
+            Bytes(28, 32), genesisLookupRequest,
+            historyLookup.Lookup!.RouteLocalSourceFingerprint, genesisRequest, Now + 500,
+            Now + 1, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, historyPrepared.Status);
+        var historyPlan = await state.PlanOwnerRequestV2Async(fixture.RouteKey, Bytes(28, 32),
+            genesisLookupRequest, genesisRequest, Now + 2, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, historyPlan.Status);
+        var historyResponse = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorHistoryResponseHeaderAsync(genesisRequest, restored.Anchor,
+                fixture.FirstPlan, historyPlan.IssuedAtUnixSeconds,
+                historyPlan.ExpiresAtUnixSeconds,
+                ResponseSigner(fixture.ResponderPrivateKey));
+
+        var headRequest = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorOwnerDirectRequestAsync(restored.Anchor, fixture.FirstPlan.NextCursor,
+                Bytes(29, 32), Now + 2, Now + 60,
+                RequestSigner(fixture.OwnerPrivateKey));
+        var headLookupRequest = HistoryLookupRequest(fixture,
+            fixture.FirstPlan.NextCursor, fixture.FirstPlan);
+        var headLookup = await continuity.LookupRouteHistoryAsync(fixture.RouteKey,
+            headLookupRequest, CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.HeadNoChange, headLookup.Status);
+        var headPrepared = await state.PrepareOwnerRequestV2Async(fixture.RouteKey,
+            Bytes(30, 32), headLookupRequest, headLookup.Lookup!.RouteLocalSourceFingerprint,
+            headRequest, Now + 500, Now + 2, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, headPrepared.Status);
+
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.FirstPlan.NextCursor, fixture.SecondPlan,
+                CancellationToken.None)).Status);
+        var recorded = await state.RecordOwnerRequestV2Async(fixture.RouteKey, Bytes(28, 32),
+            genesisLookupRequest, genesisRequest, historyResponse.CanonicalHeader,
+            historyResponse.CanonicalResponseHash, Now + 3, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, recorded.Status);
+        var exactReplay = await state.PrepareOwnerRequestV2Async(fixture.RouteKey,
+            Bytes(28, 32), genesisLookupRequest,
+            historyLookup.Lookup.RouteLocalSourceFingerprint, genesisRequest, Now + 500,
+            Now + 3, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.ExactReplay, exactReplay.Status);
+        var invalidatedNoChange = await state.PlanOwnerRequestV2Async(fixture.RouteKey,
+            Bytes(30, 32), headLookupRequest, headRequest, Now + 3,
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Conflict,
+            invalidatedNoChange.Status);
+        var verifiedRevocation = fixture.VerifyRevocation(
+            ProductionMailboxRouteContinuityRevocationReason.OwnerRevoked);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await ((IProductionMailboxOwnerControlStateStore)concrete)
+                .CommitOwnerRevocationAndFenceAsync(fixture.RouteKey, Bytes(35, 16),
+                    verifiedRevocation, CancellationToken.None)).Status);
+        var fenced = await state.PrepareOwnerRequestV2Async(fixture.RouteKey,
+            Bytes(28, 32), genesisLookupRequest,
+            historyLookup.Lookup.RouteLocalSourceFingerprint, genesisRequest, Now + 500,
+            Now + 3, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Revoked, fenced.Status);
+    }
+
+    [Fact]
+    public async Task PostgreSqlOwnerRequestV2_RestartsAndRetainsImmutableHistory()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await ProductionMailboxRouteContinuityAdvancedStateTests
+            .PostgresTestDatabase.CreateAsync(connectionString);
+        var integrityKey = Bytes(31, 32);
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var first = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+            integrityKey);
+        var continuity = (IProductionMailboxRouteContinuityStateStore)first;
+        var fixture = await ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture
+            .CreateAsync(continuity, 32, nowUnixSeconds: now);
+        now = Math.Max(now, fixture.NowUnixSeconds);
+        var restored = await continuity.GetRestoredGenesisAsync(fixture.RouteKey,
+            CancellationToken.None);
+        Assert.NotNull(restored);
+        var request = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorOwnerDirectRequestAsync(restored.Anchor, restored.Cursor, Bytes(33, 32),
+                now, now + 120, RequestSigner(fixture.OwnerPrivateKey));
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.InitialCursor, fixture.FirstPlan, CancellationToken.None)).Status);
+        var lookupRequest = HistoryLookupRequest(fixture, fixture.InitialCursor, null);
+        var lookup = await continuity.LookupRouteHistoryAsync(fixture.RouteKey, lookupRequest,
+            CancellationToken.None);
+        Assert.Equal(ProductionMailboxRouteHistoryLookupStatus.History, lookup.Status);
+        var state = (IProductionMailboxOwnerRequestV2StateStore)first;
+        var prepared = await state.PrepareOwnerRequestV2Async(fixture.RouteKey,
+            Bytes(34, 32), lookupRequest, lookup.Lookup!.RouteLocalSourceFingerprint,
+            request, now + 500, now, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, prepared.Status);
+
+        state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+            integrityKey);
+        var planned = await state.PlanOwnerRequestV2Async(fixture.RouteKey, Bytes(34, 32),
+            lookupRequest, request, now, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, planned.Status);
+        var response = await ProductionMailboxOwnerControlTransportCodec
+            .AuthorHistoryResponseHeaderAsync(request, restored.Anchor, fixture.FirstPlan,
+                planned.IssuedAtUnixSeconds, planned.ExpiresAtUnixSeconds,
+                ResponseSigner(fixture.ResponderPrivateKey));
+
+        var restarted = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+            integrityKey);
+        continuity = restarted;
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await continuity.CommitVerifiedHistoryBatchAsync(fixture.RouteKey,
+                fixture.FirstPlan.NextCursor, fixture.SecondPlan,
+                CancellationToken.None)).Status);
+        state = restarted;
+        var recorded = await state.RecordOwnerRequestV2Async(fixture.RouteKey, Bytes(34, 32),
+            lookupRequest, request, response.CanonicalHeader,
+            response.CanonicalResponseHash, now, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared, recorded.Status);
+
+        state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+            integrityKey);
+        var replay = await state.PrepareOwnerRequestV2Async(fixture.RouteKey, Bytes(34, 32),
+            lookupRequest, lookup.Lookup.RouteLocalSourceFingerprint, request, now + 500,
+            now, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.ExactReplay, replay.Status);
+        Assert.Equal(response.CanonicalHeader.ToArray(), replay.Record!.ResponseHeader.ToArray());
+        var revocation = fixture.VerifyRevocation(
+            ProductionMailboxRouteContinuityRevocationReason.OwnerRevoked);
+        Assert.Equal(ProductionMailboxRouteContinuityCommitStatus.Accepted,
+            (await ((IProductionMailboxOwnerControlStateStore)state)
+                .CommitOwnerRevocationAndFenceAsync(fixture.RouteKey, Bytes(36, 16),
+                    revocation, CancellationToken.None)).Status);
+        state = new PostgreSqlProductionMailboxStateStore(database.ConnectionString,
+            integrityKey);
+        var fenced = await state.PrepareOwnerRequestV2Async(fixture.RouteKey, Bytes(34, 32),
+            lookupRequest, lookup.Lookup.RouteLocalSourceFingerprint, request, now + 500,
+            now, CancellationToken.None);
+        Assert.Equal(ProductionMailboxOwnerRequestStatus.Revoked, fenced.Status);
+    }
 
     [Fact]
     public async Task PostgreSqlNoChangeJournal_SurvivesEveryRestartBoundary()
@@ -684,13 +925,14 @@ public sealed class ProductionMailboxOwnerControlStateTests
             var restored = await continuity.GetRestoredGenesisAsync(fixture.RouteKey,
                 CancellationToken.None);
             Assert.NotNull(restored);
+            var requestNow = Math.Max(pgNow, fixture.NowUnixSeconds);
             var request = await ProductionMailboxOwnerControlTransportCodec
                 .AuthorOwnerDirectRequestAsync(restored.Anchor, restored.Cursor, Bytes(162, 32),
-                    pgNow, pgNow + 30, RequestSigner(fixture.OwnerPrivateKey));
+                    requestNow, requestNow + 30, RequestSigner(fixture.OwnerPrivateKey));
             var scope = Bytes(163, 32);
             var state = (IProductionMailboxOwnerControlStateStore)concrete;
             Assert.Equal(ProductionMailboxOwnerRequestStatus.Prepared,
-                (await state.PrepareNoChangeAsync(fixture.RouteKey, scope, request, pgNow,
+                (await state.PrepareNoChangeAsync(fixture.RouteKey, scope, request, requestNow,
                     CancellationToken.None)).Status);
             await using (var connection = new NpgsqlConnection(database.ConnectionString))
             {
@@ -699,7 +941,7 @@ public sealed class ProductionMailboxOwnerControlStateTests
                     UPDATE production_mailbox_owner_requests_v1 SET expires_at=@expires
                     WHERE active_scope=@scope
                     """, connection);
-                update.Parameters.AddWithValue("expires", U64(pgNow - 1));
+                update.Parameters.AddWithValue("expires", U64(requestNow - 1));
                 update.Parameters.AddWithValue("scope", scope);
                 Assert.Equal(1, await update.ExecuteNonQueryAsync());
             }
@@ -798,6 +1040,24 @@ public sealed class ProductionMailboxOwnerControlStateTests
 
     private static byte[] Bytes(byte value, int length) =>
         Enumerable.Repeat(value, length).Select(static item => (byte)item).ToArray();
+
+    private static ProductionMailboxRouteHistoryLookupRequest HistoryLookupRequest(
+        ProductionMailboxRouteContinuityAdvancedStateTests.AdvancedFixture fixture,
+        VerifiedProductionMailboxRouteHistoryCursor cursor,
+        ProductionMailboxRouteHistoryBatchCommitPlan? producingPlan)
+    {
+        var delegation = fixture.Enrollment.Delegation;
+        var durable = producingPlan?.NextDurableRouteState;
+        return new(delegation.NetworkId, delegation.MailboxOwnerEd25519PublicKey,
+            delegation.RouteDomainHash, delegation.SelectionInputCommitment,
+            durable?.CanonicalRouteOriginLkgHash ?? cursor.ToProtectedRestoreContext()
+                .CurrentRouteOriginLkgHash,
+            cursor.CanonicalCheckpointHash, cursor.LastCommittedBatchSequence,
+            durable?.AuthorizationKind ?? delegation.AnchorAuthorizationKind,
+            durable?.AuthorizationSequence ?? delegation.AnchorRouteAuthorizationSequence,
+            durable?.CanonicalAuthorizationHash ??
+                delegation.AnchorCanonicalRouteAuthorizationHash);
+    }
 
     private static byte[] U64(ulong value)
     {

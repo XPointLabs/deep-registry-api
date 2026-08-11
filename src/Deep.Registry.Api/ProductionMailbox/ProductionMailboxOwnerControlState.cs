@@ -403,6 +403,8 @@ internal static class ProductionMailboxOwnerControlAccounting
     internal const long EnrollmentAliasBytes = 280;
     internal const long OwnerRequestMaximumBytes = 1_042;
     internal const long OwnerRequestAliasBytes = 272;
+    internal const long OwnerRequestV2MaximumBytes = 1_632;
+    internal const long OwnerRequestAliasV2Bytes = 272;
     internal const long OwnerRevocationAliasBytes = 248;
     internal const long TerminalReservationBytes = 512;
 
@@ -415,6 +417,8 @@ internal static class ProductionMailboxOwnerControlAccounting
 
     internal const long NewOwnerRequestBytes =
         OwnerRequestMaximumBytes + OwnerRequestAliasBytes;
+    internal const long NewOwnerRequestV2Bytes =
+        OwnerRequestV2MaximumBytes + OwnerRequestAliasV2Bytes;
 }
 
 public sealed partial class InMemoryProductionMailboxStateStore :
@@ -895,6 +899,13 @@ public sealed partial class InMemoryProductionMailboxStateStore :
                     value.Revoked = true;
                     value.IntegrityTag = ComputeRequestTag(value);
                 }
+                foreach (var pair in ownerControlRequestsV2.Where(pair =>
+                             Fixed(pair.Value.RouteStateKey.Span, route)).ToArray())
+                {
+                    var value = RestoreV2(pair.Value);
+                    ownerControlRequestsV2[pair.Key] = value.Revoke(frozen.CanonicalBytes,
+                        frozen.CanonicalHash, v2PublicationIntegrityKey);
+                }
                 return new(status, next);
             }
             return new(status, current);
@@ -991,6 +1002,8 @@ public sealed partial class InMemoryProductionMailboxStateStore :
         var routeCount = ownerEnrollmentOperations.Values.Count(x => Fixed(x.RouteStateKey, route))
             + ownerControlRequests.Values.Count(x => Fixed(x.RouteStateKey, route))
             + ownerControlRequestIds.Values.Count(x => Fixed(x.RouteStateKey, route))
+            + ownerControlRequestsV2.Values.Count(x => Fixed(x.RouteStateKey.Span, route))
+            + ownerControlRequestIdsV2.Values.Count(x => Fixed(x.RouteStateKey.Span, route))
             + ownerRevocationRequestIds.Values.Count(x => Fixed(x.RouteStateKey, route))
             + ownerEnrollmentRequestIds.Keys.Count(x => x.StartsWith(
                 routeHex + ":", StringComparison.Ordinal))
@@ -999,6 +1012,7 @@ public sealed partial class InMemoryProductionMailboxStateStore :
                 && x.CanonicalResponse is null);
         var globalCount = ownerEnrollmentOperations.Count + ownerControlRequests.Count
             + ownerControlRequestIds.Count + ownerRevocationRequestIds.Count
+            + ownerControlRequestsV2.Count + ownerControlRequestIdsV2.Count
             + ownerEnrollmentRequestIds.Count + genesisCatalogs.Count
             + ownerEnrollmentOperations.Values.Count(x => x.CanonicalResponse is null);
         if (globalCount > ownerControlLimits.MaximumEntriesGlobal
@@ -1007,6 +1021,8 @@ public sealed partial class InMemoryProductionMailboxStateStore :
         foreach (var value in ownerEnrollmentOperations.Values) VerifyEnrollmentTag(value);
         foreach (var value in ownerControlRequests.Values) VerifyRequestTag(value);
         foreach (var value in ownerControlRequestIds.Values) VerifyOwnerRequestAliasTag(value);
+        foreach (var value in ownerControlRequestsV2.Values) _ = RestoreV2(value);
+        foreach (var value in ownerControlRequestIdsV2.Values) _ = RestoreV2Alias(value);
         foreach (var value in ownerRevocationRequestIds.Values) VerifyRevocationAliasTag(value);
         foreach (var value in ownerEnrollmentRequestIds.Values) VerifyEnrollmentAliasTag(value);
         foreach (var value in genesisCatalogs.Values)
@@ -1024,6 +1040,10 @@ public sealed partial class InMemoryProductionMailboxStateStore :
             * ProductionMailboxOwnerControlAccounting.OwnerRequestMaximumBytes;
         bytes += ownerControlRequestIds.Count
             * ProductionMailboxOwnerControlAccounting.OwnerRequestAliasBytes;
+        bytes += ownerControlRequestsV2.Count
+            * ProductionMailboxOwnerControlAccounting.OwnerRequestV2MaximumBytes;
+        bytes += ownerControlRequestIdsV2.Count
+            * ProductionMailboxOwnerControlAccounting.OwnerRequestAliasV2Bytes;
         bytes += ownerRevocationRequestIds.Count
             * ProductionMailboxOwnerControlAccounting.OwnerRevocationAliasBytes;
         bytes += ownerEnrollmentRequestIds.Count
@@ -1041,6 +1061,7 @@ public sealed partial class InMemoryProductionMailboxStateStore :
 
     private void AuthenticatedOwnerControlGc(ulong nowUnixSeconds)
     {
+        AuthenticatedOwnerRequestV2Gc(nowUnixSeconds);
         var removed = 0;
         foreach (var key in ownerControlRequests.Where(pair =>
                      nowUnixSeconds >= pair.Value.ExpiresAtUnixSeconds)
@@ -1497,6 +1518,7 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
             await using var command = new NpgsqlCommand(sql, connection);
             await command.ExecuteNonQueryAsync(cancellationToken);
             ownerControlInitialized = true;
+            await EnsureOwnerRequestV2SchemaAsync(connection, cancellationToken);
         }
         finally { ownerControlInitializeGate.Release(); }
     }
@@ -2212,6 +2234,30 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
                 request = request with { Tag = ComputeOwnerRequestTag(request) };
                 await UpdateOwnerRequestAsync(connection, transaction, request, cancellationToken);
             }
+            const string selectV2Sql = """
+                SELECT active_scope FROM production_mailbox_owner_requests_v2
+                WHERE route_state_key=@route ORDER BY active_scope LIMIT 1025 FOR UPDATE
+                """;
+            var scopesV2 = new List<byte[]>();
+            await using (var select = new NpgsqlCommand(selectV2Sql, connection, transaction))
+            {
+                select.Parameters.AddWithValue("route", route);
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    scopesV2.Add(reader.GetFieldValue<byte[]>(0));
+            }
+            if (scopesV2.Count > 1024)
+                throw new InvalidDataException("Owner request v2 fence exceeds its bound.");
+            foreach (var scope in scopesV2)
+            {
+                var request = await ReadOwnerRequestV2Async(connection, transaction, scope,
+                    cancellationToken) ?? throw new InvalidDataException(
+                        "Owner request v2 disappeared under route lock.");
+                var terminal = request.Revoke(frozen.CanonicalBytes, frozen.CanonicalHash,
+                    v2PreparedIntegrityKey);
+                await UpdateOwnerRequestV2Async(connection, transaction, terminal,
+                    cancellationToken);
+            }
             await transaction.CommitAsync(cancellationToken);
             return new(status, next);
         }
@@ -2777,6 +2823,25 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
                         bytes = checked(bytes + OwnerGenesisAccountingBytes(value));
                         break;
                     }
+                case 7:
+                    {
+                        var value = await ReadOwnerRequestV2Async(connection, transaction,
+                            key.Key, cancellationToken) ?? throw new InvalidDataException(
+                                "Owner request v2 disappeared during capacity scan.");
+                        bytes = checked(bytes +
+                            ProductionMailboxOwnerControlAccounting.OwnerRequestV2MaximumBytes);
+                        break;
+                    }
+                case 8:
+                    {
+                        var value = await ReadOwnerRequestAliasV2Async(connection, transaction,
+                            key.Route, key.Key, cancellationToken) ??
+                            throw new InvalidDataException(
+                                "Owner request-id v2 disappeared during capacity scan.");
+                        bytes = checked(bytes +
+                            ProductionMailboxOwnerControlAccounting.OwnerRequestAliasV2Bytes);
+                        break;
+                    }
                 default:
                     throw new InvalidDataException("Owner-control capacity kind is invalid.");
             }
@@ -2811,6 +2876,10 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
                     FROM production_mailbox_owner_enrollment_ids_v1
                 UNION ALL SELECT 6,route_state_key,route_state_key
                     FROM production_mailbox_route_genesis_v1
+                UNION ALL SELECT 7,route_state_key,active_scope
+                    FROM production_mailbox_owner_requests_v2
+                UNION ALL SELECT 8,route_state_key,request_id
+                    FROM production_mailbox_owner_request_ids_v2
             ) AS entries
             ORDER BY kind,route_state_key,item_key LIMIT @limit
             """;
@@ -2829,6 +2898,46 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         CancellationToken cancellationToken)
     {
         var remaining = ownerControlLimits.MaximumGcBatch;
+        foreach (var scope in await ReadOwnerGcKeysAsync(connection, transaction,
+                     "SELECT active_scope FROM production_mailbox_owner_requests_v2 " +
+                     "WHERE request_expires<=@now ORDER BY request_expires,active_scope " +
+                     "LIMIT @limit FOR UPDATE", nowUnixSeconds, remaining,
+                     cancellationToken))
+        {
+            var value = await ReadOwnerRequestV2Async(connection, transaction, scope,
+                cancellationToken) ?? throw new InvalidDataException(
+                    "Owner request v2 disappeared during authenticated GC.");
+            if (value.RequestExpiresAtUnixSeconds <= nowUnixSeconds)
+            {
+                await using var delete = new NpgsqlCommand(
+                    "DELETE FROM production_mailbox_owner_requests_v2 WHERE active_scope=@key",
+                    connection, transaction);
+                delete.Parameters.AddWithValue("key", scope);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+                remaining--;
+            }
+        }
+        if (remaining == 0) return;
+        foreach (var pair in await ReadOwnerV2AliasGcKeysAsync(connection, transaction,
+                     nowUnixSeconds, remaining, cancellationToken))
+        {
+            var value = await ReadOwnerRequestAliasV2Async(connection, transaction,
+                pair.Route, pair.RequestId, cancellationToken) ??
+                throw new InvalidDataException(
+                    "Owner request-id v2 disappeared during authenticated GC.");
+            if (value.RetainUntilUnixSeconds <= nowUnixSeconds)
+            {
+                await using var delete = new NpgsqlCommand("""
+                    DELETE FROM production_mailbox_owner_request_ids_v2
+                    WHERE route_state_key=@route AND request_id=@requestId
+                    """, connection, transaction);
+                delete.Parameters.AddWithValue("route", pair.Route);
+                delete.Parameters.AddWithValue("requestId", pair.RequestId);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+                remaining--;
+            }
+        }
+        if (remaining == 0) return;
         foreach (var scope in await ReadOwnerGcKeysAsync(connection, transaction,
                      "SELECT active_scope FROM production_mailbox_owner_requests_v1 " +
                      "WHERE expires_at<=@now ORDER BY expires_at,active_scope " +
@@ -2853,6 +2962,26 @@ public sealed partial class PostgreSqlProductionMailboxStateStore :
         if (remaining == 0) return;
         _ = await GcOwnerAliasesAsync(connection, transaction,
             PgOwnerAliasKind.Revocation, nowUnixSeconds, remaining, cancellationToken);
+    }
+
+    private static async ValueTask<List<(byte[] Route, byte[] RequestId)>>
+        ReadOwnerV2AliasGcKeysAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, ulong nowUnixSeconds, int limit,
+        CancellationToken cancellationToken)
+    {
+        var result = new List<(byte[], byte[])>(Math.Min(limit, 4096));
+        await using var command = new NpgsqlCommand("""
+            SELECT route_state_key,request_id
+            FROM production_mailbox_owner_request_ids_v2
+            WHERE retain_until<=@now ORDER BY retain_until,route_state_key,request_id
+            LIMIT @limit FOR UPDATE
+            """, connection, transaction);
+        command.Parameters.AddWithValue("now", U64(nowUnixSeconds));
+        command.Parameters.AddWithValue("limit", limit);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add((reader.GetFieldValue<byte[]>(0), reader.GetFieldValue<byte[]>(1)));
+        return result;
     }
 
     private static async ValueTask<List<byte[]>> ReadOwnerGcKeysAsync(
