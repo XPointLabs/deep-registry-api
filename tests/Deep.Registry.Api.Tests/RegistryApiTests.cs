@@ -52,7 +52,7 @@ public sealed class RegistryApiTests
     }
 
     [Fact]
-    public async Task RelayCatalog_RequiresFreshRegisteredNodeSignature_AndRejectsReplay()
+    public async Task PrivacyCatalog_RequiresFreshRegisteredNodeSignature_AndRejectsReplay()
     {
         await using var factory = new WebApplicationFactory<Program>();
         using var scope = factory.Services.CreateScope();
@@ -61,25 +61,20 @@ public sealed class RegistryApiTests
         var signer = new Ed25519();
         signer.FromSeed(seed);
         var nodeId = Convert.ToHexString(signer.GetPublicKey()).ToLowerInvariant();
-        var signedAt = DateTimeOffset.UtcNow.AddSeconds(-1);
-        var expiresAt = signedAt.AddDays(30);
-        var capabilities = new[] { "session-rpc", "onion-v1" };
-        var contactPayload = JsonSerializer.SerializeToUtf8Bytes(new
+        var signedAt = DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeSeconds();
+        var expiresAt = signedAt + 600;
+        var unsignedContact = new NativePrivacyContact
         {
-            version = "deep-relay-contact-v1",
-            routerId = nodeId,
-            publicHost = "node.example",
-            publicIp = "93.184.216.34",
-            publicPort = 443,
-            x25519PublicKey = new string('1', 64),
-            rpcEndpoint = "http://93.184.216.34:22020/api/peer/onion",
-            signedAtUnixMs = signedAt.ToUnixTimeMilliseconds(),
-            expiresAtUnixMs = expiresAt.ToUnixTimeMilliseconds(),
-            routerVersion = "1.0.0",
-            isReachable = true,
-            capabilities = capabilities.Order(StringComparer.Ordinal).ToArray()
-        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        var contactSignature = Convert.ToHexString(signer.SignMessage(contactPayload)).ToLowerInvariant();
+            RouterId = nodeId,
+            X25519PublicKey = new string('1', 64),
+            PeerEndpoint = "https://node.example/api/peer/privacy/v1/frame",
+            Capabilities = ["privacy-routing-v1"],
+            SignedAtUnixSeconds = signedAt,
+            ExpiresAtUnixSeconds = expiresAt
+        };
+        var contactSignature = Convert.ToHexString(
+            signer.SignMessage(NativePrivacyContactVerifier.BuildTranscript(unsignedContact)))
+            .ToLowerInvariant();
         var registration = registry.Register(new RegisterNodeRequest
         {
             NodeId = nodeId,
@@ -88,27 +83,12 @@ public sealed class RegistryApiTests
             RewardsAddress = "0x1111111111111111111111111111111111111111",
             BlsPublicKey = new BlsPublicKey { X = "0x01", Y = "0x02" },
             TransportStatus = new TransportStatus { Enabled = true, Running = true, Mode = "running" },
-            RelayContact = new RelayContactDocument
-            {
-                RouterId = nodeId,
-                PublicHost = "node.example",
-                PublicIp = "93.184.216.34",
-                PublicPort = 443,
-                X25519PublicKey = new string('1', 64),
-                RpcEndpoint = "http://93.184.216.34:22020/api/peer/onion",
-                SignedAt = signedAt,
-                ExpiresAt = expiresAt,
-                RouterVersion = "1.0.0",
-                IsReachable = true,
-                Capabilities = capabilities,
-                SignatureAlgorithm = "ed25519",
-                Signature = contactSignature
-            }
+            PrivacyContact = unsignedContact with { Signature = contactSignature }
         });
         Assert.True(registration.Success, registration.Error);
 
         using var client = factory.CreateClient();
-        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/relay-contacts")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/privacy-contacts")).StatusCode);
 
         var now = DateTimeOffset.UtcNow;
         var nonce = Guid.NewGuid().ToString("N");
@@ -116,7 +96,7 @@ public sealed class RegistryApiTests
         {
             version = "xpoint-registry-catalog-v1",
             method = "GET",
-            path = "/api/relay-contacts",
+            path = "/api/privacy-contacts",
             nodeId,
             timestampUnixMs = now.ToUnixTimeMilliseconds(),
             nonce
@@ -130,6 +110,93 @@ public sealed class RegistryApiTests
 
         using var replay = SignedCatalogRequest(nodeId, now, nonce, requestSignature);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(replay)).StatusCode);
+    }
+
+    [Fact]
+    public async Task PrivacyCatalog_LegacyRelayEndpointIsNotMapped()
+    {
+        await using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await client.GetAsync("/api/relay-contacts")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Registration_RejectsRemovedRelayContactField()
+    {
+        await using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/nodes/register", new
+        {
+            nodeId = "node-with-removed-field",
+            operatorAddress = "0x1111111111111111111111111111111111111111",
+            blsPublicKey = new { x = "0x01", y = "0x02" },
+            relayContact = new { }
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public void PrivacyContact_RequiresCanonicalDpc1FieldsAndProductionHttps()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var signer = new Ed25519();
+        signer.FromSeed(Enumerable.Range(1, 32).Select(static value => (byte)value).ToArray());
+        var valid = BuildSignedPrivacyContact(
+            signer,
+            "https://node.example/api/peer/privacy/v1/frame",
+            now.AddSeconds(-1).ToUnixTimeSeconds(),
+            now.AddMinutes(10).ToUnixTimeSeconds());
+
+        Assert.True(NativePrivacyContactVerifier.Verify(valid, now, allowInsecureHttp: false));
+        Assert.False(NativePrivacyContactVerifier.Verify(
+            BuildSignedPrivacyContact(
+                signer,
+                "http://node.example/api/peer/privacy/v1/frame",
+                valid.SignedAtUnixSeconds,
+                valid.ExpiresAtUnixSeconds),
+            now,
+            allowInsecureHttp: false));
+        Assert.True(NativePrivacyContactVerifier.Verify(
+            BuildSignedPrivacyContact(
+                signer,
+                "http://node.example/api/peer/privacy/v1/frame",
+                valid.SignedAtUnixSeconds,
+                valid.ExpiresAtUnixSeconds),
+            now,
+            allowInsecureHttp: true));
+
+        var uppercaseKey = BuildSignedPrivacyContact(
+            signer,
+            valid.PeerEndpoint,
+            valid.SignedAtUnixSeconds,
+            valid.ExpiresAtUnixSeconds) with
+        {
+            X25519PublicKey = new string('A', 64)
+        };
+        uppercaseKey = uppercaseKey with
+        {
+            Signature = Convert.ToHexString(signer.SignMessage(
+                NativePrivacyContactVerifier.BuildTranscript(uppercaseKey)))
+                .ToLowerInvariant()
+        };
+        Assert.False(NativePrivacyContactVerifier.Verify(
+            uppercaseKey,
+            now,
+            allowInsecureHttp: false));
+
+        Assert.False(NativePrivacyContactVerifier.Verify(
+            BuildSignedPrivacyContact(
+                signer,
+                "https://node.example/api/peer/privacy/v1/frame",
+                now.ToUnixTimeSeconds(),
+                now.AddMinutes(16).ToUnixTimeSeconds()),
+            now,
+            allowInsecureHttp: false));
     }
 
     [Fact]
@@ -180,7 +247,7 @@ public sealed class RegistryApiTests
         var node = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-1");
         Assert.False(node.TryGetProperty("signingEndpoint", out _));
         Assert.False(node.TryGetProperty("transport", out _));
-        Assert.False(node.TryGetProperty("relayContact", out _));
+        Assert.False(node.TryGetProperty("privacyContact", out _));
         Assert.False(node.TryGetProperty("blsSignature", out _));
         Assert.False(node.TryGetProperty("ed25519Signature1", out _));
         Assert.False(node.TryGetProperty("ed25519Signature2", out _));
@@ -197,7 +264,7 @@ public sealed class RegistryApiTests
             "http://node.example:8080/api/staking/quorum/sign",
             controlNode.GetProperty("signingEndpoint").GetString());
         Assert.False(controlNode.TryGetProperty("transport", out _));
-        Assert.False(controlNode.TryGetProperty("relayContact", out _));
+        Assert.False(controlNode.TryGetProperty("privacyContact", out _));
 
         var stakeState = await client.GetFromJsonAsync<JsonElement>("/api/nodes/node-test-1/stake-state");
         Assert.Equal("XPNT", stakeState.GetProperty("tokenSymbol").GetString());
@@ -775,12 +842,35 @@ public sealed class RegistryApiTests
         string nonce,
         string signature)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get, "/api/relay-contacts");
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/privacy-contacts");
         request.Headers.Add("X-XPoint-Node-Id", nodeId);
         request.Headers.Add("X-XPoint-Timestamp", timestamp.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
         request.Headers.Add("X-XPoint-Nonce", nonce);
         request.Headers.Add("X-XPoint-Signature", signature);
         return request;
+    }
+
+    private static NativePrivacyContact BuildSignedPrivacyContact(
+        Ed25519 signer,
+        string peerEndpoint,
+        long signedAtUnixSeconds,
+        long expiresAtUnixSeconds)
+    {
+        var unsigned = new NativePrivacyContact
+        {
+            RouterId = Convert.ToHexString(signer.GetPublicKey()).ToLowerInvariant(),
+            X25519PublicKey = new string('1', 64),
+            PeerEndpoint = peerEndpoint,
+            Capabilities = ["privacy-routing-v1"],
+            SignedAtUnixSeconds = signedAtUnixSeconds,
+            ExpiresAtUnixSeconds = expiresAtUnixSeconds
+        };
+        return unsigned with
+        {
+            Signature = Convert.ToHexString(signer.SignMessage(
+                NativePrivacyContactVerifier.BuildTranscript(unsigned)))
+                .ToLowerInvariant()
+        };
     }
 
     private sealed class FakeStakingProjectionClient : IStakingProjectionClient

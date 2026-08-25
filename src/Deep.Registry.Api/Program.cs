@@ -3,6 +3,9 @@
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RegistryOptions>(builder.Configuration.GetSection("Registry"));
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.UnmappedMemberHandling =
+        System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow);
 builder.Services.Configure<CallInfrastructureOptions>(builder.Configuration.GetSection("Calls"));
 builder.Services.Configure<MembershipProjectionOptions>(
     builder.Configuration.GetSection("MembershipProjection"));
@@ -167,10 +170,10 @@ api.MapGet("/rewards/{address}", async (string address, NodeRegistry registry, I
 
 api.MapGet("/nodes", (NodeRegistry registry) => Results.Ok(registry.GetPublicNodes()));
 api.MapGet("/internal/nodes", (NodeRegistry registry) => Results.Ok(registry.GetControlNodes()));
-api.MapGet("/relay-contacts", (HttpRequest request, NodeRegistry registry, RegistryCatalogReplayGuard replayGuard) =>
+api.MapGet("/privacy-contacts", (HttpRequest request, NodeRegistry registry, RegistryCatalogReplayGuard replayGuard) =>
 {
     return RegistryCatalogRequestAuthenticator.Verify(request, registry, replayGuard, DateTimeOffset.UtcNow)
-        ? Results.Ok(registry.GetRelayContacts())
+        ? Results.Ok(registry.GetPrivacyContacts())
         : Results.Unauthorized();
 });
 api.MapGet("/nodes/{nodeId}/projection-consistency", async (string nodeId, ProjectionConsistencyService consistency, CancellationToken cancellationToken) =>

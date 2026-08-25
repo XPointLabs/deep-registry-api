@@ -16,7 +16,7 @@ public sealed record RegisterNodeRequest
     public TransportBundle? Transport { get; init; }
     public TransportStatus? TransportStatus { get; init; }
     public string SigningEndpoint { get; init; } = "";
-    public RelayContactDocument? RelayContact { get; init; }
+    public NativePrivacyContact? PrivacyContact { get; init; }
 }
 
 public sealed record BlsPublicKey
@@ -81,7 +81,7 @@ public sealed record RegisteredNode
     public DateTimeOffset? TransportHealthySince { get; init; }
     public DateTimeOffset? TransportUnhealthySince { get; init; }
     public string SigningEndpoint { get; init; } = "";
-    public RelayContactDocument? RelayContact { get; init; }
+    public NativePrivacyContact? PrivacyContact { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
     public long Revision { get; init; }
@@ -123,21 +123,14 @@ public sealed record RegistryControlNode
     public DateTimeOffset UpdatedAt { get; init; }
 }
 
-public sealed record RelayContactDocument
+public sealed record NativePrivacyContact
 {
     public string RouterId { get; init; } = "";
-    public string PublicHost { get; init; } = "";
-    public string? PublicIp { get; init; }
-    public int PublicPort { get; init; }
     public string X25519PublicKey { get; init; } = "";
-    public string RpcEndpoint { get; init; } = "";
-    public DateTimeOffset SignedAt { get; init; }
-    public DateTimeOffset ExpiresAt { get; init; }
-    public string RouterVersion { get; init; } = "";
-    public bool IsReachable { get; init; }
+    public string PeerEndpoint { get; init; } = "";
     public IReadOnlyList<string> Capabilities { get; init; } = Array.Empty<string>();
-    public string? Serialized { get; init; }
-    public string SignatureAlgorithm { get; init; } = "";
+    public long SignedAtUnixSeconds { get; init; }
+    public long ExpiresAtUnixSeconds { get; init; }
     public string Signature { get; init; } = "";
 }
 

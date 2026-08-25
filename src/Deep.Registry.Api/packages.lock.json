@@ -4,22 +4,20 @@
     "net10.0": {
       "Deep.Protocol": {
         "type": "Direct",
-        "requested": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
-        "resolved": "0.4.0-production.586054a",
-        "contentHash": "7EMXOSdXVVVWAIDsWn9KRiul5N4N2algXkMqyR5k+0jzdTFL0X9J0imGDdCrft5Ap5oXjWH4A/ZcBt2gVVyXwQ==",
+        "requested": "[0.5.0-production.e75bfed, 0.5.0-production.e75bfed]",
+        "resolved": "0.5.0-production.e75bfed",
+        "contentHash": "d554G0Upd8xsuRWoUGBh9bR33cu/9fpcDMEZ5ciTZ9OhLQahiuCgqkoukcMRUuJr2Sn6Nz/DaAk/m3buDq197A==",
         "dependencies": {
-          "Deep.Protocol.Abstractions": "[0.4.0-production.586054a]",
-          "Deep.Protocol.Protobuf": "[0.4.0-production.586054a]",
           "Sodium.Core": "1.4.1"
         }
       },
       "Deep.Protocol.MembershipRoutes": {
         "type": "Direct",
-        "requested": "[0.4.0-production.586054a, 0.4.0-production.586054a]",
-        "resolved": "0.4.0-production.586054a",
-        "contentHash": "AjD7Okk8puqEL1dBb467Ki+tYxcmwflbd7/lCQnSdwqioX4qkk/hf031cvB90EvbSCs3c2ffcxY/CmNN+alkuA==",
+        "requested": "[0.5.0-production.e75bfed, 0.5.0-production.e75bfed]",
+        "resolved": "0.5.0-production.e75bfed",
+        "contentHash": "6+TuQpHGiX+ekv0Cu5G+f1yEio/ZUP/hIdIX7X37hbrgIsIvwLItPLOEKXxRIRrXeEiyF1zun8QEnQiFLVS3Ug==",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.586054a]"
+          "Deep.Protocol": "0.5.0-production.e75bfed"
         }
       },
       "Npgsql": {
@@ -42,24 +40,6 @@
         "dependencies": {
           "libsodium": "[1.0.22, 1.0.23)"
         }
-      },
-      "Deep.Protocol.Abstractions": {
-        "type": "Transitive",
-        "resolved": "0.4.0-production.586054a",
-        "contentHash": "1GtGIoIx5Vtlel5vDn8tUmPFbOORT41eEQsxPDdWp4RAmn7HfCffZa27DH9kwyF9u1hCBgJrqRgQZ2CfyGPT9A=="
-      },
-      "Deep.Protocol.Protobuf": {
-        "type": "Transitive",
-        "resolved": "0.4.0-production.586054a",
-        "contentHash": "DdzyuDE5h5CQx3UlpO7RuwVSvBBTtNHMWJjIsp1Dq2KToNrePE3CwRERFv1Z5BI+bznRk3SGAyB30S8gAc1S9A==",
-        "dependencies": {
-          "Google.Protobuf": "3.32.1"
-        }
-      },
-      "Google.Protobuf": {
-        "type": "Transitive",
-        "resolved": "3.32.1",
-        "contentHash": "HbFFRNU46e1E+qhGvwCDAO2EZ80WADqlkNqlOBYvGi7SNxwMPkTrReZgCg9/TrXwLO/n0za+AIiT2IplzqrjZw=="
       },
       "libsodium": {
         "type": "Transitive",

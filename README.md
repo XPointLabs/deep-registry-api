@@ -3,7 +3,7 @@
 ASP.NET Core cache/bootstrap API for Deep node registration and VLESS
 transport metadata. XPoint stake/reward semantics and active node membership
 remain delegated to the staking contracts/backend; this service stores
-registration extension fields that are not part of the Session contracts.
+registration extension fields that are not part of the Deep-native protocol contracts.
 
 ## Agent Specs
 
@@ -21,7 +21,7 @@ registration extension fields that are not part of the Session contracts.
 - `GET /api/nodes/{nodeId}`
 - `GET /api/nodes` (public node status; transport credentials, registration proofs, and signer endpoints are omitted)
 - `GET /api/internal/nodes` (Docker control-plane catalog; never expose through the public reverse proxy)
-- `GET /api/relay-contacts` (registered-node Ed25519 authentication required)
+- `GET /api/privacy-contacts` (registered-node Ed25519 authentication required)
 - `GET /api/network/membership-route-catalog` (opaque pre-signed artifact; `503` when absent)
 - `GET /api/nodes/runtime`
 - `GET /api/nodes/reconciliation`
@@ -41,7 +41,7 @@ this service. Deterministic artifacts are for mounted Docker development fixture
 ## Dormant P04 checkpoint projection
 
 P06 is a default-disabled fixture projection. It is separate from
-`NodeRegistry`; registered nodes, staking state and relay self-signatures are
+`NodeRegistry`; registered nodes, staking state and privacy-contact self-signatures are
 never treated as P04 membership authority.
 
 The application assembly contains no P04 signature implementation. Local tests
@@ -142,6 +142,26 @@ State persistence behavior:
 Do not repair production divergence by editing registry state. Re-submit signed
 node heartbeat/contact data or fix the staking/indexer source of truth, then let
 registry refresh its cache.
+
+## Native privacy contact catalog
+
+`POST /api/nodes/register` may include `privacyContact` with the exact XNode
+`DPC1` self-signed shape: lowercase 32-byte `routerId`, independent lowercase
+32-byte `x25519PublicKey`, `peerEndpoint`, the sole capability
+`privacy-routing-v1`, Unix-second signing/expiry times, and a lowercase 64-byte
+Ed25519 signature. The router identity signs the canonical binary `DPC1`
+transcript; JSON serialization is not part of the signature.
+
+Production contacts use HTTPS and the exact peer path
+`/api/peer/privacy/v1/frame`. Plain HTTP is accepted only when the registry host
+is running in the ASP.NET Core `Development` environment. Contacts have a
+bounded 15-minute lifetime, tolerate at most two minutes of future clock skew,
+and are removed from catalog responses as soon as they expire. The registry
+does not rewrite endpoints or normalize signed fields.
+
+`GET /api/privacy-contacts` uses the existing registered-node Ed25519 catalog
+request authentication and replay guard. The obsolete Session/onion relay
+catalog and endpoint are not available.
 
 Run locally:
 

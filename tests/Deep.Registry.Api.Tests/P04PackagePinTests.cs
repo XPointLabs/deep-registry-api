@@ -47,6 +47,18 @@ public sealed class P04PackagePinTests
                 new Dictionary<string, string>(StringComparer.Ordinal))
         };
 
+    private static readonly IReadOnlyDictionary<string, (long Bytes, string Sha256)>
+        PrivacyRoutingPackages =
+            new Dictionary<string, (long Bytes, string Sha256)>(StringComparer.Ordinal)
+            {
+                ["Deep.Protocol.0.5.0-production.e75bfed.nupkg"] = (
+                    481_534,
+                    "69578c00c503383b149c4e9bccb3f14f87d3608c9781fe684710233059060098"),
+                ["Deep.Protocol.MembershipRoutes.0.5.0-production.e75bfed.nupkg"] = (
+                    186_954,
+                    "5dacdef966835452ffa2c0a404dac72524b508ebeffa3f44b79d5d290c2de75e")
+            };
+
     [Fact]
     public void VendoredP04Inventory_IsExactAndPinned()
     {
@@ -174,10 +186,13 @@ public sealed class P04PackagePinTests
         var root = RepositoryRoot();
         var config = XDocument.Load(Path.Combine(root, "NuGet.Config"));
         var localSource = config.Descendants("add")
-            .Single(element => (string?)element.Attribute("key") == "pma-vendor");
-        Assert.Equal("vendor/pma", (string?)localSource.Attribute("value"));
+            .Single(element => (string?)element.Attribute("key") == "privacy-routing-vendor");
+        Assert.Equal(
+            "vendor/privacy-routing-e75bfed",
+            (string?)localSource.Attribute("value"));
         var localPatterns = config.Descendants("packageSource")
-            .Single(element => (string?)element.Attribute("key") == "pma-vendor")
+            .Single(element =>
+                (string?)element.Attribute("key") == "privacy-routing-vendor")
             .Elements("package")
             .Select(element => (string?)element.Attribute("pattern"))
             .ToArray();
@@ -201,19 +216,50 @@ public sealed class P04PackagePinTests
             var dependencies = JsonNode.Parse(File.ReadAllText(lockPath))!
                 ["dependencies"]!["net10.0"]!;
             var protocol = dependencies["Deep.Protocol"]!;
-            Assert.Equal("0.4.0-production.586054a", protocol["resolved"]!.GetValue<string>());
+            Assert.Equal("0.5.0-production.e75bfed", protocol["resolved"]!.GetValue<string>());
             if (protocol["type"]!.GetValue<string>() == "Direct")
             {
                 Assert.Equal(
-                    "[0.4.0-production.586054a, 0.4.0-production.586054a]",
+                    "[0.5.0-production.e75bfed, 0.5.0-production.e75bfed]",
                     protocol["requested"]!.GetValue<string>());
             }
+            Assert.Null(dependencies["Deep.Protocol.Abstractions"]);
+            Assert.Null(dependencies["Deep.Protocol.Protobuf"]);
+        }
+    }
+
+    [Fact]
+    public void PrivacyRoutingProtocolClosure_IsExactAndPinnedToSourceCommit()
+    {
+        var vendor = Path.Combine(
+            RepositoryRoot(),
+            "vendor",
+            "privacy-routing-e75bfed");
+        var inventory = Directory.GetFiles(vendor, "*.nupkg")
+            .Select(Path.GetFileName)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(PrivacyRoutingPackages.Keys.Order(StringComparer.Ordinal), inventory);
+
+        foreach (var pair in PrivacyRoutingPackages)
+        {
+            var path = Path.Combine(vendor, pair.Key);
+            Assert.Equal(pair.Value.Bytes, new FileInfo(path).Length);
+            Assert.Equal(pair.Value.Sha256, Sha256(path));
+            using var archive = ZipFile.OpenRead(path);
+            var nuspecEntry = Assert.Single(
+                archive.Entries,
+                entry => entry.FullName.EndsWith(".nuspec", StringComparison.Ordinal));
+            using var stream = nuspecEntry.Open();
+            var document = XDocument.Load(stream);
+            XNamespace ns = document.Root!.Name.Namespace;
+            var metadata = document.Root.Element(ns + "metadata")!;
             Assert.Equal(
-                "0.4.0-production.586054a",
-                dependencies["Deep.Protocol.Abstractions"]!["resolved"]!.GetValue<string>());
+                "0.5.0-production.e75bfed",
+                metadata.Element(ns + "version")!.Value);
             Assert.Equal(
-                "0.4.0-production.586054a",
-                dependencies["Deep.Protocol.Protobuf"]!["resolved"]!.GetValue<string>());
+                "e75bfed411cfe13134a55a09a3c754b174f13322",
+                metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
         }
     }
 

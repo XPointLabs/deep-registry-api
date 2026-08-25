@@ -2,6 +2,7 @@
 using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 
 namespace Deep.Registry.Api;
@@ -10,20 +11,35 @@ public sealed class NodeRegistry
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = true
+        WriteIndented = true,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, RegisteredNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly RegistryOptions _options;
     private readonly string? _statePath;
+    private readonly bool _allowInsecurePrivacyPeerEndpoint;
     private long _corruptedStateRecoveries;
     private ReconciliationReport? _lastReconciliationReport;
     private ReconciliationJobStatus _reconciliationJobStatus = new(null, 0, 0, 0);
 
     public NodeRegistry(IOptions<RegistryOptions> options)
+        : this(options, allowInsecurePrivacyPeerEndpoint: false)
+    {
+    }
+
+    public NodeRegistry(IOptions<RegistryOptions> options, IHostEnvironment environment)
+        : this(options, environment.IsDevelopment())
+    {
+    }
+
+    private NodeRegistry(
+        IOptions<RegistryOptions> options,
+        bool allowInsecurePrivacyPeerEndpoint)
     {
         _options = options.Value;
+        _allowInsecurePrivacyPeerEndpoint = allowInsecurePrivacyPeerEndpoint;
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath)
             ? Path.Combine(AppContext.BaseDirectory, "artifacts", "registry-state.json")
             : _options.StatePath;
@@ -103,13 +119,18 @@ public sealed class NodeRegistry
         return GetNodes().Select(ToControlNode).ToArray();
     }
 
-    public IReadOnlyCollection<RelayContactDocument> GetRelayContacts()
+    public IReadOnlyCollection<NativePrivacyContact> GetPrivacyContacts()
     {
+        var now = DateTimeOffset.UtcNow;
         return _nodes.Values
             .Where(node => IsTransportHealthy(node.TransportStatus))
-            .Select(node => node.RelayContact)
+            .Select(node => node.PrivacyContact)
             .Where(contact => contact is not null)
-            .Cast<RelayContactDocument>()
+            .Cast<NativePrivacyContact>()
+            .Where(contact => NativePrivacyContactVerifier.Verify(
+                contact,
+                now,
+                _allowInsecurePrivacyPeerEndpoint))
             .OrderBy(contact => contact.RouterId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
@@ -326,7 +347,9 @@ public sealed class NodeRegistry
                 ? null
                 : existingTransportHealthy ? updatedAt : existing?.TransportUnhealthySince ?? updatedAt,
             SigningEndpoint = NormalizeSigningEndpoint(request.SigningEndpoint),
-            RelayContact = request.RelayContact is null ? null : NormalizeRelayContact(request.RelayContact),
+            PrivacyContact = request.PrivacyContact is null
+                ? null
+                : NormalizePrivacyContact(request.PrivacyContact),
             CreatedAt = createdAt,
             UpdatedAt = updatedAt,
             Revision = revision
@@ -349,7 +372,7 @@ public sealed class NodeRegistry
             node.UpdatedAt);
     }
 
-    private static string? ValidateRegistration(RegisterNodeRequest request)
+    private string? ValidateRegistration(RegisterNodeRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.NodeId))
         {
@@ -395,12 +418,15 @@ public sealed class NodeRegistry
             return transportStatusError;
         }
 
-        var relayContactError = request.RelayContact is null
+        var privacyContactError = request.PrivacyContact is null
             ? null
-            : ValidateRelayContact(request.NodeId, request.RelayContact);
-        if (relayContactError is not null)
+            : ValidatePrivacyContact(
+                request.NodeId,
+                request.Ed25519PublicKey,
+                request.PrivacyContact);
+        if (privacyContactError is not null)
         {
-            return relayContactError;
+            return privacyContactError;
         }
 
         return ValidateSigningEndpoint(request.SigningEndpoint);
@@ -500,74 +526,37 @@ public sealed class NodeRegistry
         };
     }
 
-    private static string? ValidateRelayContact(string nodeId, RelayContactDocument contact)
+    private string? ValidatePrivacyContact(
+        string nodeId,
+        string ed25519PublicKey,
+        NativePrivacyContact contact)
     {
-        if (!string.Equals(NormalizeKey(nodeId), NormalizeKey(contact.RouterId), StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(nodeId, contact.RouterId, StringComparison.Ordinal))
         {
-            return "relayContact.routerId must match nodeId";
+            return "privacyContact.routerId must exactly match nodeId";
         }
 
-        if (string.IsNullOrWhiteSpace(contact.PublicHost))
+        if (!string.Equals(ed25519PublicKey, contact.RouterId, StringComparison.Ordinal))
         {
-            return "relayContact.publicHost is required";
+            return "privacyContact.routerId must match ed25519PublicKey";
         }
 
-        if (contact.PublicPort is <= 0 or > 65_535)
+        if (!NativePrivacyContactVerifier.Verify(
+                contact,
+                DateTimeOffset.UtcNow,
+                _allowInsecurePrivacyPeerEndpoint))
         {
-            return "relayContact.publicPort must be between 1 and 65535";
-        }
-
-        if (!IsFixedHex(contact.X25519PublicKey, 32))
-        {
-            return "relayContact.x25519PublicKey must be a 32-byte hex value";
-        }
-
-        if (string.IsNullOrWhiteSpace(contact.RpcEndpoint)
-            || ValidateSigningEndpoint(contact.RpcEndpoint) is not null)
-        {
-            return "relayContact.rpcEndpoint must be an absolute http(s) URL";
-        }
-
-        if (contact.ExpiresAt <= contact.SignedAt)
-        {
-            return "relayContact.expiresAt must be later than signedAt";
-        }
-
-        if (!string.Equals(contact.SignatureAlgorithm, "ed25519", StringComparison.OrdinalIgnoreCase))
-        {
-            return "relayContact.signatureAlgorithm must be ed25519";
-        }
-
-        if (!IsFixedHex(contact.Signature, 64))
-        {
-            return "relayContact.signature must be a 64-byte hex value";
-        }
-
-        if (!RelayContactDocumentVerifier.Verify(contact, DateTimeOffset.UtcNow))
-        {
-            return "relayContact signature is invalid or expired";
+            return "privacyContact is non-canonical, expired, or has an invalid DPC1 signature";
         }
 
         return null;
     }
 
-    private static RelayContactDocument NormalizeRelayContact(RelayContactDocument contact)
+    private static NativePrivacyContact NormalizePrivacyContact(NativePrivacyContact contact)
     {
         return contact with
         {
-            RouterId = NormalizeKey(contact.RouterId),
-            PublicHost = contact.PublicHost.Trim(),
-            PublicIp = string.IsNullOrWhiteSpace(contact.PublicIp) ? null : contact.PublicIp.Trim(),
-            X25519PublicKey = NormalizeHex(contact.X25519PublicKey, 32),
-            RpcEndpoint = NormalizeSigningEndpoint(contact.RpcEndpoint),
-            SignatureAlgorithm = "ed25519",
-            Signature = NormalizeHex(contact.Signature, 64),
-            Capabilities = contact.Capabilities
-                .Where(static value => !string.IsNullOrWhiteSpace(value))
-                .Select(static value => value.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Order(StringComparer.OrdinalIgnoreCase)
-                .ToArray()
+            Capabilities = contact.Capabilities.ToArray()
         };
     }
 
