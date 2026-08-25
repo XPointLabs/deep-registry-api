@@ -8,7 +8,6 @@ registration extension fields that are not part of the Session contracts.
 ## Agent Specs
 
 - Start with [`AGENTS.md`](AGENTS.md) before changing registry lifecycle, projections, reconciliation, or API shape.
-- Use [`docs/SESSION_PORTING.md`](docs/SESSION_PORTING.md) for Session service-node registration and staking projection migration rules.
 - Keep staking semantics delegated to `xpoint-staking-backend` and contracts.
 - Keep remediation out of registry: divergence is reported through reconciliation endpoints, not centrally fixed here.
 
