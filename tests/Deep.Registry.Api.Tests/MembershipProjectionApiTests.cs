@@ -15,7 +15,13 @@ public sealed class MembershipProjectionApiTests
     [Fact]
     public async Task DefaultDisabled_HasNoMutationOrMembershipEndpoints()
     {
-        await using var factory = new WebApplicationFactory<Program>();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureAppConfiguration((_, configuration) =>
+                configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Calls:Required"] = "false",
+                    ["Calls:Enabled"] = "false"
+                })));
         using var client = factory.CreateClient();
 
         var bridge = await client.GetAsync("/api/v1/checkpoints/bridge");

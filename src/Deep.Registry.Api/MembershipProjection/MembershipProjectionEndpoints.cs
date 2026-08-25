@@ -7,13 +7,23 @@ public static class MembershipProjectionEndpoints
 
     public static void MapMembershipProjectionEndpoints(this WebApplication app)
     {
-        app.MapGet("/health/ready", (MembershipProjectionService service) =>
+        app.MapGet("/health/ready", (
+            MembershipProjectionService service,
+            CallRuntimeReadiness calls) =>
         {
             var status = service.GetStatus();
-            return !status.Enabled || status.Ready
+            if (status.Enabled && !status.Ready)
+            {
+                return Results.Json(
+                    new { code = status.State },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var callStatus = calls.GetStatus();
+            return !callStatus.Enabled || callStatus.Ready
                 ? Results.Ok(new { ok = true })
                 : Results.Json(
-                    new { code = status.State },
+                    new { code = callStatus.State },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
         });
 

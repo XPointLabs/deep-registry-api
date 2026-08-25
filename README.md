@@ -22,6 +22,9 @@ registration extension fields that are not part of the Deep-native protocol cont
 - `GET /api/nodes` (public node status; transport credentials, registration proofs, and signer endpoints are omitted)
 - `GET /api/internal/nodes` (Docker control-plane catalog; never expose through the public reverse proxy)
 - `GET /api/privacy-contacts` (registered-node Ed25519 authentication required)
+- `POST /api/calls/signal` (sealed, sender-signed `deep-call-signal-v2`)
+- `GET /api/calls/inbox/{recipient}` (recipient-signed, nonce-protected destructive read)
+- `GET /api/calls/ice-servers/{recipient}` (recipient-signed, nonce-protected short-lived TURN credentials)
 - `GET /api/network/membership-route-catalog` (opaque pre-signed artifact; `503` when absent)
 - `GET /api/nodes/runtime`
 - `GET /api/nodes/reconciliation`
@@ -32,6 +35,28 @@ registration extension fields that are not part of the Deep-native protocol cont
 - `GET /health/ready`
 
 The static admin demo is served at `/`.
+
+## Production call boundary
+
+Calls use a clean-break v2 canonical contract. Signal bodies carry a lowercase
+128-bit nonce covered by the sender signature. Exact signal retries are
+idempotent; reusing a sender/nonce pair for a different signed body is rejected.
+Inbox and ICE GET signatures bind the purpose, method, absolute path,
+recipient, Unix timestamp, and a fresh lowercase 128-bit nonce. Their replay
+entries are durably committed before inbox drain or credential issuance.
+
+Inbox queues and bounded replay windows are one atomic state snapshot. By
+default it is stored at `<Registry:StatePath>.calls-v2.json`; `Calls:StatePath`
+may select another file in the same registry persistence contour. Unsupported
+or corrupt state is quarantined and call readiness remains failed closed.
+There is no v1 reader.
+
+Calls are required by default; non-call fixture environments must explicitly
+set both `Calls:Required=false` and `Calls:Enabled=false`. Readiness is 503
+unless every ICE URL is valid, at least one TURN URL is present, exactly
+one usable shared-secret source is configured, the credential lifetime is
+300–3600 seconds, and durable call state is healthy. Disabled calls do not
+affect readiness for environments that do not expose the call routes.
 
 The membership-route endpoint never builds authority from cached registrations. It only serves the
 bounded file configured by `Registry:MembershipRouteArtifactPath`; clients must quorum-verify its

@@ -49,4 +49,42 @@ public sealed class CallIceCredentialIssuerTests
             "05aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             DateTimeOffset.UtcNow));
     }
+
+    [Fact]
+    public void IssueUsesTheMinimumShortLivedCredentialWindow()
+    {
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+        var issuer = new CallIceCredentialIssuer(Options.Create(new CallInfrastructureOptions
+        {
+            Enabled = true,
+            TurnSharedSecret = "test-only-secret",
+            CredentialLifetimeSeconds = 300,
+            IceUrls = ["turn:registry.example:3478?transport=udp"]
+        }));
+
+        var result = Assert.IsType<CallIceConfiguration>(issuer.Issue(
+            "05aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            now));
+
+        Assert.Equal(now.AddMinutes(5), result.ExpiresAt);
+    }
+
+    [Theory]
+    [InlineData(299)]
+    [InlineData(3601)]
+    public void IssueFailsClosedOutsideBoundedCredentialWindow(int lifetimeSeconds)
+    {
+        var issuer = new CallIceCredentialIssuer(Options.Create(new CallInfrastructureOptions
+        {
+            Enabled = true,
+            TurnSharedSecret = "test-only-secret",
+            CredentialLifetimeSeconds = lifetimeSeconds,
+            IceUrls = ["turn:registry.example:3478"]
+        }));
+
+        Assert.Null(issuer.Issue(
+            "05aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            DateTimeOffset.UtcNow));
+        Assert.False(issuer.GetStatus().Ready);
+    }
 }

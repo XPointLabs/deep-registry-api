@@ -44,6 +44,7 @@ builder.Services.AddHttpClient<IStakingProjectionClient, StakingProjectionClient
 builder.Services.AddSingleton<NodeRegistry>();
 builder.Services.AddSingleton<CallSignalStore>();
 builder.Services.AddSingleton<CallIceCredentialIssuer>();
+builder.Services.AddSingleton<CallRuntimeReadiness>();
 builder.Services.AddHttpClient<CallPushNotifier>();
 builder.Services.AddSingleton<RegistryCatalogReplayGuard>();
 builder.Services.AddSingleton<MembershipRouteArtifactStore>();
@@ -94,9 +95,23 @@ api.MapGet("/network/membership-route-catalog", async (
 });
 
 var calls = api.MapGroup("/calls");
-calls.MapPost("/signal", async (CallSignalRequest request, CallSignalStore store, CallPushNotifier push, CancellationToken cancellationToken) =>
+calls.MapPost("/signal", async (
+    CallSignalRequest request,
+    CallSignalStore store,
+    CallPushNotifier push,
+    CallRuntimeReadiness readiness,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
 {
-    var result = store.Enqueue(request, DateTimeOffset.UtcNow);
+    var runtime = readiness.GetStatus();
+    if (!runtime.Enabled || !runtime.Ready)
+    {
+        return Results.Json(
+            new { code = runtime.State },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var result = store.Enqueue(request, timeProvider.GetUtcNow());
     if (result == CallSignalEnqueueResult.Accepted)
     {
         await push.NotifyOfferAsync(request, cancellationToken);
@@ -104,27 +119,69 @@ calls.MapPost("/signal", async (CallSignalRequest request, CallSignalStore store
 
     return result switch
     {
-        CallSignalEnqueueResult.Accepted => Results.Accepted(),
+        CallSignalEnqueueResult.Accepted or CallSignalEnqueueResult.Idempotent => Results.Accepted(),
         CallSignalEnqueueResult.Unauthorized => Results.Unauthorized(),
+        CallSignalEnqueueResult.Replay => Results.StatusCode(StatusCodes.Status409Conflict),
         CallSignalEnqueueResult.QueueFull => Results.StatusCode(StatusCodes.Status429TooManyRequests),
+        CallSignalEnqueueResult.Unavailable => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
         _ => Results.BadRequest(new { error = "invalid call signal" })
     };
 });
-calls.MapGet("/inbox/{recipient}", (string recipient, HttpRequest request, CallSignalStore store) =>
-    store.VerifyInboxRequest(recipient, request.Headers, DateTimeOffset.UtcNow)
-        ? Results.Ok(store.Drain(recipient, DateTimeOffset.UtcNow))
-        : Results.Unauthorized());
-calls.MapGet("/ice-servers/{recipient}", (string recipient, HttpRequest request, CallSignalStore store, CallIceCredentialIssuer issuer) =>
+calls.MapGet("/inbox/{recipient}", (
+    string recipient,
+    HttpRequest request,
+    CallSignalStore store,
+    CallRuntimeReadiness readiness,
+    TimeProvider timeProvider) =>
 {
-    var now = DateTimeOffset.UtcNow;
-    if (!store.VerifyIceRequest(recipient, request.Headers, now))
+    var runtime = readiness.GetStatus();
+    if (!runtime.Enabled || !runtime.Ready)
     {
-        return Results.Unauthorized();
+        return Results.Json(
+            new { code = runtime.State },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var result = store.DrainAuthenticated(recipient, request.Headers, timeProvider.GetUtcNow());
+    return result.Status switch
+    {
+        CallAuthenticatedRequestStatus.Accepted => Results.Ok(result.Signals),
+        CallAuthenticatedRequestStatus.Unauthorized => Results.Unauthorized(),
+        CallAuthenticatedRequestStatus.Replay => Results.StatusCode(StatusCodes.Status409Conflict),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+});
+calls.MapGet("/ice-servers/{recipient}", (
+    string recipient,
+    HttpRequest request,
+    CallSignalStore store,
+    CallIceCredentialIssuer issuer,
+    CallRuntimeReadiness readiness,
+    TimeProvider timeProvider) =>
+{
+    var runtime = readiness.GetStatus();
+    if (!runtime.Enabled || !runtime.Ready)
+    {
+        return Results.Json(
+            new { code = runtime.State },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var now = timeProvider.GetUtcNow();
+    var authentication = store.AuthenticateIceRequest(recipient, request.Headers, now);
+    if (authentication != CallAuthenticatedRequestStatus.Accepted)
+    {
+        return authentication switch
+        {
+            CallAuthenticatedRequestStatus.Unauthorized => Results.Unauthorized(),
+            CallAuthenticatedRequestStatus.Replay => Results.StatusCode(StatusCodes.Status409Conflict),
+            _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+        };
     }
 
     var configuration = issuer.Issue(recipient, now);
     return configuration is null
-        ? Results.Problem("TURN infrastructure is not configured.", statusCode: StatusCodes.Status503ServiceUnavailable)
+        ? Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
         : Results.Ok(configuration);
 });
 
