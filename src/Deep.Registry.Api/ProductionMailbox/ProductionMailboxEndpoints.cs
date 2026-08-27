@@ -46,12 +46,15 @@ public static class ProductionMailboxHostingExtensions
         services.Configure<ProductionMailboxOptions>(configuration.GetSection("ProductionMailbox"));
         if (!configured.Enabled) return false;
         OwnerControlDeliveryLimits(configured).Validate();
+        _ = new ProductionMailboxChallengeSourceResolver(Options.Create(configured));
         services.PostConfigure<ResponseCompressionOptions>(compression =>
             compression.ExcludedMimeTypes = compression.ExcludedMimeTypes
                 .Append(ProductionMailboxMediaTypes.OwnerControlResponse)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray());
         services.AddSingleton<ProductionMailboxMetrics>();
+        services.AddSingleton<IProductionMailboxChallengeSourceResolver,
+            ProductionMailboxChallengeSourceResolver>();
         services.AddSingleton(sp => new ProductionMailboxArtifactProvider(
             sp.GetRequiredService<IOptions<ProductionMailboxOptions>>().Value,
             sp.GetRequiredService<TimeProvider>()));
@@ -168,9 +171,23 @@ public static class ProductionMailboxHostingExtensions
                 return Results.NotFound();
             return ArtifactResult(request, bytes, SHA256.HashData(bytes), mediaType, fileName);
         });
-        group.MapPost("/challenges", async (ProductionMailboxCoordinator coordinator, CancellationToken cancellationToken) =>
+        group.MapPost("/challenges", async (
+            HttpContext context,
+            IProductionMailboxChallengeSourceResolver sourceResolver,
+            ProductionMailboxMetrics metrics,
+            ProductionMailboxCoordinator coordinator,
+            CancellationToken cancellationToken) =>
         {
-            try { return Results.Ok(await coordinator.CreateChallengeAsync(cancellationToken)); }
+            if (!sourceResolver.TryResolve(context, out var sourceKey))
+            {
+                metrics.ChallengeRejected();
+                return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+            }
+            try
+            {
+                return Results.Ok(await coordinator.CreateChallengeAsync(
+                    sourceKey, cancellationToken));
+            }
             catch (ProductionMailboxIssueException exception) when (exception.Error == ProductionMailboxIssueError.RateLimited)
             { return Results.StatusCode(StatusCodes.Status429TooManyRequests); }
             catch (ProductionMailboxIssueException exception) when (exception.Error == ProductionMailboxIssueError.IssuerUnavailable)

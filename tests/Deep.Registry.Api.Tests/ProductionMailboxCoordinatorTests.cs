@@ -33,7 +33,8 @@ public sealed class ProductionMailboxCoordinatorTests
         using var signer = new DevelopmentSoftwareEd25519Signer(fixture.IssuerSeedPath);
         var coordinator = fixture.Coordinator(state, signer);
 
-        var challenge = await coordinator.CreateChallengeAsync(CancellationToken.None);
+        var challenge = await coordinator.CreateChallengeAsync(
+            Fixture.SourceKey, CancellationToken.None);
         foreach (var pair in new[]
                  {
                      (challenge.Authority, fixture.Artifacts.AuthorityBytes),
@@ -49,7 +50,8 @@ public sealed class ProductionMailboxCoordinatorTests
         var directState = new InMemoryProductionMailboxStateStore();
         var closure = Fixture.Bytes(200, 32);
         var created = await directState.CreateChallengeAsync(
-            Fixture.Now, Fixture.Now + 60, closure, 1, Fixture.Now - 60,
+            Fixture.Now, Fixture.Now + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(1), Fixture.Now - 60,
             CancellationToken.None);
         Assert.NotNull(created);
         var wrongClosure = Fixture.Bytes(201, 32);
@@ -467,7 +469,8 @@ public sealed class ProductionMailboxCoordinatorTests
         var idempotency = Fixture.Bytes(192, 32);
         var enrollmentResponse = Fixture.Bytes(193, 64);
         var challenge = await state.CreateChallengeAsync(
-            Fixture.Now, Fixture.Now + 60, closure, 8, Fixture.Now - 60,
+            Fixture.Now, Fixture.Now + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(8), Fixture.Now - 60,
             CancellationToken.None);
         Assert.NotNull(challenge);
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -488,7 +491,8 @@ public sealed class ProductionMailboxCoordinatorTests
         var advertisementHash = Fixture.Bytes(195, 32);
         var credentialResponse = Fixture.Bytes(196, 80);
         var credentialChallenge = await state.CreateChallengeAsync(
-            Fixture.Now, Fixture.Now + 60, closure, 8, Fixture.Now - 60,
+            Fixture.Now, Fixture.Now + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(8), Fixture.Now - 60,
             CancellationToken.None);
         Assert.NotNull(credentialChallenge);
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -508,7 +512,8 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.Equal(credentialResponse, issued.CanonicalResponse);
 
         var replayChallenge = await state.CreateChallengeAsync(
-            Fixture.Now, Fixture.Now + 60, closure, 8, Fixture.Now - 60,
+            Fixture.Now, Fixture.Now + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(8), Fixture.Now - 60,
             CancellationToken.None);
         Assert.NotNull(replayChallenge);
         var replayed = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
@@ -537,7 +542,8 @@ public sealed class ProductionMailboxCoordinatorTests
         var enrollmentIdempotencyKey = Key(3);
 
         var firstEnrollmentChallenge = await state.CreateChallengeAsync(
-            firstNow, firstNow + 60, closure, 100, firstNow - 60,
+            firstNow, firstNow + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(100), firstNow - 60,
             CancellationToken.None);
         Assert.NotNull(firstEnrollmentChallenge);
         var firstEnrollment = await state.ConsumeChallengeAndEnrollAsync(
@@ -553,10 +559,12 @@ public sealed class ProductionMailboxCoordinatorTests
         var enrollmentChallenges = new[]
         {
             await state.CreateChallengeAsync(
-                renewalNow, renewalNow + 120, closure, 100, renewalNow - 60,
+                renewalNow, renewalNow + 120, closure, Fixture.SourceKey,
+                Fixture.ChallengeLimits(100), renewalNow - 60,
                 CancellationToken.None),
             await state.CreateChallengeAsync(
-                renewalNow, renewalNow + 120, closure, 100, renewalNow - 60,
+                renewalNow, renewalNow + 120, closure, Fixture.SourceKey,
+                Fixture.ChallengeLimits(100), renewalNow - 60,
                 CancellationToken.None)
         };
         Assert.All(enrollmentChallenges, Assert.NotNull);
@@ -582,7 +590,8 @@ public sealed class ProductionMailboxCoordinatorTests
         var routeDomainHash = Key(7);
         var advertisementHash = Key(8);
         var firstIssueChallenge = await state.CreateChallengeAsync(
-            renewalNow, renewalNow + 60, closure, 100, renewalNow - 60,
+            renewalNow, renewalNow + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(100), renewalNow - 60,
             CancellationToken.None);
         Assert.NotNull(firstIssueChallenge);
         var firstIssue = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
@@ -598,10 +607,12 @@ public sealed class ProductionMailboxCoordinatorTests
         var issueChallenges = new[]
         {
             await state.CreateChallengeAsync(
-                issueRenewalNow, issueRenewalNow + 60, closure, 100,
+                issueRenewalNow, issueRenewalNow + 60, closure, Fixture.SourceKey,
+                Fixture.ChallengeLimits(100),
                 issueRenewalNow - 60, CancellationToken.None),
             await state.CreateChallengeAsync(
-                issueRenewalNow, issueRenewalNow + 60, closure, 100,
+                issueRenewalNow, issueRenewalNow + 60, closure, Fixture.SourceKey,
+                Fixture.ChallengeLimits(100),
                 issueRenewalNow - 60, CancellationToken.None)
         };
         Assert.All(issueChallenges, Assert.NotNull);
@@ -628,7 +639,8 @@ public sealed class ProductionMailboxCoordinatorTests
             Assert.Equal(renewedIssueResponse, result.CanonicalResponse));
 
         var liveForkChallenge = await state.CreateChallengeAsync(
-            issueRenewalNow, issueRenewalNow + 60, closure, 100,
+            issueRenewalNow, issueRenewalNow + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(100),
             issueRenewalNow - 60, CancellationToken.None);
         Assert.NotNull(liveForkChallenge);
         var liveFork = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
@@ -641,7 +653,8 @@ public sealed class ProductionMailboxCoordinatorTests
             liveFork.Status);
 
         var rollbackChallenge = await state.CreateChallengeAsync(
-            issueRenewalNow, issueRenewalNow + 60, closure, 100,
+            issueRenewalNow, issueRenewalNow + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(100),
             issueRenewalNow - 60, CancellationToken.None);
         Assert.NotNull(rollbackChallenge);
         var rollback = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
@@ -655,7 +668,8 @@ public sealed class ProductionMailboxCoordinatorTests
             rollback.Status);
 
         var routeForkChallenge = await state.CreateChallengeAsync(
-            issueRenewalNow, issueRenewalNow + 60, closure, 100,
+            issueRenewalNow, issueRenewalNow + 60, closure, Fixture.SourceKey,
+            Fixture.ChallengeLimits(100),
             issueRenewalNow - 60, CancellationToken.None);
         Assert.NotNull(routeForkChallenge);
         var routeFork = await state.ConsumeChallengeAcceptAdvertisementAndIssueAsync(
@@ -1049,7 +1063,8 @@ public sealed class ProductionMailboxCoordinatorTests
         Assert.Equal(0, signer.Calls);
         Assert.Equal(ProductionMailboxIssueError.IssuerUnavailable,
             (await Assert.ThrowsAsync<ProductionMailboxIssueException>(() =>
-                coordinator.CreateChallengeAsync(CancellationToken.None).AsTask())).Error);
+                coordinator.CreateChallengeAsync(
+                    Fixture.SourceKey, CancellationToken.None).AsTask())).Error);
     }
 
     [Fact]
@@ -2336,6 +2351,86 @@ public sealed class ProductionMailboxCoordinatorTests
     }
 
     [Fact]
+    public async Task ChallengeEndpoint_UntrustedForwardingCannotBypassCanonicalRateLimit()
+    {
+        using var fixture = Fixture.Create(maximumChallenges: 8);
+        var values = fixture.OptionsDictionary();
+        values["ProductionMailbox:MaximumChallengesPerSourceWindow"] = "1";
+        values["ProductionMailbox:MaximumActiveChallengesPerSource"] = "1";
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment(Environments.Development);
+            builder.UseSetting("ProductionMailbox:Enabled", "true");
+            builder.ConfigureAppConfiguration((_, configuration) =>
+                configuration.AddInMemoryCollection(values));
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton<TimeProvider>(fixture.TimeProvider);
+            });
+        });
+        using var client = factory.CreateClient();
+
+        using var accepted = await client.PostAsync(
+            "/api/production-mailbox/challenges", content: null);
+        Assert.Equal(System.Net.HttpStatusCode.OK, accepted.StatusCode);
+        using var spoofed = new HttpRequestMessage(
+            HttpMethod.Post, "/api/production-mailbox/challenges");
+        spoofed.Headers.TryAddWithoutValidation("X-Forwarded-For", "198.51.100.77");
+        using var rejected = await client.SendAsync(spoofed);
+
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, rejected.StatusCode);
+        Assert.Equal(string.Empty, await rejected.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task PostgreSqlChallengeAdmission_IsAtomicAcrossStoreInstances()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var first = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+        var second = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+        await first.IsHolderRevokedAsync(Fixture.SourceKey, CancellationToken.None);
+        await second.IsHolderRevokedAsync(Fixture.SourceKey, CancellationToken.None);
+        var limits = Fixture.ChallengeLimits(4);
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 24).Select(index =>
+            (index % 2 == 0 ? first : second).CreateChallengeAsync(
+                Fixture.Now, Fixture.Now + 300, Fixture.Bytes(240, 32),
+                Fixture.SourceKey, limits, Fixture.Now - 60,
+                CancellationToken.None).AsTask()));
+
+        Assert.Equal(4, results.Count(result => result is not null));
+    }
+
+    [Fact]
+    public async Task PostgreSqlChallengeAdmission_CleansExpiredRetainedRowsDeterministically()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DEEP_TEST_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var store = new PostgreSqlProductionMailboxStateStore(database.ConnectionString);
+        var limits = Fixture.ChallengeLimits(1);
+
+        Assert.NotNull(await store.CreateChallengeAsync(
+            100, 101, Fixture.Bytes(240, 32), Fixture.SourceKey, limits, 40,
+            CancellationToken.None));
+        Assert.Null(await store.CreateChallengeAsync(
+            101, 200, Fixture.Bytes(240, 32), Fixture.SourceKey, limits, 40,
+            CancellationToken.None));
+        Assert.NotNull(await store.CreateChallengeAsync(
+            102, 200, Fixture.Bytes(240, 32), Fixture.SourceKey, limits, 101,
+            CancellationToken.None));
+
+        await using var connection = new NpgsqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var count = new NpgsqlCommand(
+            "SELECT count(*) FROM production_mailbox_challenges", connection);
+        Assert.Equal(1L, await count.ExecuteScalarAsync());
+    }
+
+    [Fact]
     public async Task OwnerControlEndpoint_AuthenticatesAndRateLimitsBeforeReadingBody()
     {
         using var fixture = Fixture.Create();
@@ -2837,6 +2932,9 @@ public sealed class ProductionMailboxCoordinatorTests
     private sealed class Fixture : IDisposable
     {
         public const ulong Now = 2_100_000_000;
+        public static byte[] SourceKey => Bytes(250, 32);
+        public static ProductionMailboxChallengeAdmissionLimits ChallengeLimits(
+            int maximum) => new(maximum, maximum, maximum, maximum);
         private readonly string root;
         private Fixture(string root, ProductionMailboxOptions options, FixedTimeProvider timeProvider,
             ProductionMailboxArtifacts artifacts, byte[] issuerPublicKey, byte[] holderPublicKey,
@@ -2955,6 +3053,9 @@ public sealed class ProductionMailboxCoordinatorTests
                 ChallengeLifetimeSeconds = 300,
                 ProofOfWorkLeadingZeroBits = 8,
                 MaximumChallengesPerWindow = maximumChallenges,
+                MaximumChallengesPerSourceWindow = maximumChallenges,
+                MaximumActiveChallengesGlobal = maximumChallenges,
+                MaximumActiveChallengesPerSource = maximumChallenges,
                 ChallengeWindowSeconds = 60,
                 UseDevelopmentInMemoryState = true,
                 DevelopmentSoftwareSignerSeedPath = Path.Combine(root, "issuer.seed"),
@@ -3085,6 +3186,9 @@ public sealed class ProductionMailboxCoordinatorTests
                 ChallengeLifetimeSeconds = 300,
                 ProofOfWorkLeadingZeroBits = 8,
                 MaximumChallengesPerWindow = previous.MaximumChallenges,
+                MaximumChallengesPerSourceWindow = previous.MaximumChallenges,
+                MaximumActiveChallengesGlobal = previous.MaximumChallenges,
+                MaximumActiveChallengesPerSource = previous.MaximumChallenges,
                 ChallengeWindowSeconds = 60,
                 UseDevelopmentInMemoryState = true,
                 DevelopmentSoftwareSignerSeedPath = Path.Combine(root, "issuer.seed"),
@@ -3171,7 +3275,8 @@ public sealed class ProductionMailboxCoordinatorTests
             byte[]? signingCertificate,
             byte[]? buildArtifact)
         {
-            var challenge = await coordinator.CreateChallengeAsync(CancellationToken.None);
+            var challenge = await coordinator.CreateChallengeAsync(
+                SourceKey, CancellationToken.None);
             var id = Decode(challenge.ChallengeId); var value = Decode(challenge.Challenge);
             var nonce = Solve(id, value, challenge.LeadingZeroBits);
             var route = DeriveOwnerRoute(ownerPublicKey);
@@ -3281,6 +3386,9 @@ public sealed class ProductionMailboxCoordinatorTests
             ["ProductionMailbox:ChallengeLifetimeSeconds"] = Options.ChallengeLifetimeSeconds.ToString(),
             ["ProductionMailbox:ProofOfWorkLeadingZeroBits"] = Options.ProofOfWorkLeadingZeroBits.ToString(),
             ["ProductionMailbox:MaximumChallengesPerWindow"] = Options.MaximumChallengesPerWindow.ToString(),
+            ["ProductionMailbox:MaximumChallengesPerSourceWindow"] = Options.MaximumChallengesPerSourceWindow.ToString(),
+            ["ProductionMailbox:MaximumActiveChallengesGlobal"] = Options.MaximumActiveChallengesGlobal.ToString(),
+            ["ProductionMailbox:MaximumActiveChallengesPerSource"] = Options.MaximumActiveChallengesPerSource.ToString(),
             ["ProductionMailbox:ChallengeWindowSeconds"] = Options.ChallengeWindowSeconds.ToString(),
             ["ProductionMailbox:DevelopmentSoftwareSignerSeedPath"] = Options.DevelopmentSoftwareSignerSeedPath,
             ["ProductionMailbox:DevelopmentClosurePublisherSeedPath"] = Options.DevelopmentClosurePublisherSeedPath,

@@ -80,15 +80,24 @@ public sealed class ProductionMailboxCoordinator
     }
 
     public async ValueTask<ProductionMailboxChallengeResponse> CreateChallengeAsync(
+        ReadOnlyMemory<byte> sourceKey,
         CancellationToken cancellationToken)
     {
+        if (sourceKey.Length != 32)
+            throw new ArgumentException("Challenge source key must contain 32 bytes.",
+                nameof(sourceKey));
         EnsureFresh();
         var now = Now();
         var challenge = await state.CreateChallengeAsync(
             now,
             checked(now + options.ChallengeLifetimeSeconds),
             ArtifactClosureHash(),
-            options.MaximumChallengesPerWindow,
+            sourceKey,
+            new ProductionMailboxChallengeAdmissionLimits(
+                options.MaximumChallengesPerWindow,
+                options.MaximumChallengesPerSourceWindow,
+                options.MaximumActiveChallengesGlobal,
+                options.MaximumActiveChallengesPerSource),
             now > options.ChallengeWindowSeconds ? now - options.ChallengeWindowSeconds : 0,
             cancellationToken);
         if (challenge is null)
@@ -1738,7 +1747,14 @@ public sealed class ProductionMailboxCoordinator
             options.MaximumCapacityPlanTargets is < 1 or > 4096 ||
             options.ProofOfWorkLeadingZeroBits is < 8 or > 22 ||
             options.MaximumChallengesPerWindow is < 1 or > 1_000_000 ||
-            options.ChallengeWindowSeconds is 0 or > 3600)
+            options.MaximumChallengesPerSourceWindow is < 1 or > 1_000_000 ||
+            options.MaximumChallengesPerSourceWindow > options.MaximumChallengesPerWindow ||
+            options.MaximumActiveChallengesGlobal is < 1 or > 1_000_000 ||
+            options.MaximumActiveChallengesPerSource is < 1 or > 1_000_000 ||
+            options.MaximumActiveChallengesPerSource > options.MaximumActiveChallengesGlobal ||
+            options.ChallengeTrustedProxyCidrs is null or { Length: > 64 } ||
+            options.ChallengeWindowSeconds is 0 or > 3600 ||
+            options.ChallengeLifetimeSeconds < options.ChallengeWindowSeconds)
             throw new InvalidOperationException("Production mailbox coordinator options are invalid.");
     }
 

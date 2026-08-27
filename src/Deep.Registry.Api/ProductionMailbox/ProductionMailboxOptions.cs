@@ -23,7 +23,11 @@ public sealed class ProductionMailboxOptions
     public uint ChallengeLifetimeSeconds { get; set; } = 300;
     public int ProofOfWorkLeadingZeroBits { get; set; } = 18;
     public int MaximumChallengesPerWindow { get; set; } = 4096;
+    public int MaximumChallengesPerSourceWindow { get; set; } = 32;
+    public int MaximumActiveChallengesGlobal { get; set; } = 8192;
+    public int MaximumActiveChallengesPerSource { get; set; } = 32;
     public uint ChallengeWindowSeconds { get; set; } = 60;
+    public string[] ChallengeTrustedProxyCidrs { get; set; } = [];
     public string ExternalSignerSocketPath { get; set; } = "";
     public uint ExternalSignerTimeoutSeconds { get; set; } = 5;
     public string ClosurePublisherSignerSocketPath { get; set; } = "";

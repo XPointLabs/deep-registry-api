@@ -11,6 +11,29 @@ public sealed record ProductionMailboxChallengeState(
     byte[] ArtifactClosureHash,
     ulong ExpiresAtUnixSeconds);
 
+public sealed record ProductionMailboxChallengeAdmissionLimits(
+    int MaximumPerWindow,
+    int MaximumPerSourceWindow,
+    int MaximumActiveGlobal,
+    int MaximumActivePerSource);
+
+internal static class ProductionMailboxChallengeAdmissionPolicy
+{
+    internal static void Validate(
+        ReadOnlyMemory<byte> sourceKey,
+        ProductionMailboxChallengeAdmissionLimits limits)
+    {
+        if (sourceKey.Length != 32 ||
+            limits.MaximumPerWindow is < 1 or > 1_000_000 ||
+            limits.MaximumPerSourceWindow is < 1 or > 1_000_000 ||
+            limits.MaximumPerSourceWindow > limits.MaximumPerWindow ||
+            limits.MaximumActiveGlobal is < 1 or > 1_000_000 ||
+            limits.MaximumActivePerSource is < 1 or > 1_000_000 ||
+            limits.MaximumActivePerSource > limits.MaximumActiveGlobal)
+            throw new ArgumentException("Challenge admission limits are invalid.");
+    }
+}
+
 public sealed record ProductionMailboxIssuanceState(
     byte[] IdempotencyKey,
     byte[] CanonicalResponse,
@@ -135,7 +158,8 @@ public interface IProductionMailboxStateStore
         ulong nowUnixSeconds,
         ulong expiresAtUnixSeconds,
         ReadOnlyMemory<byte> artifactClosureHash,
-        int maximumChallenges,
+        ReadOnlyMemory<byte> sourceKey,
+        ProductionMailboxChallengeAdmissionLimits limits,
         ulong windowStartUnixSeconds,
         CancellationToken cancellationToken);
 
@@ -322,7 +346,6 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
     private readonly Dictionary<string, MutablePromotionRecord> promotions =
         new(StringComparer.Ordinal);
     private byte[]? publishedArtifactClosureHash;
-    private readonly List<ulong> challengeTimes = [];
     private long nextOwnerSequence;
     private readonly ProductionMailboxOwnerControlStoreLimits ownerControlLimits;
 
@@ -371,19 +394,39 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
 
     public async ValueTask<ProductionMailboxChallengeState?> CreateChallengeAsync(
         ulong nowUnixSeconds, ulong expiresAtUnixSeconds,
-        ReadOnlyMemory<byte> artifactClosureHash, int maximumChallenges,
+        ReadOnlyMemory<byte> artifactClosureHash, ReadOnlyMemory<byte> sourceKey,
+        ProductionMailboxChallengeAdmissionLimits limits,
         ulong windowStartUnixSeconds, CancellationToken cancellationToken)
     {
+        ProductionMailboxChallengeAdmissionPolicy.Validate(sourceKey, limits);
         await gate.WaitAsync(cancellationToken);
         try
         {
-            challengeTimes.RemoveAll(value => value < windowStartUnixSeconds);
-            if (challengeTimes.Count >= maximumChallenges) return null;
+            foreach (var key in challenges
+                         .Where(pair => pair.Value.ExpiresAtUnixSeconds < nowUnixSeconds &&
+                             pair.Value.CreatedAtUnixSeconds < windowStartUnixSeconds)
+                         .Select(pair => pair.Key).ToArray())
+                challenges.Remove(key);
+            var source = Convert.ToHexString(sourceKey.Span);
+            if (challenges.Count(pair =>
+                    pair.Value.CreatedAtUnixSeconds >= windowStartUnixSeconds) >=
+                    limits.MaximumPerWindow ||
+                challenges.Count(pair => pair.Value.SourceKey == source &&
+                    pair.Value.CreatedAtUnixSeconds >= windowStartUnixSeconds) >=
+                    limits.MaximumPerSourceWindow ||
+                challenges.Count(pair => !pair.Value.Used &&
+                    pair.Value.ExpiresAtUnixSeconds >= nowUnixSeconds) >=
+                    limits.MaximumActiveGlobal ||
+                challenges.Count(pair => pair.Value.SourceKey == source &&
+                    !pair.Value.Used &&
+                    pair.Value.ExpiresAtUnixSeconds >= nowUnixSeconds) >=
+                    limits.MaximumActivePerSource)
+                return null;
             var id = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
             var challenge = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
             challenges[Convert.ToHexString(id)] = new ChallengeRecord(
-                challenge, artifactClosureHash.ToArray(), expiresAtUnixSeconds, false);
-            challengeTimes.Add(nowUnixSeconds);
+                challenge, artifactClosureHash.ToArray(), source, nowUnixSeconds,
+                expiresAtUnixSeconds, false);
             return new(id, challenge, artifactClosureHash.ToArray(), expiresAtUnixSeconds);
         }
         finally { gate.Release(); }
@@ -1259,7 +1302,8 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
             .ToArray());
 
     private sealed record ChallengeRecord(
-        byte[] Challenge, byte[] ArtifactClosureHash, ulong ExpiresAtUnixSeconds, bool Used);
+        byte[] Challenge, byte[] ArtifactClosureHash, string SourceKey,
+        ulong CreatedAtUnixSeconds, ulong ExpiresAtUnixSeconds, bool Used);
     private bool TryGetLiveChallenge(
         ReadOnlyMemory<byte> challengeId, ReadOnlyMemory<byte> expectedChallenge,
         ulong nowUnixSeconds, ReadOnlyMemory<byte> expectedArtifactClosureHash,
@@ -1447,28 +1491,61 @@ public sealed partial class PostgreSqlProductionMailboxStateStore(
 
     public async ValueTask<ProductionMailboxChallengeState?> CreateChallengeAsync(
         ulong nowUnixSeconds, ulong expiresAtUnixSeconds,
-        ReadOnlyMemory<byte> artifactClosureHash, int maximumChallenges,
+        ReadOnlyMemory<byte> artifactClosureHash, ReadOnlyMemory<byte> sourceKey,
+        ProductionMailboxChallengeAdmissionLimits limits,
         ulong windowStartUnixSeconds, CancellationToken cancellationToken)
     {
+        ProductionMailboxChallengeAdmissionPolicy.Validate(sourceKey, limits);
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        await using (var admissionLock = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(6075994319133652300)", connection,
+            transaction))
+            await admissionLock.ExecuteNonQueryAsync(cancellationToken);
         await using (var cleanup = new NpgsqlCommand(
-            "DELETE FROM production_mailbox_challenges WHERE expires_at < @now", connection, transaction))
+            "DELETE FROM production_mailbox_challenges WHERE expires_at < @now AND created_at < @window",
+            connection, transaction))
         {
             cleanup.Parameters.AddWithValue("now", checked((long)nowUnixSeconds));
+            cleanup.Parameters.AddWithValue("window", checked((long)windowStartUnixSeconds));
             await cleanup.ExecuteNonQueryAsync(cancellationToken);
         }
-        await using var count = new NpgsqlCommand(
-            "SELECT count(*) FROM production_mailbox_challenges WHERE created_at >= @window", connection, transaction);
+        await using var count = new NpgsqlCommand("""
+            SELECT
+                (SELECT count(*) FROM production_mailbox_challenges
+                    WHERE created_at >= @window),
+                (SELECT count(*) FROM production_mailbox_challenges
+                    WHERE source_key = @source AND created_at >= @window),
+                (SELECT count(*) FROM production_mailbox_challenges
+                    WHERE used = false AND expires_at >= @now),
+                (SELECT count(*) FROM production_mailbox_challenges
+                    WHERE source_key = @source AND used = false AND expires_at >= @now)
+            """, connection, transaction);
         count.Parameters.AddWithValue("window", checked((long)windowStartUnixSeconds));
-        if ((long)(await count.ExecuteScalarAsync(cancellationToken) ?? 0L) >= maximumChallenges) return null;
+        count.Parameters.AddWithValue("source", sourceKey.ToArray());
+        count.Parameters.AddWithValue("now", checked((long)nowUnixSeconds));
+        await using var reader = await count.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            throw new InvalidOperationException("Challenge admission count returned no row.");
+        var rejected = reader.GetInt64(0) >= limits.MaximumPerWindow ||
+            reader.GetInt64(1) >= limits.MaximumPerSourceWindow ||
+            reader.GetInt64(2) >= limits.MaximumActiveGlobal ||
+            reader.GetInt64(3) >= limits.MaximumActivePerSource;
+        await reader.DisposeAsync();
+        if (rejected)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return null;
+        }
         var id = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
         var challenge = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         await using var insert = new NpgsqlCommand(
-            "INSERT INTO production_mailbox_challenges(challenge_id, challenge, artifact_closure_hash, created_at, expires_at, used) VALUES(@id,@challenge,@closure,@now,@expires,false)",
+            "INSERT INTO production_mailbox_challenges(challenge_id, challenge, artifact_closure_hash, source_key, created_at, expires_at, used) VALUES(@id,@challenge,@closure,@source,@now,@expires,false)",
             connection, transaction);
         insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("challenge", challenge);
         insert.Parameters.AddWithValue("closure", artifactClosureHash.ToArray());
+        insert.Parameters.AddWithValue("source", sourceKey.ToArray());
         insert.Parameters.AddWithValue("now", checked((long)nowUnixSeconds));
         insert.Parameters.AddWithValue("expires", checked((long)expiresAtUnixSeconds));
         await insert.ExecuteNonQueryAsync(cancellationToken);
@@ -2728,9 +2805,22 @@ public sealed partial class PostgreSqlProductionMailboxStateStore(
             const string sql = """
                 CREATE TABLE IF NOT EXISTS production_mailbox_challenges(
                     challenge_id bytea PRIMARY KEY, challenge bytea NOT NULL, created_at bigint NOT NULL,
-                    artifact_closure_hash bytea NOT NULL, expires_at bigint NOT NULL, used boolean NOT NULL);
+                    artifact_closure_hash bytea NOT NULL, source_key bytea NOT NULL,
+                    expires_at bigint NOT NULL, used boolean NOT NULL);
+                ALTER TABLE production_mailbox_challenges
+                    ADD COLUMN IF NOT EXISTS source_key bytea;
+                UPDATE production_mailbox_challenges
+                    SET source_key=decode(repeat('00',32),'hex') WHERE source_key IS NULL;
+                ALTER TABLE production_mailbox_challenges
+                    ALTER COLUMN source_key SET NOT NULL;
                 CREATE INDEX IF NOT EXISTS ix_production_mailbox_challenges_created_at
                     ON production_mailbox_challenges(created_at);
+                CREATE INDEX IF NOT EXISTS ix_production_mailbox_challenges_source_created_at
+                    ON production_mailbox_challenges(source_key,created_at);
+                CREATE INDEX IF NOT EXISTS ix_production_mailbox_challenges_active_expires_at
+                    ON production_mailbox_challenges(expires_at) WHERE used=false;
+                CREATE INDEX IF NOT EXISTS ix_production_mailbox_challenges_source_active_expires_at
+                    ON production_mailbox_challenges(source_key,expires_at) WHERE used=false;
                 CREATE TABLE IF NOT EXISTS production_mailbox_issuances(
                     idempotency_key bytea PRIMARY KEY, response bytea NOT NULL, issued_at bigint NOT NULL,
                     expires_at bigint NOT NULL);
