@@ -4,9 +4,11 @@ The workspace rules in `../AGENTS.md` apply. This file contains only registry-sp
 
 ## Owns
 
-- Authenticated node registration, transport profiles and membership/catalog projections.
-- Durable signed mailbox authority/control/history state and reconciliation.
-- Production call signaling, inbox and signed ICE/TURN credential issuance.
+- Authenticated node registration, membership projections and byte-identical
+  signed network/directory/carrier/media catalog distribution.
+- Witness coordination and deterministic publication; no per-client route choice.
+- Pre-cutover mailbox/call state only until destructive reset; target call
+  signaling is ratcheted messaging and target allocation is owned by CallRelay.
 - Snapshot persistence, corruption quarantine, runtime counters and readiness.
 
 Contract event indexing belongs in `xpoint-staking-backend`; node heartbeat creation belongs in
@@ -18,8 +20,8 @@ Contract event indexing belongs in `xpoint-staking-backend`; node heartbeat crea
   stake, contributor, operator or mailbox-owner facts.
 - Protocol-level signatures remain mandatory independently of TLS validation.
 - Registry TLS uses its own standard trust configuration and never reads file-service TLS options.
-- Call/ICE endpoints authenticate participants, bound lifetimes and replay state; TURN secrets are
-  configuration inputs and never appear in responses, logs or snapshots.
+- Do not add a target contact resolver, call inbox, ICE endpoint or call-allocation
+  authority. Legacy endpoints are removal inputs, never a fallback.
 - Persistence is deterministic; corrupted state is quarantined with diagnostics, never accepted.
 - Readiness fails closed while reconciliation or required authority inputs are unhealthy.
 - Update xnode/client/devops/e2e consumers and operator docs for payload, endpoint or config changes.
