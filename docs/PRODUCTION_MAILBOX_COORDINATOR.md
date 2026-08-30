@@ -3,6 +3,12 @@
 This component is disabled by default. It issues only official-cloud mailbox selections and
 capability grants. Direct P2P and self-hosted node networks do not call this API and remain free.
 
+Product status reviewed 2026-08-30: the public issuance surface exists, but
+production clean-install distribution, route-continuity activation and
+multi-generation offline recovery are not release-ready. Direct P2P must not
+be routed through this API. A future on-prem profile requires a distinct
+user-managed coordinator selected by profile ownership.
+
 ## Security boundary
 
 - Mr. X signs `PMA1` offline. The Registry process receives only the public artifact and a pinned
@@ -97,6 +103,12 @@ selection contains exactly two ordered replicas. Clients send to the first repli
 and fail over to the second only after a definitely pre-acceptance transport failure or an explicit
 non-accepting response. An ambiguous post-dispatch timeout is retried with the exact same operation
 identity so node-side duplicate handling remains authoritative.
+
+The ability to author/return an `OfflineCheckpoint` is not a 365-day product
+availability claim. The MAUI host still lacks complete initial forward
+bootstrap, protected build-floor recovery, proactive bound-runtime refresh and
+physical 30/180/365-day evidence; the route-activation NO-GO below also remains
+authoritative.
 
 Every response embeds the exact canonical authority, revocation, and topology bytes in the
 corresponding artifact reference as `canonicalBase64Url`. Its `contentPath` is content-addressed;
