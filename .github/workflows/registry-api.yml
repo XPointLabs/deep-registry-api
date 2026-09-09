@@ -11,17 +11,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          path: deep-registry-api
+
+      - name: Checkout protocol
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/deep-protocol
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
+          path: deep-protocol
+
+      - name: Checkout xnode
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/xnode
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
+          path: xnode
 
       - name: Install .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.301
 
       - name: Restore
-        run: dotnet restore
+        working-directory: deep-registry-api
+        run: dotnet restore -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
 
       - name: Build
-        run: dotnet build --no-restore --configuration Release
+        working-directory: deep-registry-api
+        run: dotnet build --no-restore --configuration Release -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
 
       - name: Test
-        run: dotnet test --no-build --configuration Release
+        working-directory: deep-registry-api
+        run: dotnet test --no-build --configuration Release -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
