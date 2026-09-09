@@ -8,8 +8,8 @@
 
   <PropertyGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
     <DefineConstants>$(DefineConstants);DEEP_PROTOCOL_DIRECTORY_V1</DefineConstants>
-    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <NuGetLockFilePath>$(BaseIntermediateOutputPath)packages.local-cutover.lock.json</NuGetLockFilePath>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <NuGetLockFilePath>$(BaseIntermediateOutputPath)source-cutover\packages.lock.json</NuGetLockFilePath>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(DirectoryCompactionTestSeam)' == 'true'">
