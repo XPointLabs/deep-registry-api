@@ -5,6 +5,11 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Deep.Registry.Api.DirectoryPublication;
 
+internal sealed class ContactResolveDirectoryAdmissionException : IOException
+{
+    internal ContactResolveDirectoryAdmissionException(string message) : base(message) { }
+}
+
 internal sealed class ContactResolveDirectoryPackageRequest
 {
     private readonly byte[] networkId;

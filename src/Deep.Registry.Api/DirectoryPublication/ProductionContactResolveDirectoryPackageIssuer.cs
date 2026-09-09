@@ -46,11 +46,6 @@ internal interface IContactResolveOneUseRequestLedger
         CancellationToken cancellationToken);
 }
 
-internal sealed class ContactResolveDirectoryAdmissionException : IOException
-{
-    internal ContactResolveDirectoryAdmissionException(string message) : base(message) { }
-}
-
 /// <summary>
 /// Supplies the exact current canonical directory/network closure and already-verified protocol
 /// capabilities. It never derives authority from request bytes or from the publication catalog.
