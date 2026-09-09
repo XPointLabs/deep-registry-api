@@ -6,9 +6,27 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
-  <ItemGroup>
+  <PropertyGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <DefineConstants>$(DefineConstants);DEEP_PROTOCOL_DIRECTORY_V1</DefineConstants>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath>$(BaseIntermediateOutputPath)packages.local-cutover.lock.json</NuGetLockFilePath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(DirectoryCompactionTestSeam)' == 'true'">
+    <DefineConstants>$(DefineConstants);DEEP_DIRECTORY_COMPACTION_TEST_SEAM</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' != 'true'">
     <PackageReference Include="Deep.Protocol" Version="[0.5.0-production.e75bfed]" />
     <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.5.0-production.e75bfed]" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol\Deep.Protocol.csproj" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.MembershipRoutes\Deep.Protocol.MembershipRoutes.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Rebex.Elliptic.Ed25519" Version="1.2.2" />
     <PackageReference Include="Sodium.Core" Version="1.4.1" />
@@ -16,6 +34,10 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Deep.Registry.Api.Tests" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <InternalsVisibleTo Include="Deep.Protocol.Tests" />
   </ItemGroup>
 
 </Project>

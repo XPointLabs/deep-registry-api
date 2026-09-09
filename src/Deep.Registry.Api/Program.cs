@@ -1,6 +1,20 @@
 ﻿using Deep.Registry.Api;
 
+using Microsoft.AspNetCore.HttpOverrides;
+using System.Net;
+
 var builder = WebApplication.CreateBuilder(args);
+
+#if DEEP_PROTOCOL_DIRECTORY_V1
+var contactResolveOperatorExit = await
+    Deep.Registry.Api.DirectoryPublication.ContactResolveOperatorCommand.TryRunAsync(
+        args, builder.Configuration);
+if (contactResolveOperatorExit is not null)
+{
+    Environment.ExitCode = contactResolveOperatorExit.Value;
+    return;
+}
+#endif
 
 builder.Services.Configure<RegistryOptions>(builder.Configuration.GetSection("Registry"));
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -10,9 +24,37 @@ builder.Services.Configure<CallInfrastructureOptions>(builder.Configuration.GetS
 builder.Services.Configure<MembershipProjectionOptions>(
     builder.Configuration.GetSection("MembershipProjection"));
 builder.Services.AddSingleton(TimeProvider.System);
+var trustedReverseProxy = builder.Configuration["ReverseProxy:KnownProxyIp"];
+var useForwardedHeaders = !string.IsNullOrWhiteSpace(trustedReverseProxy);
+if (useForwardedHeaders)
+{
+    if (!IPAddress.TryParse(trustedReverseProxy, out var knownProxy))
+        throw new InvalidOperationException("ReverseProxy:KnownProxyIp must be one exact IP address.");
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        options.ForwardLimit = 1;
+        options.KnownProxies.Clear();
+        options.KnownIPNetworks.Clear();
+        options.KnownProxies.Add(knownProxy);
+    });
+}
 var productionMailboxEnabled =
     Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.AddProductionMailbox(
         builder.Services, builder.Configuration, builder.Environment);
+var directoryPublication =
+    Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
+        .AddDirectoryPublication(builder.Services, builder.Configuration);
+var contactResolveDirectoryPackages =
+    Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExtensions
+        .AddContactResolveDirectoryPackages(builder.Services, builder.Configuration);
+var targetedCurrentValueDirectoryPackages =
+    Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
+        .AddTargetedCurrentValueDirectoryPackages(
+            builder.Services, builder.Configuration, contactResolveDirectoryPackages);
+var contactRouteClosures =
+    Deep.Registry.Api.ContactRouteClosure.ContactRouteClosureHostingExtensions
+        .AddContactRouteClosureTransport(builder.Services, builder.Configuration);
 builder.Services.AddSingleton(services =>
     P04MembershipArtifactVerifier.Create(
         services.GetServices<Deep.Protocol.DeepExtension.Membership.IMembershipSignatureVerifier>()));
@@ -55,12 +97,22 @@ var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+if (useForwardedHeaders) app.UseForwardedHeaders();
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-registry-api" }));
 app.MapMembershipProjectionEndpoints();
 if (productionMailboxEnabled)
     Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.MapProductionMailboxEndpoints(app);
+Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
+    .MapDirectoryPublicationEndpoints(app, directoryPublication);
+Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExtensions
+    .MapContactResolveDirectoryPackageEndpoint(app, contactResolveDirectoryPackages);
+Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
+    .MapTargetedCurrentValueDirectoryPackageEndpoint(
+        app, targetedCurrentValueDirectoryPackages);
+Deep.Registry.Api.ContactRouteClosure.ContactRouteClosureHostingExtensions
+    .MapContactRouteClosureTransportEndpoint(app, contactRouteClosures);
 
 var api = app.MapGroup("/api");
 

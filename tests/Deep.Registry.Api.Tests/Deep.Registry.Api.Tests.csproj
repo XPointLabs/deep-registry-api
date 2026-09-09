@@ -7,10 +7,30 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+  <PropertyGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <DefineConstants>$(DefineConstants);DEEP_PROTOCOL_DIRECTORY_V1</DefineConstants>
+    <AssemblyName>Deep.Protocol.Tests</AssemblyName>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath>$(BaseIntermediateOutputPath)packages.local-cutover.lock.json</NuGetLockFilePath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(DirectoryCompactionTestSeam)' == 'true'">
+    <DefineConstants>$(DefineConstants);DEEP_DIRECTORY_COMPACTION_TEST_SEAM</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' != 'true'">
     <PackageReference Include="Deep.Protocol" Version="[0.5.0-production.e75bfed]" />
     <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.5.0-production.e75bfed]" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol\Deep.Protocol.csproj"
+                      AdditionalProperties="RecoveryTestSeam=true" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.MembershipRoutes\Deep.Protocol.MembershipRoutes.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.3" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
@@ -23,8 +43,20 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Deep.Registry.Api\Deep.Registry.Api.csproj" />
+    <ProjectReference Include="..\..\..\xnode\src\XNode.Core\XNode.Core.csproj"
+                      Condition="'$(DirectoryVerifierFocused)' != 'true'" />
+    <ProjectReference Include="..\..\..\xnode\src\XNode.Registry\XNode.Registry.csproj"
+                      Condition="'$(DirectoryVerifierFocused)' != 'true'" />
     <ProjectReference Include="..\..\..\xnode\src\XNode\XNode.csproj"
+                      Condition="'$(DirectoryVerifierFocused)' != 'true'"
                       Aliases="xnode" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DirectoryVerifierFocused)' == 'true'">
+    <Compile Remove="PrivacyContactXNodeContractTests.cs" />
+    <Compile Remove="ProductionMailboxCoordinatorTests.cs" />
+    <Compile Remove="ProductionMailboxV2PublicationTests.cs" />
+    <Compile Remove="ProductionMailboxV2XNodeContractTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
