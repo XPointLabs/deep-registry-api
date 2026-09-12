@@ -314,6 +314,24 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
     }
 
     [Fact]
+    public async Task ProductionFileSourceReissuesLiveFreshnessFromImmutableBootstrap()
+    {
+        using var store = FileArtifactStore.Create(Fixture);
+        using var custody = new FixtureProductionWitnessCustody();
+        using var source = store.Source(
+            new FixedContactResolveTrustedTime(
+                205, Repeat(0xd1, 16), 5_000),
+            custody);
+
+        var snapshot = await source.ReadAsync(store.Request, default);
+        var proof = await source.ReadAsync(snapshot, store.Request, default);
+
+        Assert.Equal(Fixture.Network, snapshot.NetworkId.ToArray());
+        Assert.Equal(AccountDirectoryAdp1ResultKind.NonMembership, proof.ResultKind);
+        Assert.True(File.Exists(store.StatePath));
+    }
+
+    [Fact]
     public async Task FileBackedContactResolveSourceRejectsTamperedArtifact()
     {
         using var store = FileArtifactStore.Create(Fixture);
@@ -612,7 +630,7 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
                 null,
                 null,
                 null);
-            var operation = Path.Combine(root, "requests", Convert.ToHexString(request.Nonce.Span));
+            var operation = Path.Combine(root, "bootstrap");
             Directory.CreateDirectory(operation);
             var candidate = fixture.Candidate();
             var closure = candidate.VerificationClosure;
@@ -679,6 +697,17 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
                 IntegrityKey,
                 trustedTime);
 
+        internal FileContactResolveDirectoryArtifactSource Source(
+            IContactResolveTrustedTimeContextSource trustedTime,
+            IContactResolveDtt1WitnessCustody custody) => new(
+                RootPath,
+                StatePath,
+                Fixture.Network,
+                Fixture.GenesisAuthorityCoreHash,
+                IntegrityKey,
+                trustedTime,
+                witnessCustody: custody);
+
         internal string ArtifactPath(string role, int ordinal) =>
             Path.Combine(OperationPath, $"{role}.{ordinal:D4}.bin");
 
@@ -720,15 +749,68 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
         }
     }
 
-    private sealed class FixedContactResolveTrustedTime(ulong observedUnixTime) :
+    private sealed class FixedContactResolveTrustedTime(
+        ulong observedUnixTime,
+        byte[]? bootId = null,
+        ulong sample = 1_000) :
         IContactResolveTrustedTimeContextSource
     {
         public ValueTask<ContactResolveTrustedTimeContext> ReadAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(new ContactResolveTrustedTimeContext(
-                Repeat(0xc1, 16), 1_000, observedUnixTime, 5));
+                bootId ?? Repeat(0xc1, 16), sample, observedUnixTime, 5));
         }
+    }
+
+    private sealed class FixtureProductionWitnessCustody :
+        IContactResolveDtt1WitnessCustody,
+        IDisposable
+    {
+        private readonly FixtureWitnessSigner[] signers = Enumerable.Range(0, 3)
+            .Select(index => new FixtureWitnessSigner(
+                Repeat(checked((byte)(0x40 + index)), 32),
+                Repeat(checked((byte)(0x50 + index)), 32)))
+            .ToArray();
+
+        public ValueTask<IReadOnlyList<IAccountDirectoryDtt1WitnessSigner>> GetSignersAsync(
+            VerifiedXPointNetworkAuthority authority,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IReadOnlyList<IAccountDirectoryDtt1WitnessSigner>>(signers);
+        }
+
+        public void Dispose()
+        {
+            foreach (var signer in signers) signer.Dispose();
+        }
+    }
+
+    private sealed class FixtureWitnessSigner : IAccountDirectoryDtt1WitnessSigner, IDisposable
+    {
+        private readonly byte[] id;
+        private readonly byte[] privateKey;
+
+        internal FixtureWitnessSigner(byte[] id, byte[] seed)
+        {
+            this.id = id;
+            var pair = PublicKeyAuth.GenerateKeyPair(seed);
+            privateKey = pair.PrivateKey.ToArray();
+        }
+
+        public ReadOnlyMemory<byte> WitnessId => id;
+
+        public ValueTask<ReadOnlyMemory<byte>> SignDtt1Async(
+            ReadOnlyMemory<byte> signingInput,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<ReadOnlyMemory<byte>>(
+                PublicKeyAuth.SignDetached(signingInput.ToArray(), privateKey));
+        }
+
+        public void Dispose() => CryptographicOperations.ZeroMemory(privateKey);
     }
 
     private sealed class MutatingContactResolveTrustedTime(Action mutate) :

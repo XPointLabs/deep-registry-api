@@ -91,7 +91,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
     private static ReadOnlySpan<byte> StateMagic => "CRS1"u8;
     private const int StatePayloadBytes = 4 + 2 + 16 + 8 + 32 + 8 + 32 + 1;
     private readonly string rootPath;
-    private readonly string requestsPath;
+    private readonly string bootstrapPath;
     private readonly string currentValuesPath;
     private readonly string statePath;
     private readonly byte[] networkId;
@@ -99,6 +99,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
     private readonly byte[] integrityKey;
     private readonly IContactResolveTrustedTimeContextSource trustedTimeSource;
     private readonly IContactResolveVerifiedAccountDirectoryCheckpointSource? checkpointSource;
+    private readonly IContactResolveDtt1WitnessCustody? witnessCustody;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConditionalWeakTable<ContactResolveCanonicalDirectorySnapshot, VerifiedOperation>
         operations = new();
@@ -110,7 +111,8 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         ReadOnlySpan<byte> genesisAuthorityCoreHash,
         ReadOnlySpan<byte> integrityKey,
         IContactResolveTrustedTimeContextSource trustedTimeSource,
-        IContactResolveVerifiedAccountDirectoryCheckpointSource? checkpointSource = null)
+        IContactResolveVerifiedAccountDirectoryCheckpointSource? checkpointSource = null,
+        IContactResolveDtt1WitnessCustody? witnessCustody = null)
     {
         if (string.IsNullOrWhiteSpace(readOnlyRoot))
             throw new ArgumentException("A read-only ContactResolve artifact root is required.", nameof(readOnlyRoot));
@@ -124,7 +126,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             throw new ArgumentException("A non-zero 32-byte integrity key is required.", nameof(integrityKey));
 
         rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(readOnlyRoot));
-        requestsPath = Child(rootPath, "requests");
+        bootstrapPath = Child(rootPath, "bootstrap");
         currentValuesPath = Child(rootPath, "current-values");
         this.statePath = Path.GetFullPath(statePath);
         if (IsWithin(this.statePath, rootPath))
@@ -134,6 +136,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         this.integrityKey = integrityKey.ToArray();
         this.trustedTimeSource = trustedTimeSource ?? throw new ArgumentNullException(nameof(trustedTimeSource));
         this.checkpointSource = checkpointSource;
+        this.witnessCustody = witnessCustody;
     }
 
     public async ValueTask<ContactResolveCanonicalDirectorySnapshot> ReadAsync(
@@ -189,8 +192,10 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         ulong? publicationGeneration = null;
         if (request.ExpectedDirectoryLookupKey.IsEmpty)
         {
-            EnsureDirectory(requestsPath);
-            operationPath = Child(requestsPath, Convert.ToHexString(request.Nonce.Span));
+            // An untargeted resolve carries a fresh caller nonce, so a publisher cannot prepare a
+            // directory named after that nonce. Serve the fixed, signed generation-zero closure;
+            // the issuer binds its independently verified facts to the live request afterwards.
+            operationPath = bootstrapPath;
             EnsureDirectory(operationPath);
         }
         else
@@ -217,8 +222,9 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         var trustedTime = await trustedTimeSource.ReadAsync(cancellationToken).ConfigureAwait(false);
         trustedTime.Validate();
         var bootId = Hex(first.Inventory.SnapshotBootIdHex, 16, "snapshot boot ID");
-        if (!Fixed(bootId, trustedTime.ServerBootId.Span) ||
-            trustedTime.ServerMonotonicSample < first.Inventory.SnapshotCurrentSample)
+        var ceremonyMode = witnessCustody is not null;
+        if (!ceremonyMode && (!Fixed(bootId, trustedTime.ServerBootId.Span) ||
+            trustedTime.ServerMonotonicSample < first.Inventory.SnapshotCurrentSample))
         {
             throw new CryptographicException("The artifact snapshot is outside the current trusted monotonic boot/sample.");
         }
@@ -251,15 +257,19 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             protectedLkg: null,
             currentCheckpoint: null,
             first.Inventory.SupportedReader);
-        if (!freshness.IsCurrentAtMonotonic(
-                trustedTime.ServerBootId.Span, trustedTime.ServerMonotonicSample))
+        var verificationBoot = ceremonyMode ? bootId : trustedTime.ServerBootId.ToArray();
+        var verificationSample = ceremonyMode
+            ? first.Inventory.SnapshotCurrentSample
+            : trustedTime.ServerMonotonicSample;
+        if (!freshness.IsCurrentAtMonotonic(verificationBoot, verificationSample))
         {
             throw new CryptographicException("The verified directory snapshot is no longer current.");
         }
         var trustedLower = trustedTime.ObservedUnixTime - trustedTime.UncertaintySeconds;
         var trustedUpper = trustedTime.ObservedUnixTime + trustedTime.UncertaintySeconds;
-        if (trustedLower < freshness.TrustedLowerUnixSeconds ||
+        if (!ceremonyMode && (trustedLower < freshness.TrustedLowerUnixSeconds ||
             trustedUpper > freshness.TrustedUpperUnixSeconds)
+           )
         {
             throw new CryptographicException(
                 "The threshold DTT1 interval does not contain the independent trusted-time interval.");
@@ -280,9 +290,14 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             first.Inventory.SupportedReader);
         var candidate = new DirectoryPublicationCandidate(
             xnv[^1].Span, xnh[^1].Span, pmt[^1].Span, closure);
+        var verificationTime = ceremonyMode
+            ? new ContactResolveTrustedTimeContext(
+                bootId, first.Inventory.SnapshotCurrentSample,
+                freshness.TrustedLowerUnixSeconds, 1)
+            : trustedTime;
         var networkVerifier = new ProductionDirectoryCanonicalPublicationVerifier(
             new DirectoryPublicationTrustAnchor(networkId, 0, genesisAuthorityCoreHash),
-            new TrustedTimeClock(trustedTime),
+            new TrustedTimeClock(verificationTime),
             new ExactChallenge(first.Inventory));
         var verifiedNetwork = await networkVerifier.VerifyAsync(candidate.Freeze(), cancellationToken)
             .ConfigureAwait(false);
@@ -354,6 +369,84 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             if (!Fixed(firstPointer, secondPointer))
                 throw new CryptographicException(
                     "The targeted current-value publication changed during verification.");
+        }
+
+        if (witnessCustody is not null)
+        {
+            var liveNonce = RandomNumberGenerator.GetBytes(32);
+            try
+            {
+                var epoch = AccountDirectoryDtt1IssuanceEpoch.Derive(
+                    authority, trustedTime.ObservedUnixTime, trustedTime.UncertaintySeconds);
+                var signers = await witnessCustody.GetSignersAsync(authority, cancellationToken)
+                    .ConfigureAwait(false);
+                var liveRequest = new AccountDirectoryProofAuthoringRequest(
+                    request.NetworkId.Span,
+                    liveNonce,
+                    trustedTime.ServerBootId.Span,
+                    trustedTime.ServerMonotonicSample,
+                    exactAdh.Span,
+                    xnv[^1].Span,
+                    trustedTime.ObservedUnixTime,
+                    trustedTime.UncertaintySeconds,
+                    trustedTime.ObservedUnixTime - trustedTime.UncertaintySeconds,
+                    trustedTime.ObservedUnixTime + trustedTime.UncertaintySeconds,
+                    epoch,
+                    first.Inventory.SupportedReader);
+                var live = await AccountDirectoryProofAuthor.IssueAsync(
+                    authority,
+                    freshness.NextProtectedLkg,
+                    liveRequest,
+                    proof,
+                    signers,
+                    cancellationToken).ConfigureAwait(false);
+                var liveFreshness = AccountDirectoryCurrentProofVerifier.Verify(
+                    authority,
+                    live.ExactAdh1,
+                    live.ExactDtt1,
+                    live.ExactAdp1,
+                    liveNonce,
+                    live.QueriedDirectoryLeafKey.Span,
+                    new AccountDirectoryMonotonicRequestWindow(
+                        trustedTime.ServerBootId.Span,
+                        trustedTime.ServerMonotonicSample,
+                        trustedTime.ServerMonotonicSample,
+                        trustedTime.ServerMonotonicSample),
+                    proof.CallerProtectedLkg,
+                    proof.CurrentCheckpoint,
+                    first.Inventory.SupportedReader);
+                var liveClosure = new DirectoryPublicationVerificationClosure(
+                    xna, dts, xvp, xnv, xnh, xnd, pmt,
+                    live.ExactAdh1.Span, live.ExactDtt1.Span, live.ExactAdp1.Span,
+                    liveNonce, live.QueriedDirectoryLeafKey.Span,
+                    trustedTime.ServerBootId.Span,
+                    trustedTime.ServerMonotonicSample,
+                    trustedTime.ServerMonotonicSample,
+                    trustedTime.ServerMonotonicSample,
+                    first.Inventory.SupportedReader);
+                var liveCandidate = new DirectoryPublicationCandidate(
+                    xnv[^1].Span, xnh[^1].Span, pmt[^1].Span, liveClosure);
+                var liveChallenge = first.Inventory with
+                {
+                    SnapshotNonceHex = Convert.ToHexString(liveNonce),
+                    SnapshotQueryLeafHex = Convert.ToHexString(live.QueriedDirectoryLeafKey.Span),
+                    SnapshotBootIdHex = Convert.ToHexString(trustedTime.ServerBootId.Span),
+                    SnapshotNonceCreatedAt = trustedTime.ServerMonotonicSample,
+                    SnapshotResponseReceivedAt = trustedTime.ServerMonotonicSample,
+                    SnapshotCurrentSample = trustedTime.ServerMonotonicSample,
+                };
+                var liveVerifier = new ProductionDirectoryCanonicalPublicationVerifier(
+                    new DirectoryPublicationTrustAnchor(networkId, 0, genesisAuthorityCoreHash),
+                    new TrustedTimeClock(trustedTime),
+                    new ExactChallenge(liveChallenge));
+                verifiedNetwork = await liveVerifier.VerifyAsync(
+                    liveCandidate.Freeze(), cancellationToken).ConfigureAwait(false);
+                freshness = liveFreshness;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(liveNonce);
+            }
         }
 
         var currentView = verifiedNetwork.Artifacts.Single(
@@ -906,7 +999,8 @@ internal static class FileContactResolveDirectoryArtifactSourceServiceCollection
                 genesis,
                 key,
                 provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(),
-                provider.GetService<IContactResolveVerifiedAccountDirectoryCheckpointSource>());
+                provider.GetService<IContactResolveVerifiedAccountDirectoryCheckpointSource>(),
+                provider.GetRequiredService<IContactResolveDtt1WitnessCustody>());
         }
         finally
         {
