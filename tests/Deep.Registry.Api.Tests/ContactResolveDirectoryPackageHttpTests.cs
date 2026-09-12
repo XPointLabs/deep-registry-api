@@ -38,6 +38,23 @@ public sealed class ContactResolveDirectoryPackageHttpTests
     }
 
     [Fact]
+    public void Cdq1_decoder_accepts_empty_genesis_directory_floor()
+    {
+        var encoded = EncodeRequest(
+            Bytes(1, 16),
+            Bytes(2, 32),
+            Bytes(3, 16),
+            41,
+            includeFloors: true,
+            directoryTreeSize: 0);
+
+        var decoded = ContactResolveDirectoryPackageCodec.DecodeRequest(encoded);
+
+        Assert.Equal((ulong)0, decoded.DirectoryTreeSize);
+        Assert.Equal(Bytes(4, 32), decoded.DirectoryCoreHash.ToArray());
+    }
+
+    [Fact]
     public async Task Success_is_byte_identical_cdr1_and_has_strict_transport_headers()
     {
         var network = Bytes(11, 16);
@@ -231,7 +248,8 @@ public sealed class ContactResolveDirectoryPackageHttpTests
         byte[] nonce,
         byte[] boot,
         ulong createdAt,
-        bool includeFloors)
+        bool includeFloors,
+        ulong directoryTreeSize = 9)
     {
         using var stream = new MemoryStream();
         stream.Write("CDQ1"u8);
@@ -244,7 +262,7 @@ public sealed class ContactResolveDirectoryPackageHttpTests
         WriteU64(stream, createdAt);
         if (includeFloors)
         {
-            WriteU64(stream, 9);
+            WriteU64(stream, directoryTreeSize);
             stream.Write(Bytes(4, 32));
             stream.Write(CoreReference("XNH1", 5));
             WriteU64(stream, 8);

@@ -309,7 +309,12 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             publicationGeneration.Value != freshness.NextProtectedLkg.LogGeneration)
             throw new ContactResolveDirectoryTargetNotFoundException();
         ValidateTargetedCurrentValue(request, responseAdp, freshness.NextProtectedLkg);
-        var callerLkg = ResolveCallerLkg(first, request, responseAdp, authority);
+        var responseCallerLkg = ResolveCallerLkg(
+            first,
+            request,
+            responseAdp,
+            authority,
+            freshness.NextProtectedLkg);
         VerifiedAccountDirectoryCheckpoint? currentCheckpoint = null;
         if (responseAdp.ResultKind == AccountDirectoryAdp1ResultKind.CurrentValue)
         {
@@ -334,7 +339,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             snapshotNonce,
             responseAdp.QueriedDirectoryLeafKey.Span,
             window,
-            callerLkg,
+            responseCallerLkg,
             currentCheckpoint,
             first.Inventory.SupportedReader);
         if (responseFreshness.ResultKind != responseAdp.ResultKind ||
@@ -342,17 +347,22 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         {
             throw new CryptographicException("The response proof does not close over the current directory snapshot.");
         }
+        var proofCallerLkg = request.ExpectedDirectoryLookupKey.IsEmpty
+            && request.DirectoryTreeSize.HasValue
+            && !responseAdp.HasLkg
+                ? freshness.NextProtectedLkg
+                : responseCallerLkg;
         var proof = responseAdp.ResultKind == AccountDirectoryAdp1ResultKind.NonMembership
             ? AccountDirectoryAdp1ProofMaterial.NonMembership(
                 responseAdp.QueriedDirectoryLeafKey.Span,
-                callerLkg,
+                proofCallerLkg,
                 responseAdp.ConsistencyProofNodes,
                 responseAdp.ExactAfp1,
                 responseAdp.SparseMapBitmap.Span,
                 responseAdp.SparseMapSiblings)
             : AccountDirectoryAdp1ProofMaterial.CurrentValue(
                 currentCheckpoint!,
-                callerLkg,
+                proofCallerLkg,
                 responseAdp.ConsistencyProofNodes,
                 responseAdp.ExactAfp1,
                 responseAdp.SparseMapBitmap.Span,
@@ -415,32 +425,38 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
                     proof.CallerProtectedLkg,
                     proof.CurrentCheckpoint,
                     first.Inventory.SupportedReader);
-                var liveClosure = new DirectoryPublicationVerificationClosure(
-                    xna, dts, xvp, xnv, xnh, xnd, pmt,
-                    live.ExactAdh1.Span, live.ExactDtt1.Span, live.ExactAdp1.Span,
-                    liveNonce, live.QueriedDirectoryLeafKey.Span,
-                    trustedTime.ServerBootId.Span,
-                    trustedTime.ServerMonotonicSample,
-                    trustedTime.ServerMonotonicSample,
-                    trustedTime.ServerMonotonicSample,
-                    first.Inventory.SupportedReader);
-                var liveCandidate = new DirectoryPublicationCandidate(
-                    xnv[^1].Span, xnh[^1].Span, pmt[^1].Span, liveClosure);
-                var liveChallenge = first.Inventory with
+                if (proof.CallerProtectedLkg is null)
                 {
-                    SnapshotNonceHex = Convert.ToHexString(liveNonce),
-                    SnapshotQueryLeafHex = Convert.ToHexString(live.QueriedDirectoryLeafKey.Span),
-                    SnapshotBootIdHex = Convert.ToHexString(trustedTime.ServerBootId.Span),
-                    SnapshotNonceCreatedAt = trustedTime.ServerMonotonicSample,
-                    SnapshotResponseReceivedAt = trustedTime.ServerMonotonicSample,
-                    SnapshotCurrentSample = trustedTime.ServerMonotonicSample,
-                };
-                var liveVerifier = new ProductionDirectoryCanonicalPublicationVerifier(
-                    new DirectoryPublicationTrustAnchor(networkId, 0, genesisAuthorityCoreHash),
-                    new TrustedTimeClock(trustedTime),
-                    new ExactChallenge(liveChallenge));
-                verifiedNetwork = await liveVerifier.VerifyAsync(
-                    liveCandidate.Freeze(), cancellationToken).ConfigureAwait(false);
+                    var liveClosure = new DirectoryPublicationVerificationClosure(
+                        xna, dts, xvp, xnv, xnh, xnd, pmt,
+                        live.ExactAdh1.Span, live.ExactDtt1.Span, live.ExactAdp1.Span,
+                        liveNonce, live.QueriedDirectoryLeafKey.Span,
+                        trustedTime.ServerBootId.Span,
+                        trustedTime.ServerMonotonicSample,
+                        trustedTime.ServerMonotonicSample,
+                        trustedTime.ServerMonotonicSample,
+                        first.Inventory.SupportedReader);
+                    var liveCandidate = new DirectoryPublicationCandidate(
+                        xnv[^1].Span, xnh[^1].Span, pmt[^1].Span, liveClosure);
+                    var liveChallenge = first.Inventory with
+                    {
+                        SnapshotNonceHex = Convert.ToHexString(liveNonce),
+                        SnapshotQueryLeafHex = Convert.ToHexString(live.QueriedDirectoryLeafKey.Span),
+                        SnapshotBootIdHex = Convert.ToHexString(trustedTime.ServerBootId.Span),
+                        SnapshotNonceCreatedAt = trustedTime.ServerMonotonicSample,
+                        SnapshotResponseReceivedAt = trustedTime.ServerMonotonicSample,
+                        SnapshotCurrentSample = trustedTime.ServerMonotonicSample,
+                    };
+                    var liveVerifier = new ProductionDirectoryCanonicalPublicationVerifier(
+                        new DirectoryPublicationTrustAnchor(networkId, 0, genesisAuthorityCoreHash),
+                        new TrustedTimeClock(trustedTime),
+                        new ExactChallenge(liveChallenge));
+                    verifiedNetwork = await liveVerifier.VerifyAsync(
+                        liveCandidate.Freeze(), cancellationToken).ConfigureAwait(false);
+                }
+                // A restart proof with a protected directory floor is already verified above
+                // by AccountDirectoryCurrentProofVerifier against that exact LKG. The canonical
+                // network closure was independently verified before live issuance and is unchanged.
                 freshness = liveFreshness;
             }
             finally
@@ -476,7 +492,8 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         ArtifactBundle bundle,
         ContactResolveDirectoryPackageRequest request,
         AccountDirectoryAdp1 responseAdp,
-        VerifiedXPointNetworkAuthority authority)
+        VerifiedXPointNetworkAuthority authority,
+        AccountDirectoryProtectedLkg currentHead)
     {
         if (!request.ExpectedDirectoryLookupKey.IsEmpty)
         {
@@ -505,6 +522,20 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         {
             if (!request.DirectoryCoreHash.IsEmpty || responseAdp.HasLkg || bundle.Count("caller-adh1") != 0)
                 throw new CryptographicException("The no-LKG request and response proof shape differ.");
+            return null;
+        }
+        if (!responseAdp.HasLkg)
+        {
+            if (request.DirectoryCoreHash.Length != 32
+                || bundle.Count("caller-adh1") != 0
+                || request.DirectoryTreeSize.Value != currentHead.TreeSize
+                || !Fixed(request.DirectoryCoreHash.Span, currentHead.CoreHash.Span))
+            {
+                throw new CryptographicException(
+                    "The caller directory floor is not the exact current directory head.");
+            }
+            // The immutable bootstrap proof is verified in its original no-LKG shape.
+            // The live issuer binds this exact current floor into a newly witnessed proof.
             return null;
         }
         if (request.DirectoryCoreHash.Length != 32 || !responseAdp.HasLkg ||

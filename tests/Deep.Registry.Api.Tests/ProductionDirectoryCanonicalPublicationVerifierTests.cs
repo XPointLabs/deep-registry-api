@@ -332,6 +332,35 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
     }
 
     [Fact]
+    public async Task ProductionFileSourceBindsExactCurrentDirectoryFloorOnRestart()
+    {
+        using var store = FileArtifactStore.Create(Fixture);
+        using var custody = new FixtureProductionWitnessCustody();
+        var exactHead = File.ReadAllBytes(store.ArtifactPath("adh1", 0));
+        var head = AccountDirectoryAdh1Codec.Decode(exactHead);
+        var headHash = AccountDirectoryCrypto.ComputeAdh1CoreHash(head);
+        var request = new ContactResolveDirectoryPackageRequest(
+            store.Request.NetworkId.ToArray(),
+            store.Request.Nonce.ToArray(),
+            store.Request.BootId.ToArray(),
+            store.Request.NonceCreatedAt,
+            head.TreeSize,
+            headHash,
+            null);
+        using var source = store.Source(
+            new FixedContactResolveTrustedTime(
+                205, Repeat(0xd1, 16), 5_000),
+            custody);
+
+        var snapshot = await source.ReadAsync(request, default);
+        var proof = await source.ReadAsync(snapshot, request, default);
+
+        Assert.NotNull(proof.CallerProtectedLkg);
+        Assert.Equal(head.TreeSize, proof.CallerProtectedLkg!.TreeSize);
+        Assert.Equal(headHash, proof.CallerProtectedLkg.CoreHash.ToArray());
+    }
+
+    [Fact]
     public async Task FileBackedContactResolveSourceRejectsTamperedArtifact()
     {
         using var store = FileArtifactStore.Create(Fixture);
