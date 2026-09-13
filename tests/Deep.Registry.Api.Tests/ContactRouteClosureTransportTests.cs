@@ -493,7 +493,7 @@ public sealed class ContactRouteClosureTransportTests
             Convert.ToHexString(value).ToLowerInvariant();
     }
 
-    private sealed class CanonicalTransportArtifacts
+    internal sealed class CanonicalTransportArtifacts
     {
         private CanonicalTransportArtifacts(
             ContactRecord xir,

@@ -275,6 +275,7 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
 
 internal sealed class FileContactResolveDtt1WitnessCustody :
     IContactResolveDtt1WitnessCustody,
+    IContactRouteAuthorityWitnessCustody,
     IDisposable
 {
     private readonly byte[] networkId;
@@ -310,7 +311,7 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
                     try
                     {
                         created.Add(new WitnessSigner(
-                            id, entry.KeyGeneration, pair.PublicKey, pair.PrivateKey));
+                            networkId, id, entry.KeyGeneration, pair.PublicKey, pair.PrivateKey));
                     }
                     finally
                     {
@@ -376,6 +377,16 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
             signers.Cast<IXpa1PublicationAuthorizationWitnessSigner>().ToArray());
     }
 
+    public ValueTask<IReadOnlyList<IContactRouteAuthorityWitnessSigner>>
+        GetRouteSignersAsync(
+            VerifiedXPointNetworkAuthority authority,
+            CancellationToken cancellationToken)
+    {
+        ValidateAuthority(authority, cancellationToken);
+        return ValueTask.FromResult<IReadOnlyList<IContactRouteAuthorityWitnessSigner>>(
+            signers.Cast<IContactRouteAuthorityWitnessSigner>().ToArray());
+    }
+
     private void ValidateAuthority(
         VerifiedXPointNetworkAuthority authority,
         CancellationToken cancellationToken)
@@ -428,19 +439,23 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
         IAccountDirectoryDtt1WitnessSigner,
         IAccountDirectoryAdh1WitnessSigner,
         IXpa1PublicationAuthorizationWitnessSigner,
+        IContactRouteAuthorityWitnessSigner,
         IDisposable
     {
+        private readonly byte[] networkId;
         private readonly byte[] id;
         private readonly byte[] publicKey;
         private readonly byte[] privateKey;
         private int disposed;
 
         internal WitnessSigner(
+            ReadOnlySpan<byte> networkId,
             ReadOnlySpan<byte> id,
             ulong keyGeneration,
             ReadOnlySpan<byte> publicKey,
             ReadOnlySpan<byte> privateKey)
         {
+            this.networkId = networkId.ToArray();
             this.id = id.ToArray();
             KeyGeneration = keyGeneration;
             this.publicKey = publicKey.ToArray();
@@ -466,6 +481,25 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
             CancellationToken cancellationToken) =>
             SignAsync(signingInput, cancellationToken);
 
+        public async ValueTask<int> SignAsync(
+            ContactRouteAuthoritySigningRequest request,
+            Memory<byte> signature64,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            const int SignatureLength = 64;
+            if (signature64.Length < SignatureLength)
+                throw new ArgumentException(
+                    $"Signature destination must be at least {SignatureLength} bytes.",
+                    nameof(signature64));
+            if (!CryptographicOperations.FixedTimeEquals(request.NetworkId.Span, networkId))
+                throw new CryptographicException(
+                    "Witness custody rejected a route request for a different network.");
+            var signature = await SignAsync(request.SigningInput, cancellationToken);
+            signature.Span.CopyTo(signature64.Span);
+            return signature.Length;
+        }
+
         private ValueTask<ReadOnlyMemory<byte>> SignAsync(
             ReadOnlyMemory<byte> signingInput,
             CancellationToken cancellationToken)
@@ -488,7 +522,10 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
         public void Dispose()
         {
             if (Interlocked.Exchange(ref disposed, 1) == 0)
+            {
+                CryptographicOperations.ZeroMemory(networkId);
                 CryptographicOperations.ZeroMemory(privateKey);
+            }
         }
     }
 }
@@ -546,6 +583,8 @@ internal static class ContactResolveProductionAuthorityServiceCollectionExtensio
         services.TryAddSingleton(_ =>
             new FileContactResolveDtt1WitnessCustody(network, options.Witnesses));
         services.TryAddSingleton<IContactResolveDtt1WitnessCustody>(provider =>
+            provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
+        services.TryAddSingleton<IContactRouteAuthorityWitnessCustody>(provider =>
             provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
         return services;
     }

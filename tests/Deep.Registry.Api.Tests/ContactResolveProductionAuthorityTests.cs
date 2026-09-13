@@ -293,6 +293,24 @@ public sealed class ContactResolveProductionAuthorityTests
     }
 
     [Fact]
+    public async Task WitnessCustodyExposesOnlyCurrentRouteAuthoritySigners()
+    {
+        using var world = AuthorityWorld.Create();
+        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var custody = new FileContactResolveDtt1WitnessCustody(
+            world.Network, world.Witnesses);
+
+        var signers = await custody.GetRouteSignersAsync(fixture.Authority, default);
+
+        Assert.Equal(3, signers.Count);
+        Assert.Equal(
+            world.Witnesses.Select(static value => value.WitnessIdHex)
+                .OrderBy(static value => value, StringComparer.Ordinal),
+            signers.Select(static value => Convert.ToHexString(value.WitnessId.Span))
+                .OrderBy(static value => value, StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task CompleteProductionCompositionActivatesHttpIssuerAndPreservesReplayState()
     {
         using var world = AuthorityWorld.Create();
