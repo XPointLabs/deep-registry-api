@@ -48,6 +48,11 @@ var directoryPublication =
 var contactResolveDirectoryPackages =
     Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExtensions
         .AddContactResolveDirectoryPackages(builder.Services, builder.Configuration);
+#if DEEP_PROTOCOL_DIRECTORY_V1
+var accountDirectoryAuthority =
+    Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
+        .AddAccountDirectoryAuthority(builder.Services, builder.Configuration);
+#endif
 var targetedCurrentValueDirectoryPackages =
     Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
         .AddTargetedCurrentValueDirectoryPackages(
@@ -108,6 +113,10 @@ Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
     .MapDirectoryPublicationEndpoints(app, directoryPublication);
 Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExtensions
     .MapContactResolveDirectoryPackageEndpoint(app, contactResolveDirectoryPackages);
+#if DEEP_PROTOCOL_DIRECTORY_V1
+Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
+    .MapAccountDirectoryAuthorityEndpoint(app, accountDirectoryAuthority);
+#endif
 Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
     .MapTargetedCurrentValueDirectoryPackageEndpoint(
         app, targetedCurrentValueDirectoryPackages);

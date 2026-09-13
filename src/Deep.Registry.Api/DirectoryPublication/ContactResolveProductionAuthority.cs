@@ -2,6 +2,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
+using Deep.Protocol.ContactV1;
 using Deep.Protocol.XPointNetworkV1;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Sodium;
@@ -354,6 +355,50 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
             signers.Cast<IAccountDirectoryDtt1WitnessSigner>().ToArray());
     }
 
+    internal ValueTask<IReadOnlyList<IAccountDirectoryAdh1WitnessSigner>>
+        GetHeadSignersAsync(
+            VerifiedXPointNetworkAuthority authority,
+            CancellationToken cancellationToken)
+    {
+        ValidateAuthority(authority, cancellationToken);
+        return ValueTask.FromResult<IReadOnlyList<IAccountDirectoryAdh1WitnessSigner>>(
+            signers.Cast<IAccountDirectoryAdh1WitnessSigner>().ToArray());
+    }
+
+    internal ValueTask<IReadOnlyList<IXpa1PublicationAuthorizationWitnessSigner>>
+        GetPublicationSignersAsync(
+            VerifiedXPointNetworkAuthority authority,
+            CancellationToken cancellationToken)
+    {
+        ValidateAuthority(authority, cancellationToken);
+        return ValueTask.FromResult<
+            IReadOnlyList<IXpa1PublicationAuthorizationWitnessSigner>>(
+            signers.Cast<IXpa1PublicationAuthorizationWitnessSigner>().ToArray());
+    }
+
+    private void ValidateAuthority(
+        VerifiedXPointNetworkAuthority authority,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!CryptographicOperations.FixedTimeEquals(authority.NetworkId.Span, networkId))
+            throw new CryptographicException("Witness custody rejected a different network.");
+        foreach (var signer in signers)
+        {
+            var witness = authority.WitnessKeys.SingleOrDefault(value =>
+                CryptographicOperations.FixedTimeEquals(value.Id.Span, signer.WitnessId.Span));
+            if (witness is null || witness.Generation != signer.KeyGeneration ||
+                !CryptographicOperations.FixedTimeEquals(
+                    witness.Ed25519PublicKey.Span, signer.PublicKey.Span))
+                throw new CryptographicException(
+                    "Configured witness custody does not match the current verified authority.");
+        }
+        if (signers.Length < authority.WitnessThreshold)
+            throw new CryptographicException(
+                "Configured witness custody cannot satisfy the current threshold.");
+    }
+
     public void Dispose()
     {
         CryptographicOperations.ZeroMemory(networkId);
@@ -379,7 +424,11 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
         return value.ToArray();
     }
 
-    private sealed class WitnessSigner : IAccountDirectoryDtt1WitnessSigner, IDisposable
+    private sealed class WitnessSigner :
+        IAccountDirectoryDtt1WitnessSigner,
+        IAccountDirectoryAdh1WitnessSigner,
+        IXpa1PublicationAuthorizationWitnessSigner,
+        IDisposable
     {
         private readonly byte[] id;
         private readonly byte[] publicKey;
@@ -403,6 +452,21 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
         internal ulong KeyGeneration { get; }
 
         public ValueTask<ReadOnlyMemory<byte>> SignDtt1Async(
+            ReadOnlyMemory<byte> signingInput,
+            CancellationToken cancellationToken) =>
+            SignAsync(signingInput, cancellationToken);
+
+        public ValueTask<ReadOnlyMemory<byte>> SignAdh1Async(
+            ReadOnlyMemory<byte> signingInput,
+            CancellationToken cancellationToken) =>
+            SignAsync(signingInput, cancellationToken);
+
+        public ValueTask<ReadOnlyMemory<byte>> SignXpa1Async(
+            ReadOnlyMemory<byte> signingInput,
+            CancellationToken cancellationToken) =>
+            SignAsync(signingInput, cancellationToken);
+
+        private ValueTask<ReadOnlyMemory<byte>> SignAsync(
             ReadOnlyMemory<byte> signingInput,
             CancellationToken cancellationToken)
         {
@@ -479,8 +543,10 @@ internal static class ContactResolveProductionAuthorityServiceCollectionExtensio
                 CryptographicOperations.ZeroMemory(key);
             }
         });
-        services.TryAddSingleton<IContactResolveDtt1WitnessCustody>(_ =>
+        services.TryAddSingleton(_ =>
             new FileContactResolveDtt1WitnessCustody(network, options.Witnesses));
+        services.TryAddSingleton<IContactResolveDtt1WitnessCustody>(provider =>
+            provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
         return services;
     }
 
