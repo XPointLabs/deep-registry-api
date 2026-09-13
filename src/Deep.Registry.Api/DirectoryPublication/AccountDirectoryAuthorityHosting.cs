@@ -122,7 +122,9 @@ internal sealed class DurableAccountDirectoryAuthority :
             trusted.Validate();
             var baseSnapshot = await ReadBootstrapAsync(request.OperationId, cancellationToken)
                 .ConfigureAwait(false);
-            var state = ReadState(baseSnapshot, trusted.ObservedUnixTime);
+            var state = ReadState(
+                baseSnapshot,
+                checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds));
             state = await RenewIfRequiredAsync(state, baseSnapshot, trusted, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -138,7 +140,7 @@ internal sealed class DurableAccountDirectoryAuthority :
 
             var verified = AccountDirectoryGenesisAdmissionVerifier.Verify(
                 request.Admission,
-                trusted.ObservedUnixTime,
+                checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds),
                 deploymentProfileId,
                 supportedReader);
             RequireNetwork(verified.Checkpoint.NetworkId.Span);
@@ -176,7 +178,7 @@ internal sealed class DurableAccountDirectoryAuthority :
                 .ConfigureAwait(false);
             var admission = new PersistedAdmission(
                 request.OperationId.ToArray(),
-                trusted.ObservedUnixTime,
+                checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds),
                 exactRequest,
                 verified);
             var next = state.Advance(authored, admission);
@@ -206,7 +208,9 @@ internal sealed class DurableAccountDirectoryAuthority :
             trusted.Validate();
             var baseSnapshot = await ReadBootstrapAsync(request.Nonce, cancellationToken)
                 .ConfigureAwait(false);
-            var state = ReadState(baseSnapshot, trusted.ObservedUnixTime);
+            var state = ReadState(
+                baseSnapshot,
+                checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds));
             state = await RenewIfRequiredAsync(state, baseSnapshot, trusted, cancellationToken)
                 .ConfigureAwait(false);
             var caller = ResolveCallerLkg(request, state);

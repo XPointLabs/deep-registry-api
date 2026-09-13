@@ -36,7 +36,9 @@ public sealed class DurableAccountDirectoryAuthorityTests
             using (var authority = new DurableAccountDirectoryAuthority(
                        new FixedBootstrap(fixture.Snapshot),
                        custody,
-                       new FixedTime(1_700_000_200),
+                       // The authenticated clock may trail the account issuer while
+                       // the issuance remains inside its declared uncertainty.
+                       new FixedTime(1_700_000_119),
                        options,
                        fixture.Network,
                        Bytes(0x70, 32)))
