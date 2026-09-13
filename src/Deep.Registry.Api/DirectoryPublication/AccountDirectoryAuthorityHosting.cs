@@ -770,6 +770,7 @@ internal static class AccountDirectoryAuthorityHostingExtensions
         HttpContext context,
         IAccountDirectoryGenesisAuthority authority,
         ContactResolveIssuanceAdmissionGate admission,
+        ILogger<DurableAccountDirectoryAuthority> logger,
         CancellationToken cancellationToken)
     {
         context.Response.Headers.CacheControl = "no-store";
@@ -810,10 +811,19 @@ internal static class AccountDirectoryAuthorityHostingExtensions
         {
             return Failure(StatusCodes.Status409Conflict, "admission-conflict");
         }
+        catch (AccountDirectoryGenesisAdmissionException exception)
+        {
+            logger.LogWarning(
+                "Account-directory genesis admission was rejected with code {AdmissionCode}.",
+                exception.Code);
+            return Failure(StatusCodes.Status400BadRequest, "admission-rejected");
+        }
         catch (Exception exception) when (exception is
-            AccountDirectoryGenesisAdmissionException or
             ArgumentException or FormatException)
         {
+            logger.LogWarning(
+                "Account-directory genesis admission could not be decoded: {FailureType}.",
+                exception.GetType().Name);
             return Failure(StatusCodes.Status400BadRequest, "admission-rejected");
         }
         catch (Exception exception) when (exception is
