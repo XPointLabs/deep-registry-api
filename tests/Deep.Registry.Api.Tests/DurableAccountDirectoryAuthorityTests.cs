@@ -34,7 +34,9 @@ public sealed class DurableAccountDirectoryAuthorityTests
             using (var custody = new FileContactResolveDtt1WitnessCustody(
                        fixture.Network, custodyOptions))
             using (var authority = new DurableAccountDirectoryAuthority(
-                       new FixedBootstrap(fixture.Snapshot),
+                       new FixedBootstrap(
+                           fixture.Snapshot,
+                           fixture.ProofMaterial.QueriedDirectoryLeafKey),
                        custody,
                        // The authenticated clock may trail the account issuer while
                        // the issuance remains inside its declared uncertainty.
@@ -56,7 +58,9 @@ public sealed class DurableAccountDirectoryAuthorityTests
             using (var custody = new FileContactResolveDtt1WitnessCustody(
                        fixture.Network, custodyOptions))
             using (var restored = new DurableAccountDirectoryAuthority(
-                       new FixedBootstrap(fixture.Snapshot),
+                       new FixedBootstrap(
+                           fixture.Snapshot,
+                           fixture.ProofMaterial.QueriedDirectoryLeafKey),
                        custody,
                        new FixedTime(1_700_000_250),
                        options,
@@ -129,7 +133,9 @@ public sealed class DurableAccountDirectoryAuthorityTests
             using (var custody = new FileContactResolveDtt1WitnessCustody(
                        fixture.Network, custodyOptions))
             using (var authority = new DurableAccountDirectoryAuthority(
-                       new FixedBootstrap(fixture.Snapshot),
+                       new FixedBootstrap(
+                           fixture.Snapshot,
+                           fixture.ProofMaterial.QueriedDirectoryLeafKey),
                        custody,
                        new FixedTime(1_700_009_500),
                        options,
@@ -148,7 +154,9 @@ public sealed class DurableAccountDirectoryAuthorityTests
             using (var custody = new FileContactResolveDtt1WitnessCustody(
                        fixture.Network, custodyOptions))
             using (var restored = new DurableAccountDirectoryAuthority(
-                       new FixedBootstrap(fixture.Snapshot),
+                       new FixedBootstrap(
+                           fixture.Snapshot,
+                           fixture.ProofMaterial.QueriedDirectoryLeafKey),
                        custody,
                        new FixedTime(1_700_009_600),
                        options,
@@ -201,7 +209,9 @@ public sealed class DurableAccountDirectoryAuthorityTests
             using var custody = new FileContactResolveDtt1WitnessCustody(
                 fixture.Network, custodyOptions);
             using var authority = new DurableAccountDirectoryAuthority(
-                new FixedBootstrap(fixture.Snapshot),
+                new FixedBootstrap(
+                    fixture.Snapshot,
+                    fixture.ProofMaterial.QueriedDirectoryLeafKey),
                 custody,
                 new FixedTime(1_700_009_500),
                 options,
@@ -230,6 +240,52 @@ public sealed class DurableAccountDirectoryAuthorityTests
             null,
             null,
             null);
+
+    [Fact]
+    public async Task UntargetedReadUsesBootstrapLookupKeyInsteadOfCallerNonce()
+    {
+        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        var root = TempPath();
+        Directory.CreateDirectory(root);
+        try
+        {
+            var custodyOptions = await WriteWitnessCustodyAsync(root, fixture);
+            var request = Request(fixture.Network);
+            var options = new AccountDirectoryAuthorityOptions
+            {
+                StatePath = Path.Combine(root, "directory-authority.state"),
+                DeploymentProfileId = 1,
+                SupportedReader = 1,
+                HeadValiditySeconds = 1_000,
+                RenewalLeadSeconds = 100,
+            };
+            using var custody = new FileContactResolveDtt1WitnessCustody(
+                fixture.Network, custodyOptions);
+            using var authority = new DurableAccountDirectoryAuthority(
+                new FixedBootstrap(
+                    fixture.Snapshot,
+                    fixture.ProofMaterial.QueriedDirectoryLeafKey),
+                custody,
+                new FixedTime(1_700_000_119),
+                options,
+                fixture.Network,
+                Bytes(0x70, 32));
+
+            var snapshot = await authority.ReadAsync(request, default);
+            var proof = await authority.ReadAsync(snapshot, request, default);
+
+            Assert.Equal(
+                fixture.ProofMaterial.QueriedDirectoryLeafKey.ToArray(),
+                proof.QueriedDirectoryLeafKey.ToArray());
+            Assert.NotEqual(
+                request.Nonce.ToArray(),
+                proof.QueriedDirectoryLeafKey.ToArray());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 
     private static async Task<List<ContactResolveWitnessCustodyOptions>>
         WriteWitnessCustodyAsync(
@@ -493,15 +549,19 @@ public sealed class DurableAccountDirectoryAuthorityTests
     private static byte[] Bytes(byte value, int length) =>
         Enumerable.Repeat(value, length).ToArray();
 
-    private sealed class FixedBootstrap(ContactResolveCanonicalDirectorySnapshot snapshot)
+    private sealed class FixedBootstrap(
+        ContactResolveCanonicalDirectorySnapshot snapshot,
+        ReadOnlyMemory<byte> defaultDirectoryLookupKey)
         : IAccountDirectoryAuthorityBootstrapSource
     {
-        public ValueTask<ContactResolveCanonicalDirectorySnapshot> ReadAsync(
+        public ValueTask<AccountDirectoryAuthorityBootstrapSnapshot> ReadAsync(
             ContactResolveDirectoryPackageRequest request,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(snapshot);
+            return ValueTask.FromResult(new AccountDirectoryAuthorityBootstrapSnapshot(
+                snapshot,
+                defaultDirectoryLookupKey));
         }
     }
 

@@ -32,19 +32,29 @@ internal interface IAccountDirectoryGenesisAuthority
 
 internal interface IAccountDirectoryAuthorityBootstrapSource
 {
-    ValueTask<ContactResolveCanonicalDirectorySnapshot> ReadAsync(
+    ValueTask<AccountDirectoryAuthorityBootstrapSnapshot> ReadAsync(
         ContactResolveDirectoryPackageRequest request,
         CancellationToken cancellationToken);
 }
+
+internal sealed record AccountDirectoryAuthorityBootstrapSnapshot(
+    ContactResolveCanonicalDirectorySnapshot Snapshot,
+    ReadOnlyMemory<byte> DefaultDirectoryLookupKey);
 
 internal sealed class FileAccountDirectoryAuthorityBootstrapSource(
     FileContactResolveDirectoryArtifactSource source)
     : IAccountDirectoryAuthorityBootstrapSource
 {
-    public ValueTask<ContactResolveCanonicalDirectorySnapshot> ReadAsync(
+    public async ValueTask<AccountDirectoryAuthorityBootstrapSnapshot> ReadAsync(
         ContactResolveDirectoryPackageRequest request,
-        CancellationToken cancellationToken) =>
-        source.ReadAsync(request, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await source.ReadAsync(request, cancellationToken).ConfigureAwait(false);
+        var proof = await source.ReadAsync(snapshot, request, cancellationToken).ConfigureAwait(false);
+        return new AccountDirectoryAuthorityBootstrapSnapshot(
+            snapshot,
+            proof.QueriedDirectoryLeafKey);
+    }
 }
 
 /// <summary>
@@ -120,8 +130,9 @@ internal sealed class DurableAccountDirectoryAuthority :
             var trusted = await trustedTimeSource.ReadAsync(cancellationToken)
                 .ConfigureAwait(false);
             trusted.Validate();
-            var baseSnapshot = await ReadBootstrapAsync(request.OperationId, cancellationToken)
+            var bootstrapSnapshot = await ReadBootstrapAsync(request.OperationId, cancellationToken)
                 .ConfigureAwait(false);
+            var baseSnapshot = bootstrapSnapshot.Snapshot;
             var state = ReadState(
                 baseSnapshot,
                 checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds));
@@ -206,8 +217,9 @@ internal sealed class DurableAccountDirectoryAuthority :
             var trusted = await trustedTimeSource.ReadAsync(cancellationToken)
                 .ConfigureAwait(false);
             trusted.Validate();
-            var baseSnapshot = await ReadBootstrapAsync(request.Nonce, cancellationToken)
+            var bootstrapSnapshot = await ReadBootstrapAsync(request.Nonce, cancellationToken)
                 .ConfigureAwait(false);
+            var baseSnapshot = bootstrapSnapshot.Snapshot;
             var state = ReadState(
                 baseSnapshot,
                 checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds));
@@ -215,7 +227,7 @@ internal sealed class DurableAccountDirectoryAuthority :
                 .ConfigureAwait(false);
             var caller = ResolveCallerLkg(request, state);
             var query = request.ExpectedDirectoryLookupKey.IsEmpty
-                ? request.Nonce
+                ? bootstrapSnapshot.DefaultDirectoryLookupKey
                 : request.ExpectedDirectoryLookupKey;
             var proof = AccountDirectoryProofMaterialAuthor.Create(
                 state.CurrentHead,
@@ -457,7 +469,7 @@ internal sealed class DurableAccountDirectoryAuthority :
                    "The caller directory floor is outside retained authority history.");
     }
 
-    private async ValueTask<ContactResolveCanonicalDirectorySnapshot> ReadBootstrapAsync(
+    private async ValueTask<AccountDirectoryAuthorityBootstrapSnapshot> ReadBootstrapAsync(
         ReadOnlyMemory<byte> entropy,
         CancellationToken cancellationToken)
     {
