@@ -814,8 +814,11 @@ internal static class AccountDirectoryAuthorityHostingExtensions
         catch (AccountDirectoryGenesisAdmissionException exception)
         {
             logger.LogWarning(
-                "Account-directory genesis admission was rejected with code {AdmissionCode}.",
-                exception.Code);
+                "Account-directory genesis admission was rejected with code {AdmissionCode}; " +
+                "inner type {FailureType}: {FailureMessage}",
+                exception.Code,
+                exception.InnerException?.GetType().Name ?? "none",
+                exception.InnerException?.Message ?? "none");
             return Failure(StatusCodes.Status400BadRequest, "admission-rejected");
         }
         catch (Exception exception) when (exception is
