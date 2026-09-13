@@ -39,7 +39,8 @@ internal static class ContactResolveOperatorCommand
             CryptographicException or InvalidDataException or InvalidOperationException or
             FormatException or OverflowException)
         {
-            Console.Error.WriteLine("ContactResolve operator action failed closed.");
+            Console.Error.WriteLine(
+                $"ContactResolve operator action failed closed ({exception.GetType().Name}).");
             return 2;
         }
     }

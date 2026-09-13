@@ -613,8 +613,9 @@ internal static class ContactResolveDirectoryPackageHostingExtensions
         app.MapPost(EndpointPath, (HttpContext context,
                 IContactResolveDirectoryPackageIssuer issuer,
                 ContactResolveIssuanceAdmissionGate admission,
+                ILogger<ProductionContactResolveDirectoryPackageIssuer> logger,
                 CancellationToken cancellationToken) =>
-                HandleAsync(context, issuer, admission, state, cancellationToken))
+                HandleAsync(context, issuer, admission, state, logger, cancellationToken))
             .WithMetadata(new RequestSizeLimitAttribute(
                 ContactResolveDirectoryPackageCodec.AbsoluteMaximumRequestBytes));
     }
@@ -624,6 +625,7 @@ internal static class ContactResolveDirectoryPackageHostingExtensions
         IContactResolveDirectoryPackageIssuer issuer,
         ContactResolveIssuanceAdmissionGate admission,
         ContactResolveDirectoryPackageHostingState state,
+        ILogger<ProductionContactResolveDirectoryPackageIssuer> logger,
         CancellationToken cancellationToken)
     {
         SetNoStoreHeaders(context.Response);
@@ -680,6 +682,9 @@ internal static class ContactResolveDirectoryPackageHostingExtensions
                 CryptographicException or InvalidDataException or InvalidOperationException or
                 ArgumentException or FormatException or OverflowException)
             {
+                logger.LogWarning(
+                    "ContactResolve directory issuance failed closed with type {FailureType}.",
+                    exception.GetType().Name);
                 return Failure(StatusCodes.Status503ServiceUnavailable,
                     "contact-resolve-issuer-unavailable");
             }
@@ -692,6 +697,9 @@ internal static class ContactResolveDirectoryPackageHostingExtensions
             catch (Exception exception) when (exception is ArgumentException or
                 FormatException or InvalidOperationException or OverflowException)
             {
+                logger.LogWarning(
+                    "ContactResolve directory response encoding failed closed with type {FailureType}.",
+                    exception.GetType().Name);
                 return Failure(StatusCodes.Status503ServiceUnavailable,
                     "contact-resolve-issuer-rejected");
             }
