@@ -39,6 +39,17 @@ public sealed record ProductionMailboxIssuanceState(
     byte[] CanonicalResponse,
     bool Replayed);
 
+public enum ProductionMailboxGrantOperationStatus
+{
+    Accepted,
+    ExactReplay,
+    Conflict
+}
+
+public sealed record ProductionMailboxGrantOperationState(
+    ProductionMailboxGrantOperationStatus Status,
+    byte[]? CanonicalResponse);
+
 public sealed record ProductionMailboxRouteEnrollmentState(
     byte[] IdempotencyKey,
     byte[] CanonicalResponse,
@@ -170,6 +181,13 @@ public interface IProductionMailboxStateStore
         ulong issuanceExpiresAtUnixSeconds,
         ReadOnlyMemory<byte> expectedArtifactClosureHash,
         ReadOnlyMemory<byte> idempotencyKey,
+        Func<CancellationToken, ValueTask<byte[]>> createCanonicalResponse,
+        CancellationToken cancellationToken);
+
+    ValueTask<ProductionMailboxGrantOperationState> CommitMailboxGrantOperationAsync(
+        ReadOnlyMemory<byte> operationId,
+        ReadOnlyMemory<byte> exactRequestHash,
+        ulong expiresAtUnixSeconds,
         Func<CancellationToken, ValueTask<byte[]>> createCanonicalResponse,
         CancellationToken cancellationToken);
 
@@ -333,6 +351,7 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Dictionary<string, ChallengeRecord> challenges = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IssuanceRecord> issuances = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GrantOperationRecord> grantOperations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, EnrollmentRecord> enrollmentsByIdempotency =
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, EnrollmentRecord> enrollmentsByStateKey =
@@ -456,6 +475,34 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
             var created = await createCanonicalResponse(cancellationToken);
             issuances[key] = new(created.ToArray(), issuanceExpiresAtUnixSeconds);
             return new(idempotencyKey.ToArray(), created, false);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async ValueTask<ProductionMailboxGrantOperationState> CommitMailboxGrantOperationAsync(
+        ReadOnlyMemory<byte> operationId,
+        ReadOnlyMemory<byte> exactRequestHash,
+        ulong expiresAtUnixSeconds,
+        Func<CancellationToken, ValueTask<byte[]>> createCanonicalResponse,
+        CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var key = Convert.ToHexString(operationId.Span);
+            if (grantOperations.TryGetValue(key, out var existing))
+            {
+                return CryptographicEqual(existing.RequestHash, exactRequestHash.Span)
+                    ? new(ProductionMailboxGrantOperationStatus.ExactReplay,
+                        existing.Response.ToArray())
+                    : new(ProductionMailboxGrantOperationStatus.Conflict, null);
+            }
+            var response = await createCanonicalResponse(cancellationToken);
+            grantOperations[key] = new(
+                exactRequestHash.ToArray(),
+                response.ToArray(),
+                expiresAtUnixSeconds);
+            return new(ProductionMailboxGrantOperationStatus.Accepted, response);
         }
         finally { gate.Release(); }
     }
@@ -1404,6 +1451,10 @@ public sealed partial class InMemoryProductionMailboxStateStore : IProductionMai
         public IssuanceRecord(byte[] response, ulong expiresAtUnixSeconds)
             : this(response, expiresAtUnixSeconds, [], []) { }
     }
+    private sealed record GrantOperationRecord(
+        byte[] RequestHash,
+        byte[] Response,
+        ulong ExpiresAtUnixSeconds);
     private sealed record EnrollmentRecord(
         byte[] StateKey, byte[] IdempotencyKey, byte[] Response,
         ulong ExpiresAtUnixSeconds);
@@ -1601,6 +1652,58 @@ public sealed partial class PostgreSqlProductionMailboxStateStore(
         await insert.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new(idempotencyKey.ToArray(), created, false);
+    }
+
+    public async ValueTask<ProductionMailboxGrantOperationState> CommitMailboxGrantOperationAsync(
+        ReadOnlyMemory<byte> operationId,
+        ReadOnlyMemory<byte> exactRequestHash,
+        ulong expiresAtUnixSeconds,
+        Func<CancellationToken, ValueTask<byte[]>> createCanonicalResponse,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
+        await using (var operationLock = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtextextended(encode(@operation,'hex'),0))",
+            connection, transaction))
+        {
+            operationLock.Parameters.AddWithValue("operation", operationId.ToArray());
+            await operationLock.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var select = new NpgsqlCommand(
+            "SELECT request_hash,response FROM production_mailbox_grant_operations WHERE operation_id=@operation FOR UPDATE",
+            connection, transaction))
+        {
+            select.Parameters.AddWithValue("operation", operationId.ToArray());
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var storedHash = reader.GetFieldValue<byte[]>(0);
+                var storedResponse = reader.GetFieldValue<byte[]>(1);
+                await reader.DisposeAsync();
+                await transaction.CommitAsync(cancellationToken);
+                return CryptographicOperations.FixedTimeEquals(
+                        storedHash, exactRequestHash.Span)
+                    ? new(ProductionMailboxGrantOperationStatus.ExactReplay,
+                        storedResponse)
+                    : new(ProductionMailboxGrantOperationStatus.Conflict, null);
+            }
+        }
+
+        var response = await createCanonicalResponse(cancellationToken);
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO production_mailbox_grant_operations(operation_id,request_hash,response,expires_at) VALUES(@operation,@hash,@response,@expires)",
+            connection, transaction))
+        {
+            insert.Parameters.AddWithValue("operation", operationId.ToArray());
+            insert.Parameters.AddWithValue("hash", exactRequestHash.ToArray());
+            insert.Parameters.AddWithValue("response", response);
+            insert.Parameters.AddWithValue("expires", checked((long)expiresAtUnixSeconds));
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return new(ProductionMailboxGrantOperationStatus.Accepted, response);
     }
 
     public async ValueTask<ProductionMailboxRouteEnrollmentState?> ConsumeChallengeAndEnrollAsync(
@@ -2824,6 +2927,13 @@ public sealed partial class PostgreSqlProductionMailboxStateStore(
                 CREATE TABLE IF NOT EXISTS production_mailbox_issuances(
                     idempotency_key bytea PRIMARY KEY, response bytea NOT NULL, issued_at bigint NOT NULL,
                     expires_at bigint NOT NULL);
+                CREATE TABLE IF NOT EXISTS production_mailbox_grant_operations(
+                    operation_id bytea PRIMARY KEY,
+                    request_hash bytea NOT NULL,
+                    response bytea NOT NULL,
+                    expires_at bigint NOT NULL);
+                CREATE INDEX IF NOT EXISTS ix_production_mailbox_grant_operations_expires_at
+                    ON production_mailbox_grant_operations(expires_at);
                 CREATE TABLE IF NOT EXISTS production_mailbox_route_enrollments(
                     enrollment_state_key bytea PRIMARY KEY, idempotency_key bytea UNIQUE NOT NULL,
                     response bytea NOT NULL, issued_at bigint NOT NULL, expires_at bigint NOT NULL);

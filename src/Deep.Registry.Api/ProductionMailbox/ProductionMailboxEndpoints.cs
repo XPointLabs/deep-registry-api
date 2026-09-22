@@ -53,6 +53,7 @@ public static class ProductionMailboxHostingExtensions
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray());
         services.AddSingleton<ProductionMailboxMetrics>();
+        services.AddSingleton<ProductionMailboxContactGrantReplayGuard>();
         services.AddSingleton<IProductionMailboxChallengeSourceResolver,
             ProductionMailboxChallengeSourceResolver>();
         services.AddSingleton(sp => new ProductionMailboxArtifactProvider(
@@ -157,10 +158,16 @@ public static class ProductionMailboxHostingExtensions
             var request = context.HttpContext.Request;
             if (!app.Environment.IsDevelopment() && !request.IsHttps)
                 return Results.Problem("HTTPS is required.", statusCode: StatusCodes.Status400BadRequest);
-            if (request.ContentLength > 16 * 1024)
+            var maximumRequestBytes = (request.Path.Value ?? string.Empty).EndsWith(
+                ProductionMailboxContactGrantEndpoint.Route,
+                StringComparison.Ordinal)
+                ? 64 * 1024
+                : 16 * 1024;
+            if (request.ContentLength > maximumRequestBytes)
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             return await next(context);
         });
+        ProductionMailboxContactGrantEndpoint.Map(group);
         group.MapGet("/artifacts/{sha256}/{fileName}", (
             string sha256,
             string fileName,

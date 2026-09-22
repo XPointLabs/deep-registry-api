@@ -3,6 +3,9 @@ using System.Security.Cryptography;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Deep.Protocol;
+using Deep.Protocol.ContactV1;
+using Deep.Protocol.Registry;
 using Deep.Protocol.DeepExtension.MailboxAuthority;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.MailboxTopology;
@@ -266,6 +269,96 @@ public sealed class ProductionMailboxCoordinator
             metrics.RequestRejected();
             throw Error(ProductionMailboxIssueError.InvalidRequest, "Issuance request is malformed.");
         }
+    }
+
+    /// <summary>
+    /// Issues the short-lived current-epoch MCG2 closed by a privacy-routed
+    /// XMG1. Caller authentication is enforced by the internal HTTP boundary;
+    /// this method re-verifies every protocol and topology binding and journals
+    /// the semantic operation before invoking the external issuer signer.
+    /// </summary>
+    public async ValueTask<byte[]> IssueContactGrantAsync(
+        ReadOnlyMemory<byte> exactXmg1,
+        MailboxGrantAcquisitionResultCode resultCode,
+        ReadOnlyMemory<byte> exactRouteClosure,
+        ulong responseExpiresAtUnixSeconds,
+        CancellationToken cancellationToken)
+    {
+        var request = ContactCodec.Decode(DeepProtocolIdentifiers.Magic.XMG1, exactXmg1.Span);
+        ContactCodec.VerifyMailboxGrantHolderSignature(request);
+        if (!Enum.IsDefined(resultCode))
+            throw Error(ProductionMailboxIssueError.InvalidRequest,
+                "Mailbox grant result code is unsupported.");
+        EnsureFresh();
+        var now = Now();
+        var requestIssuedAt = BinaryPrimitives.ReadUInt64BigEndian(request.Field(9).Span);
+        var requestExpiresAt = BinaryPrimitives.ReadUInt64BigEndian(request.Field(10).Span);
+        if (requestIssuedAt > now || now >= requestExpiresAt
+            || responseExpiresAtUnixSeconds <= now
+            || responseExpiresAtUnixSeconds > requestExpiresAt
+            || responseExpiresAtUnixSeconds - now > 300)
+            throw Error(ProductionMailboxIssueError.InvalidRequest,
+                "Mailbox grant request or response window is not current.");
+
+        ParsedContactRouteClosure? route = null;
+        if (resultCode == MailboxGrantAcquisitionResultCode.Success)
+        {
+            route = ContactRouteClosureCodec.Decode(exactRouteClosure.Span);
+            var domain = (MailboxCapabilityDomain)request.Field(6).Span[0];
+            if (domain == MailboxCapabilityDomain.Deposit)
+                _ = MailboxGrantRequestVerifier.VerifyDeposit(exactXmg1.Span, route, now);
+            else if (domain == MailboxCapabilityDomain.Retrieve)
+                _ = MailboxGrantRequestVerifier.VerifyRetrieve(
+                    exactXmg1.Span, route, request.Field(4).Span, now);
+            else
+                throw Error(ProductionMailboxIssueError.InvalidRequest,
+                    "Mailbox grant domain is unsupported.");
+            ValidateContactRouteAgainstMailboxTopology(route, now);
+        }
+        else if (!exactRouteClosure.IsEmpty)
+        {
+            throw Error(ProductionMailboxIssueError.InvalidRequest,
+                "A failed mailbox grant operation must not carry route bytes.");
+        }
+
+        var operationHash = DomainHash(
+            "Deep/Registry/Internal/V1/mailbox-grant-operation",
+            exactXmg1.ToArray(),
+            U16(checked((ushort)resultCode)),
+            exactRouteClosure.ToArray(),
+            U64(responseExpiresAtUnixSeconds));
+        var committed = await state.CommitMailboxGrantOperationAsync(
+            request.Field(2),
+            operationHash,
+            responseExpiresAtUnixSeconds,
+            async token =>
+            {
+                if (resultCode != MailboxGrantAcquisitionResultCode.Success)
+                    return MailboxGrantResultAuthor.AuthorFailure(
+                        request, resultCode, now, responseExpiresAtUnixSeconds)
+                        .CanonicalBytes.ToArray();
+                var current = await CreateContactRouteGrantAsync(
+                    request, route!, operationHash, responseExpiresAtUnixSeconds, token)
+                    .ConfigureAwait(false);
+                return MailboxGrantResultAuthor.AuthorSuccess(
+                    request,
+                    route!.ExactBytes.Span,
+                    current,
+                    now,
+                    responseExpiresAtUnixSeconds).CanonicalBytes.ToArray();
+            },
+            cancellationToken).ConfigureAwait(false);
+        if (committed.Status != ProductionMailboxGrantOperationStatus.Conflict)
+            return committed.CanonicalResponse
+                ?? throw Error(ProductionMailboxIssueError.IssuerUnavailable,
+                    "Mailbox grant journal lost its canonical response.");
+
+        var conflictExpiry = Math.Min(requestExpiresAt, checked(now + 300));
+        return MailboxGrantResultAuthor.AuthorFailure(
+            request,
+            MailboxGrantAcquisitionResultCode.Conflict,
+            now,
+            conflictExpiry).CanonicalBytes.ToArray();
     }
 
     public async ValueTask<ProductionMailboxRouteEnrollment> EnrollRouteAsync(
@@ -1257,6 +1350,126 @@ public sealed class ProductionMailboxCoordinator
             ProductionMailboxMediaTypes.Grant, Hex(SHA256.HashData(canonical)), Base64Url(canonical));
     }
 
+    private void ValidateContactRouteAgainstMailboxTopology(
+        ParsedContactRouteClosure route,
+        ulong now)
+    {
+        var authority = artifacts.Authority.Authority;
+        var current = artifacts.Topology.Snapshot.CurrentEpoch;
+        var routeEpoch = BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(4).Span);
+        if (!CryptographicOperations.FixedTimeEquals(
+                route.Reachability.Field(1).Span, authority.NetworkId.Span)
+            || routeEpoch != current.Epoch)
+            throw Error(ProductionMailboxIssueError.InvalidRequest,
+                "Contact route does not bind the current mailbox authority epoch.");
+
+        var routeNodes = route.Selection.Field(6).Span;
+        for (var offset = 0; offset < routeNodes.Length; offset += 32)
+        {
+            var routeNode = routeNodes.Slice(offset, 32).ToArray();
+            if (!current.Nodes.Any(node => CryptographicOperations.FixedTimeEquals(
+                    node.NodeId.Span, routeNode)))
+                throw Error(ProductionMailboxIssueError.InvalidRequest,
+                    "Contact route selects a node outside the current mailbox topology.");
+        }
+
+        var notBefore = new[]
+        {
+            current.NotBeforeUnixSeconds,
+            BinaryPrimitives.ReadUInt64BigEndian(route.Reachability.Field(16).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Route.Field(17).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Projection.Field(11).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(8).Span),
+        }.Max();
+        var expiresAt = new[]
+        {
+            current.NotAfterUnixSeconds,
+            BinaryPrimitives.ReadUInt64BigEndian(route.Reachability.Field(17).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Route.Field(18).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Projection.Field(12).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(9).Span),
+        }.Min();
+        if (now < notBefore || now >= expiresAt)
+            throw Error(ProductionMailboxIssueError.InvalidRequest,
+                "Contact route is outside its current authority intersection.");
+    }
+
+    private async ValueTask<MailboxAuthenticatedGrant> CreateContactRouteGrantAsync(
+        ContactRecord request,
+        ParsedContactRouteClosure route,
+        byte[] operationHash,
+        ulong responseExpiresAtUnixSeconds,
+        CancellationToken cancellationToken)
+    {
+        var authority = artifacts.Authority.Authority;
+        var current = artifacts.Topology.Snapshot.CurrentEpoch;
+        var domain = (MailboxCapabilityDomain)request.Field(6).Span[0];
+        var placement = MailboxPlacementCommitment.Compute(
+            new BlindedPlacementId(route.Reachability.Field(10).Span));
+        var notBefore = new[]
+        {
+            current.NotBeforeUnixSeconds,
+            BinaryPrimitives.ReadUInt64BigEndian(route.Reachability.Field(16).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Route.Field(17).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Projection.Field(11).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(8).Span),
+        }.Max();
+        var expiresAt = new[]
+        {
+            responseExpiresAtUnixSeconds,
+            current.NotAfterUnixSeconds,
+            BinaryPrimitives.ReadUInt64BigEndian(request.Field(10).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Reachability.Field(17).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Route.Field(18).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Projection.Field(12).Span),
+            BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(9).Span),
+        }.Min();
+        if (notBefore >= expiresAt)
+            throw Error(ProductionMailboxIssueError.InvalidRequest,
+                "Contact route has no effective grant validity intersection.");
+
+        var serial = DomainHash(
+            "Deep/production-mailbox/contact-grant-serial/v1",
+            authority.NetworkId.ToArray(),
+            artifacts.AuthoritySha256,
+            artifacts.TopologySha256,
+            U64(current.Epoch),
+            U64(current.Generation),
+            [(byte)domain],
+            request.Field(5).ToArray(),
+            route.Reachability.Field(2).ToArray(),
+            placement,
+            operationHash)[..16];
+        if (artifacts.Revocation.IsRevokedSerial(serial))
+            throw Error(ProductionMailboxIssueError.Revoked,
+                "Contact mailbox grant serial is revoked.");
+        var draft = new MailboxAuthenticatedGrant
+        {
+            Domain = domain,
+            Lifecycle = MailboxCapabilityLifecycle.Active,
+            NetworkId = authority.NetworkId,
+            Epoch = current.Epoch,
+            Generation = current.Generation,
+            Serial = serial,
+            NotBeforeUnixSeconds = notBefore,
+            ExpiresAtUnixSeconds = expiresAt,
+            OverlapUntilUnixSeconds = 0,
+            PlacementCommitment = placement,
+            MembershipCommitment = current.MembershipCommitment,
+            IssuerPublicKey = authority.MailboxIssuerEd25519PublicKey,
+            HolderPublicKey = request.Field(5),
+            IssuerSignature = new byte[64],
+        };
+        var signature = await SignAndVerifyAsync(
+            MailboxAuthenticatedCapabilityCodec.GetGrantSigningBytes(draft),
+            authority.MailboxIssuerEd25519PublicKey,
+            cancellationToken).ConfigureAwait(false);
+        var signed = draft with { IssuerSignature = signature };
+        _ = MailboxAuthenticatedCapabilityCodec.DecodeGrant(
+            MailboxAuthenticatedCapabilityCodec.EncodeGrant(signed));
+        return signed;
+    }
+
     private static ProductionMailboxGrantEnvelope? TryReplayPromotedGrant(
         ProductionMailboxCredentialBundle? previous,
         byte[] holder,
@@ -1695,6 +1908,7 @@ public sealed class ProductionMailboxCoordinator
     private static void RequireFixed(byte[] actual, byte[] expected, ProductionMailboxIssueError error, string message)
     { if (!Fixed(actual, expected)) throw Error(error, message); }
     private static bool IsZero(ReadOnlySpan<byte> value) => value.IndexOfAnyExcept((byte)0) < 0;
+    private static byte[] U16(ushort value) { var bytes = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(bytes, value); return bytes; }
     private static byte[] U64(ulong value) { var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, value); return bytes; }
     private static byte[] U32(uint value) { var bytes = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(bytes, value); return bytes; }
     private static byte[] DomainHash(string domain, params byte[][] values)

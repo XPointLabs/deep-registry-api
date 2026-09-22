@@ -297,10 +297,11 @@ public sealed class ContactResolveDirectoryPackageHttpTests
             [Bytes(77, 9)],
             [Bytes(78, 10)],
             [Bytes(79, 11)],
-            [Bytes(80, 12)],
+            Bytes(80, 12),
+            [Bytes(81, 13)],
             includeForward
                 ? new ContactResolveForwardCheckpointPackage(
-                    [Bytes(81, 13)], Bytes(82, 14), Bytes(83, 15), Bytes(84, 16))
+                    [Bytes(82, 14)], Bytes(83, 15), Bytes(84, 16), Bytes(85, 17))
                 : null);
 
     private static byte[] ExpectedResponse(
@@ -326,6 +327,7 @@ public sealed class ContactResolveDirectoryPackageHttpTests
         WriteChain(stream, package.ExactOrderedXnv1Chain);
         WriteChain(stream, package.ExactOrderedXnh1Chain);
         WriteChain(stream, package.ExactActiveXnd1);
+        WriteArtifact(stream, package.ExactPma2.Span);
         WriteChain(stream, package.ExactOrderedPmt2Chain);
         if (package.ForwardCheckpoint is { } forward)
         {

@@ -85,6 +85,7 @@ internal static class TargetedCurrentValueDirectoryPackageCodec
         WriteArtifact(stream, package.ExactAdp1.Span);
         WriteArtifact(stream, package.ExactOrderedXnv1Chain[^1].Span);
         WriteArtifact(stream, package.ExactOrderedXnh1Chain[^1].Span);
+        WriteArtifact(stream, package.ExactPma2.Span);
         WriteArtifact(stream, package.ExactOrderedPmt2Chain[^1].Span);
         if (stream.Length > MaximumResponseBytes)
             throw new InvalidOperationException("The targeted current-value response exceeds its bound.");

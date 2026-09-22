@@ -109,6 +109,7 @@ internal sealed class ContactResolveCanonicalDirectorySnapshot
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnv1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnh1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactActiveXnd1,
+        ReadOnlyMemory<byte> exactPma2,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedPmt2Chain,
         ContactResolveForwardCheckpointPackage? forwardCheckpoint = null)
     {
@@ -133,6 +134,7 @@ internal sealed class ContactResolveCanonicalDirectorySnapshot
         ExactOrderedXnv1Chain = CopyChain(exactOrderedXnv1Chain, nameof(exactOrderedXnv1Chain));
         ExactOrderedXnh1Chain = CopyChain(exactOrderedXnh1Chain, nameof(exactOrderedXnh1Chain));
         ExactActiveXnd1 = CopyChain(exactActiveXnd1, nameof(exactActiveXnd1));
+        ExactPma2 = CopyArtifact(exactPma2, nameof(exactPma2));
         ExactOrderedPmt2Chain = CopyChain(exactOrderedPmt2Chain, nameof(exactOrderedPmt2Chain));
         if (ExactOrderedXnv1Chain.Count != ExactOrderedXnh1Chain.Count)
             throw new ArgumentException("The exact XNV1/XNH1 chains must be positionally complete.");
@@ -150,6 +152,7 @@ internal sealed class ContactResolveCanonicalDirectorySnapshot
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnv1Chain { get; }
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnh1Chain { get; }
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactActiveXnd1 { get; }
+    internal ReadOnlyMemory<byte> ExactPma2 { get; }
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedPmt2Chain { get; }
     internal ContactResolveForwardCheckpointPackage? ForwardCheckpoint { get; }
 
@@ -255,6 +258,7 @@ internal sealed class ProductionContactResolveDirectoryPackageIssuer :
             snapshot.ExactOrderedXnv1Chain,
             snapshot.ExactOrderedXnh1Chain,
             snapshot.ExactActiveXnd1,
+            snapshot.ExactPma2,
             snapshot.ExactOrderedPmt2Chain,
             snapshot.ForwardCheckpoint);
     }

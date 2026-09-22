@@ -276,6 +276,7 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
 internal sealed class FileContactResolveDtt1WitnessCustody :
     IContactResolveDtt1WitnessCustody,
     IContactRouteAuthorityWitnessCustody,
+    IContactPublicationAuthorityWitnessCustody,
     IDisposable
 {
     private readonly byte[] networkId;
@@ -366,7 +367,7 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
             signers.Cast<IAccountDirectoryAdh1WitnessSigner>().ToArray());
     }
 
-    internal ValueTask<IReadOnlyList<IXpa1PublicationAuthorizationWitnessSigner>>
+    public ValueTask<IReadOnlyList<IXpa1PublicationAuthorizationWitnessSigner>>
         GetPublicationSignersAsync(
             VerifiedXPointNetworkAuthority authority,
             CancellationToken cancellationToken)
@@ -585,6 +586,8 @@ internal static class ContactResolveProductionAuthorityServiceCollectionExtensio
         services.TryAddSingleton<IContactResolveDtt1WitnessCustody>(provider =>
             provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
         services.TryAddSingleton<IContactRouteAuthorityWitnessCustody>(provider =>
+            provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
+        services.TryAddSingleton<IContactPublicationAuthorityWitnessCustody>(provider =>
             provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
         return services;
     }

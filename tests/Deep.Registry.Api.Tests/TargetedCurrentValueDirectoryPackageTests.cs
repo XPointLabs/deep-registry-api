@@ -287,7 +287,7 @@ public sealed class TargetedCurrentValueDirectoryPackageTests
         var boot = encoded.AsSpan(offset, 16).ToArray(); offset += 16;
         var sample = BinaryPrimitives.ReadUInt64BigEndian(encoded.AsSpan(offset)); offset += 8;
         var artifacts = new List<byte[]>();
-        for (var index = 0; index < 8; index++)
+        for (var index = 0; index < 9; index++)
         {
             var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encoded.AsSpan(offset)));
             offset += 4;

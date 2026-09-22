@@ -60,6 +60,9 @@ var targetedCurrentValueDirectoryPackages =
 var contactRouteAuthority =
     Deep.Registry.Api.DirectoryPublication.ContactRouteAuthorityHostingExtensions
         .AddContactRouteAuthority(builder.Services, builder.Configuration);
+var contactPublicationAuthority =
+    Deep.Registry.Api.DirectoryPublication.ContactPublicationAuthorityHostingExtensions
+        .AddContactPublicationAuthority(builder.Services, builder.Configuration);
 var contactRouteClosures =
     Deep.Registry.Api.ContactRouteClosure.ContactRouteClosureHostingExtensions
         .AddContactRouteClosureTransport(builder.Services, builder.Configuration);
@@ -125,6 +128,8 @@ Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHosti
         app, targetedCurrentValueDirectoryPackages);
 Deep.Registry.Api.DirectoryPublication.ContactRouteAuthorityHostingExtensions
     .MapContactRouteAuthorityEndpoint(app, contactRouteAuthority);
+Deep.Registry.Api.DirectoryPublication.ContactPublicationAuthorityHostingExtensions
+    .MapContactPublicationAuthorityEndpoint(app, contactPublicationAuthority);
 Deep.Registry.Api.ContactRouteClosure.ContactRouteClosureHostingExtensions
     .MapContactRouteClosureTransportEndpoint(app, contactRouteClosures);
 

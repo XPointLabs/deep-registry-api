@@ -502,6 +502,7 @@ internal sealed class DurableAccountDirectoryAuthority :
             source.ExactOrderedXnv1Chain,
             source.ExactOrderedXnh1Chain,
             source.ExactActiveXnd1,
+            source.ExactPma2,
             source.ExactOrderedPmt2Chain,
             source.ForwardCheckpoint);
 

@@ -193,6 +193,7 @@ internal sealed class ContactResolveDirectoryIssuedPackage
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnv1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnh1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactActiveXnd1,
+        ReadOnlyMemory<byte> exactPma2,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedPmt2Chain,
         ContactResolveForwardCheckpointPackage? forwardCheckpoint = null)
     {
@@ -214,6 +215,7 @@ internal sealed class ContactResolveDirectoryIssuedPackage
             + ValidateChain(
                 exactOrderedXnh1Chain, MaximumChainArtifacts, nameof(exactOrderedXnh1Chain))
             + ValidateChain(exactActiveXnd1, MaximumChainArtifacts, nameof(exactActiveXnd1))
+            + ValidateArtifact(exactPma2, nameof(exactPma2))
             + ValidateChain(
                 exactOrderedPmt2Chain, MaximumChainArtifacts, nameof(exactOrderedPmt2Chain));
         if (forwardCheckpoint is not null)
@@ -251,6 +253,7 @@ internal sealed class ContactResolveDirectoryIssuedPackage
             throw new ArgumentException("XNV1 and XNH1 chains must contain exact corresponding pairs.");
         ExactActiveXnd1 = CopyChain(
             exactActiveXnd1, MaximumChainArtifacts, nameof(exactActiveXnd1));
+        ExactPma2 = CopyArtifact(exactPma2, nameof(exactPma2));
         ExactOrderedPmt2Chain = CopyChain(
             exactOrderedPmt2Chain, MaximumChainArtifacts, nameof(exactOrderedPmt2Chain));
         ForwardCheckpoint = forwardCheckpoint;
@@ -270,6 +273,7 @@ internal sealed class ContactResolveDirectoryIssuedPackage
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnv1Chain { get; }
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnh1Chain { get; }
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactActiveXnd1 { get; }
+    internal ReadOnlyMemory<byte> ExactPma2 { get; }
     internal IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedPmt2Chain { get; }
     internal ContactResolveForwardCheckpointPackage? ForwardCheckpoint { get; }
 
@@ -404,6 +408,7 @@ internal static class ContactResolveDirectoryPackageCodec
         WriteChain(stream, package.ExactOrderedXnv1Chain);
         WriteChain(stream, package.ExactOrderedXnh1Chain);
         WriteChain(stream, package.ExactActiveXnd1);
+        WriteArtifact(stream, package.ExactPma2.Span);
         WriteChain(stream, package.ExactOrderedPmt2Chain);
         if (package.ForwardCheckpoint is { } forward)
         {

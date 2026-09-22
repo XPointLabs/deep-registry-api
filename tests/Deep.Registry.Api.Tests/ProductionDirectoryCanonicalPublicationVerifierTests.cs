@@ -673,6 +673,7 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
             Add(artifacts, "xnv1", closure.NetworkViewChain);
             Add(artifacts, "xnh1", closure.NetworkViewHeadChain);
             Add(artifacts, "xnd1", closure.ActiveNodeDescriptors);
+            artifacts.Add(("pma2", fixture.MailboxAuthorityBytes()));
             Add(artifacts, "pmt2", closure.MailboxTopologyChain);
             artifacts.Add(("response-adp1", closure.ExactDirectoryProof));
 
@@ -943,6 +944,32 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
         internal byte[] TimePolicyBytes() => RootBytes("dts");
         internal IReadOnlyList<ReadOnlyMemory<byte>> NodeBytes(string section) => Array(section, "nodes");
 
+        internal byte[] MailboxAuthorityBytes()
+        {
+            var authority = XPointNetworkAuthorityVerifier.Verify(
+                new XPointNetworkGenesisPin(Network, RootBytes("anchor")),
+                new ReadOnlyMemory<byte>[] { RootBytes("xna") },
+                new ReadOnlyMemory<byte>[] { RootBytes("dts") });
+            var root = PublicKeyAuth.GenerateKeyPair(Repeat(0x21, 32));
+            var configuredRoot = Assert.Single(authority.RootKeys);
+            Assert.Equal(configuredRoot.Ed25519PublicKey.ToArray(), root.PublicKey);
+            var deposit = PublicKeyAuth.GenerateKeyPair(Repeat(0x22, 32));
+            var retrieve = PublicKeyAuth.GenerateKeyPair(Repeat(0x23, 32));
+            ReadOnlyMemory<byte>[] fields =
+            [
+                authority.NetworkId.ToArray(), U64(0), new byte[32], Repeat(0x24, 32),
+                deposit.PublicKey, retrieve.PublicKey, U64(1), U32(3_600), U16(1),
+                U64(authority.IssuedAt), U64(authority.NotBefore), U64(authority.ExpiresAt),
+                authority.AuthorityCoreReference, authority.DirectoryWitnessPolicyHash, new byte[] { 1 },
+                SignatureRows([(configuredRoot.Id.ToArray(), Repeat(0, 64))]),
+            ];
+            var provisional = ContactCodec.AuthorForValidation("PMA2", fields);
+            fields[15] = SignatureRows(
+                [(configuredRoot.Id.ToArray(), PublicKeyAuth.SignDetached(
+                    provisional.SignatureInput.ToArray(), root.PrivateKey))]);
+            return ContactCodec.AuthorForValidation("PMA2", fields).CanonicalBytes.ToArray();
+        }
+
         private FreshnessFixture BuildFreshness(string section, byte[] exactXnv)
         {
             var authority = XPointNetworkAuthorityVerifier.Verify(
@@ -1002,6 +1029,8 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
 
             var pmtRecord = ContactCodec.Decode("PMT2", Bytes(section, "pmt"));
             var pmtFields = Enumerable.Range(1, 16).Select(pmtRecord.Field).ToArray();
+            var pma = ContactCodec.Decode("PMA2", MailboxAuthorityBytes());
+            pmtFields[3] = Reference("PMA2", pma.CoreHash.Span);
             pmtFields[13] = Reference("ADH1", adhHash);
             pmtFields[15] = SignatureRows(selected.Select(static value =>
                 (value.Id, Repeat(0xcc, 64))).ToArray());
@@ -1131,6 +1160,13 @@ public sealed class ProductionDirectoryCanonicalPublicationVerifierTests
     {
         var output = new byte[2];
         BinaryPrimitives.WriteUInt16BigEndian(output, value);
+        return output;
+    }
+
+    private static byte[] U32(uint value)
+    {
+        var output = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(output, value);
         return output;
     }
 

@@ -639,6 +639,7 @@ internal sealed class ContactResolveAuthoringFixture : IDisposable
             [currentXnv1],
             [Bytes(0x82, 8)],
             [Bytes(0x83, 8), Bytes(0x84, 8), Bytes(0x85, 8)],
+            Bytes(0x86, 8),
             [Bytes(0x86, 8)]);
         return new ContactResolveAuthoringFixture(
             network, root, witnesses, exactXna1, exactDts1, authority, snapshot, proof);

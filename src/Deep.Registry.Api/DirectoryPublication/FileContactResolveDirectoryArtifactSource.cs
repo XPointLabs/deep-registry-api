@@ -42,7 +42,7 @@ internal sealed record FileContactResolveDirectoryArtifactInventoryEntry(
 
 internal static class FileContactResolveDirectoryArtifactInventoryCodec
 {
-    internal const string CurrentFormat = "deep-contact-resolve-readonly-v1";
+    internal const string CurrentFormat = "deep-contact-resolve-readonly-v2";
     internal const int MaximumInventoryBytes = 512 * 1024;
 
     private static readonly JsonSerializerOptions Options = new()
@@ -279,6 +279,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         var xnv = first.Chain("xnv1");
         var xnh = first.Chain("xnh1");
         var xnd = first.Chain("xnd1");
+        var pma = first.Single("pma2");
         var pmt = first.Chain("pmt2");
         var closure = new DirectoryPublicationVerificationClosure(
             xna, dts, xvp, xnv, xnh, xnd, pmt,
@@ -301,6 +302,14 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             new ExactChallenge(first.Inventory));
         var verifiedNetwork = await networkVerifier.VerifyAsync(candidate.Freeze(), cancellationToken)
             .ConfigureAwait(false);
+        var verifiedMailboxAuthority = MailboxAuthorityV2Verifier.Verify(
+            authority,
+            pma.Span,
+            freshness.TrustedLowerUnixSeconds,
+            freshness.TrustedUpperUnixSeconds);
+        if (!verifiedMailboxAuthority.BindsProjection(pmt[^1].Span))
+            throw new CryptographicException(
+                "The current PMT2 does not bind the exact root-authorized PMA2.");
         ValidateNetworkFloor(request.NetworkFloor, verifiedNetwork);
 
         var responseAdpBytes = first.Single("response-adp1");
@@ -479,7 +488,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             freshness.NextProtectedLkg,
             xnv[^1],
             first.Inventory.SupportedReader,
-            xna, dts, xvp, xnv, xnh, xnd, pmt);
+            xna, dts, xvp, xnv, xnh, xnd, pma, pmt);
         return new VerifiedOperation(
             snapshot,
             proof,
@@ -578,7 +587,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
             !Fixed(Hex(inventory.NetworkIdHex, 16, "inventory network ID"), networkId) ||
             !Fixed(Hex(inventory.GenesisAuthorityCoreHashHex, 32, "inventory genesis authority hash"), genesisAuthorityCoreHash) ||
             inventory.SupportedReader == 0 ||
-            inventory.Artifacts is null || inventory.Artifacts.Count is < 10 or > MaximumArtifacts ||
+            inventory.Artifacts is null || inventory.Artifacts.Count is < 11 or > MaximumArtifacts ||
             inventory.SnapshotNonceCreatedAt > inventory.SnapshotResponseReceivedAt ||
             inventory.SnapshotResponseReceivedAt > inventory.SnapshotCurrentSample)
         {
@@ -591,7 +600,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         var allowed = new HashSet<string>(StringComparer.Ordinal)
         {
             "xna1", "dts1", "adh1", "snapshot-dtt1", "snapshot-adp1",
-            "xvp1", "xnv1", "xnh1", "xnd1", "pmt2", "response-adp1", "caller-adh1",
+            "xvp1", "xnv1", "xnh1", "xnd1", "pma2", "pmt2", "response-adp1", "caller-adh1",
         };
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var priorRole = string.Empty;
@@ -626,6 +635,7 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         RequireCount(inventory, "xnv1", minimum: 1);
         RequireCount(inventory, "xnh1", exact: inventory.Artifacts.Count(x => x.Role == "xnv1"));
         RequireCount(inventory, "xnd1", minimum: 3);
+        RequireCount(inventory, "pma2", exact: 1);
         RequireCount(inventory, "pmt2", minimum: 1);
         RequireCount(inventory, "response-adp1", exact: 1);
         if (inventory.Artifacts.Count(x => x.Role == "caller-adh1") > 1)
@@ -866,9 +876,10 @@ internal sealed class FileContactResolveDirectoryArtifactSource :
         "xnv1" => 6,
         "xnh1" => 7,
         "xnd1" => 8,
-        "pmt2" => 9,
-        "response-adp1" => 10,
-        "caller-adh1" => 11,
+        "pma2" => 9,
+        "pmt2" => 10,
+        "response-adp1" => 11,
+        "caller-adh1" => 12,
         _ => int.MaxValue,
     };
 
