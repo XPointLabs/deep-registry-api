@@ -571,6 +571,12 @@ internal sealed class ContactResolveAuthoringFixture : IDisposable
     internal AccountDirectoryAdp1ProofMaterial ProofMaterial { get; }
     internal IReadOnlyList<IAccountDirectoryDtt1WitnessSigner> Signers { get; }
 
+    internal byte[] CreateDid2GenesisHead() => AccountDirectoryAdh1Codec.Encode(
+        CreateHead(Network, Authority, witnesses, 0, new byte[32], 0,
+            AccountDirectoryRfc6962.ComputeEmptyTreeHash(),
+            DeepIdV2DirectorySparseMap.EmptyMapRoot.ToArray(),
+            minimumReader: 2));
+
     internal static ContactResolveAuthoringFixture Create(bool currentValue)
     {
         var network = Bytes(0x11, 16);
@@ -660,7 +666,8 @@ internal sealed class ContactResolveAuthoringFixture : IDisposable
         byte[] predecessor,
         ulong treeSize,
         byte[] appendRoot,
-        byte[] mapRoot)
+        byte[] mapRoot,
+        ushort minimumReader = 1)
     {
         var selected = witnesses.Take(2).OrderBy(static value => value.Id, ByteArrayComparer.Instance).ToArray();
         var placeholders = selected.Select((value, index) => new AccountDirectoryAdh1WitnessEntry(
@@ -668,7 +675,7 @@ internal sealed class ContactResolveAuthoringFixture : IDisposable
         var unsigned = new AccountDirectoryAdh1(
             network, generation, predecessor, treeSize, appendRoot, mapRoot,
             authority.AuthorityCoreReference.Span, authority.DirectoryWitnessPolicyHash.Span,
-            1_700_000_000, 1_700_010_000, 1, placeholders);
+            1_700_000_000, 1_700_010_000, minimumReader, placeholders);
         var input = AccountDirectoryCrypto.ComputeAdh1SigningInput(unsigned);
         var receipts = selected.Select(value => new AccountDirectoryAdh1WitnessEntry(
             value.Id, PublicKeyAuth.SignDetached(input, value.Key.PrivateKey))).ToArray();
@@ -676,7 +683,7 @@ internal sealed class ContactResolveAuthoringFixture : IDisposable
         return new AccountDirectoryAdh1(
             network, generation, predecessor, treeSize, appendRoot, mapRoot,
             authority.AuthorityCoreReference.Span, authority.DirectoryWitnessPolicyHash.Span,
-            1_700_000_000, 1_700_010_000, 1, receipts);
+            1_700_000_000, 1_700_010_000, minimumReader, receipts);
     }
 
     private static byte[] CreateCurrentXnv1(
