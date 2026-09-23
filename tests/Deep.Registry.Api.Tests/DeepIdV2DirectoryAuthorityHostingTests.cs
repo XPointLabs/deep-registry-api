@@ -1,5 +1,8 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using Deep.Registry.Api.DirectoryPublication;
+using Deep.Protocol.AccountDirectoryV1;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -64,6 +67,35 @@ public sealed class DeepIdV2DirectoryAuthorityHostingTests
                 configuration, new FixedEnvironment("UAT")));
         Assert.Contains("requires DID2 admission", error.Message,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ProofRouteIsAbsentWhenAdmissionIsEnabledButProofIsNot()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton<IDeepIdV2GenesisAuthority>(
+            new UnusedGenesisAuthority());
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
+        await using var app = builder.Build();
+        app.MapDeepIdV2DirectoryAuthorityEndpoint(
+            new DeepIdV2DirectoryAuthorityHostingState(true, false));
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using var response = await client.PostAsync(
+            DeepIdV2DirectoryAuthorityHostingExtensions.ProofEndpointPath,
+            new ByteArrayContent([]));
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    private sealed class UnusedGenesisAuthority : IDeepIdV2GenesisAuthority
+    {
+        public ValueTask<DeepIdV2GenesisAdmissionReceipt> AdmitAsync(
+            DeepIdV2GenesisAdmissionWireRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(
+                "The default-off proof route must not invoke genesis admission.");
     }
 
     private sealed class FixedEnvironment(string name) : IHostEnvironment
