@@ -100,6 +100,10 @@ internal sealed class DurableAccountDirectoryAuthority :
         this.trustedTimeSource = trustedTimeSource ??
             throw new ArgumentNullException(nameof(trustedTimeSource));
         ArgumentNullException.ThrowIfNull(options);
+        if (options.SupportedReader != 1)
+            throw new ArgumentException(
+                "The legacy account-directory authority cannot serve DID2 reader V2.",
+                nameof(options));
         if (string.IsNullOrWhiteSpace(options.StatePath))
             throw new ArgumentException("An authority state path is required.", nameof(options));
         if (networkId.Length != 16 || networkId.IndexOfAnyExcept((byte)0) < 0)
@@ -871,9 +875,9 @@ internal static class AccountDirectoryAuthorityHostingExtensions
             string.IsNullOrWhiteSpace(options.IntegrityKeyPath))
             throw new InvalidOperationException(
                 "AccountDirectoryAuthority requires network, state and integrity-key paths.");
-        if (options.DeploymentProfileId == 0 || options.SupportedReader == 0)
+        if (options.DeploymentProfileId == 0 || options.SupportedReader != 1)
             throw new InvalidOperationException(
-                "AccountDirectoryAuthority profile and reader must be non-zero.");
+                "Legacy AccountDirectoryAuthority requires a profile and reader V1 only.");
         if (options.HeadValiditySeconds is < 300 or > 86_400 ||
             options.RenewalLeadSeconds < 60 ||
             options.RenewalLeadSeconds >= options.HeadValiditySeconds)

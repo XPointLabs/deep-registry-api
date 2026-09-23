@@ -13,6 +13,27 @@ namespace Deep.Registry.Api.Tests;
 public sealed class AccountDirectoryAuthorityHttpTests
 {
     [Fact]
+    public void LegacyAuthorityRejectsReaderV2AtStartup()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AccountDirectoryAuthority:Enabled"] = "true",
+                ["AccountDirectoryAuthority:NetworkIdHex"] =
+                    Convert.ToHexString(Bytes(0x11, 16)),
+                ["AccountDirectoryAuthority:StatePath"] = "legacy-state.bin",
+                ["AccountDirectoryAuthority:IntegrityKeyPath"] = "legacy-key.bin",
+                ["AccountDirectoryAuthority:SupportedReader"] = "2",
+                ["ContactResolveProductionAuthority:NetworkIdHex"] =
+                    Convert.ToHexString(Bytes(0x11, 16))
+            })
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            new ServiceCollection().AddAccountDirectoryAuthority(configuration));
+    }
+
+    [Fact]
     public async Task ExactAdmissionEnvelopeReturnsOpaqueSignedHeadReceipt()
     {
         var root = TempPath();
