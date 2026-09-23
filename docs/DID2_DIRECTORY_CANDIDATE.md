@@ -48,6 +48,14 @@ lease. It consumes a durable nonce before accessing witness custody, reads a
 signed exact XNV1, and issues and self-verifies a live DTT1/ADP1 V2 using the
 PQ verifier. Its nonce ledger must use a separate path/key from V1 if it is
 ever composed for a deployed service. There is deliberately no HTTP route
-for it yet: the independent rollback floor, ADL1 V2 request/response wire,
-client-bound DAB2 query validation and production composition are required
+for it yet: the independent rollback floor, client-bound DAB2 query
+validation and production HTTP composition are required
 first. An arbitrary 32-byte leaf query is not a trusted identity binding.
+
+The internal issuer also accepts the candidate `DPQ2` frame: exact ADL1 V2
+plus exact DID2, nonce, boot ID and monotonic sample. It derives the leaf,
+matches the ADL1 lookup, resolves the caller's generation/hash floor only
+against the restored ADA2 head history, and encodes a `DPP2` response with
+exact ADH1/DTT1/ADP1 V2. Framing and cross-links are shape checks only;
+production freshness still requires the public DID2 verifier and an
+independently verified XPoint authority on the client.

@@ -15,6 +15,7 @@ internal sealed class DeepIdV2DirectoryProofRequest
     private readonly byte[] nonce;
     private readonly byte[] bootId;
     private readonly byte[] leaf;
+    private readonly byte[]? minimumAdhHash;
 
     internal DeepIdV2DirectoryProofRequest(ReadOnlySpan<byte> networkId,
         ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> bootId,
@@ -29,12 +30,25 @@ internal sealed class DeepIdV2DirectoryProofRequest
         CallerProtectedLkg = callerProtectedLkg;
     }
 
+    internal DeepIdV2DirectoryProofRequest(
+        DeepIdV2DirectoryProofWireRequest wire)
+        : this((wire ?? throw new ArgumentNullException(
+                   nameof(wire))).NetworkId.Span, wire.Nonce.Span, wire.BootId.Span,
+            wire.ClientMonotonicSendSample, wire.DirectoryLeafKey.Span)
+    {
+        MinimumAdhGeneration = wire.Lookup.MinimumAdhGeneration;
+        minimumAdhHash = wire.Lookup.MinimumAdhHash.ToArray();
+    }
+
     internal ReadOnlyMemory<byte> NetworkId => networkId.ToArray();
     internal ReadOnlyMemory<byte> Nonce => nonce.ToArray();
     internal ReadOnlyMemory<byte> BootId => bootId.ToArray();
     internal ReadOnlyMemory<byte> DirectoryLeafKey => leaf.ToArray();
     internal ulong ClientMonotonicSendSample { get; }
     internal AccountDirectoryProtectedLkg? CallerProtectedLkg { get; }
+    internal ulong? MinimumAdhGeneration { get; }
+    internal ReadOnlyMemory<byte> MinimumAdhHash =>
+        minimumAdhHash?.ToArray() ?? [];
 
     private static byte[] Required(ReadOnlySpan<byte> value, int length,
         string name)
@@ -160,8 +174,9 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             mlDsa65, deploymentProfileId);
         using var lease = store.Open(cancellationToken);
         var restored = lease.Read(upper);
+        var callerFloor = ResolveCallerFloor(restored, request);
         var material = lease.CreateProofMaterial(request.DirectoryLeafKey.Span,
-            request.CallerProtectedLkg);
+            callerFloor);
         var exactXnv1 = await currentViewSource.ReadExactXnv1Async(
             cancellationToken).ConfigureAwait(false);
         var authorRequest = new AccountDirectoryProofAuthoringRequest(
@@ -177,6 +192,32 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             authority, authorRequest, material, signers,
             deploymentProfileId, mlDsa65, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    internal async ValueTask<byte[]> IssueWireAsync(
+        DeepIdV2DirectoryProofWireRequest wire,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(wire);
+        var issued = await IssueAsync(new DeepIdV2DirectoryProofRequest(wire),
+            cancellationToken).ConfigureAwait(false);
+        return DeepIdV2DirectoryProofWireCodec.EncodeResponse(wire, issued);
+    }
+
+    private static AccountDirectoryProtectedLkg? ResolveCallerFloor(
+        DeepIdV2RestoredAuthorityState restored,
+        DeepIdV2DirectoryProofRequest request)
+    {
+        if (request.MinimumAdhGeneration is not { } generation)
+            return request.CallerProtectedLkg;
+        var hash = request.MinimumAdhHash.ToArray();
+        var matching = restored.Heads.FirstOrDefault(head =>
+            head.LogGeneration == generation &&
+            Fixed(head.CoreHash.Span, hash));
+        if (matching is null)
+            throw new ContactResolveDirectoryTargetNotFoundException();
+        return matching.LogGeneration == restored.CurrentHead.LogGeneration
+            ? null : matching;
     }
 
     public void Dispose()

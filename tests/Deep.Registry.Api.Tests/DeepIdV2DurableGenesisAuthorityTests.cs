@@ -172,6 +172,33 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await proofIssuer.IssueAsync(liveRequest));
 
+            var exactDid2 = DeepIdV2Codec.DecodeDid2(
+                request.Admission.ExactDid2.Span);
+            var lookup = DeepIdV2AccountDirectoryLookupCodec.Author(
+                exactDid2, fixture.Network, 0, headHash, 1,
+                new byte[38], new byte[32]);
+            var wireRequest = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
+                DeepIdV2DirectoryProofWireCodec.EncodeRequest(
+                    lookup, exactDid2, Bytes(32, 0xb9),
+                    Bytes(16, 0xba), 4_104));
+            var wireResponse = await proofIssuer.IssueWireAsync(wireRequest);
+            var parsedWire = DeepIdV2DirectoryProofWireCodec.DecodeResponse(
+                wireResponse, wireRequest);
+            Assert.Equal(first.ExactAdh1.ToArray(),
+                parsedWire.ExactAdh1.ToArray());
+            Assert.Equal(AccountDirectoryAdp1ResultKind.CurrentValue,
+                DeepIdV2Adp1Codec.Decode(parsedWire.ExactAdp1V2.Span)
+                    .ResultKind);
+            var wrongFloor = DeepIdV2AccountDirectoryLookupCodec.Author(
+                exactDid2, fixture.Network, 0, Bytes(32, 0x7d), 1,
+                new byte[38], new byte[32]);
+            await Assert.ThrowsAsync<ContactResolveDirectoryTargetNotFoundException>(
+                async () => await proofIssuer.IssueWireAsync(
+                    DeepIdV2DirectoryProofWireCodec.DecodeRequest(
+                        DeepIdV2DirectoryProofWireCodec.EncodeRequest(
+                            wrongFloor, exactDid2, Bytes(32, 0xbb),
+                            Bytes(16, 0xbc), 4_105))));
+
             var legacyFloor = fixture.Snapshot.CurrentDirectoryHead;
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await proofIssuer.IssueAsync(
