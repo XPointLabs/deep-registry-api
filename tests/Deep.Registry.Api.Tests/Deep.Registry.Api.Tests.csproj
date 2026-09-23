@@ -63,6 +63,8 @@
     <None Include="..\..\vendor\p04\membership-contract-v1.json"
           Link="Fixtures\membership-contract-v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\did2-genesis.dga1v2"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

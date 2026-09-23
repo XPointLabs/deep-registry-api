@@ -14,6 +14,14 @@ if (contactResolveOperatorExit is not null)
     Environment.ExitCode = contactResolveOperatorExit.Value;
     return;
 }
+var deepIdV2OperatorExit =
+    Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryOperatorCommand
+        .TryRun(args, builder.Configuration);
+if (deepIdV2OperatorExit is not null)
+{
+    Environment.ExitCode = deepIdV2OperatorExit.Value;
+    return;
+}
 #endif
 
 builder.Services.Configure<RegistryOptions>(builder.Configuration.GetSection("Registry"));
@@ -52,6 +60,9 @@ var contactResolveDirectoryPackages =
 var accountDirectoryAuthority =
     Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
         .AddAccountDirectoryAuthority(builder.Services, builder.Configuration);
+var deepIdV2DirectoryAuthority =
+    Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
+        .AddDeepIdV2DirectoryAuthority(builder.Services, builder.Configuration);
 #endif
 var targetedCurrentValueDirectoryPackages =
     Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
@@ -122,6 +133,8 @@ Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExte
 #if DEEP_PROTOCOL_DIRECTORY_V1
 Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
     .MapAccountDirectoryAuthorityEndpoint(app, accountDirectoryAuthority);
+Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
+    .MapDeepIdV2DirectoryAuthorityEndpoint(app, deepIdV2DirectoryAuthority);
 #endif
 Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
     .MapTargetedCurrentValueDirectoryPackageEndpoint(

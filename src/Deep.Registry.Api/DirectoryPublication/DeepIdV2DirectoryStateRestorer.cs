@@ -89,13 +89,12 @@ internal static class DeepIdV2DirectoryStateRestorer
             var request = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 row.ExactDga1V2.Span);
             if (!operationIds.Add(Convert.ToHexString(request.OperationId.Span)) ||
-                row.VerifiedAtUnixSeconds == 0)
+                row.VerifiedAtUnixSeconds == 0 ||
+                row.VerifiedAtUnixSeconds > trustedUnixSeconds)
                 throw new InvalidDataException(
-                    "ADA2 repeats an operation ID or has zero verification time.");
-            var verifiedAt = Math.Min(row.VerifiedAtUnixSeconds,
-                trustedUnixSeconds);
+                    "ADA2 repeats an operation ID or has an invalid verification time.");
             var checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(
-                request.Admission, verifiedAt, deploymentProfileId, 2,
+                request.Admission, row.VerifiedAtUnixSeconds, deploymentProfileId, 2,
                 mlDsa65);
             if (!Fixed(checkpoint.Checkpoint.NetworkId.Span,
                     authority.NetworkId.Span) ||
