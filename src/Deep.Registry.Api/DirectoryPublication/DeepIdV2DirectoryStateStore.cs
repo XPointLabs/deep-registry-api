@@ -104,6 +104,28 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             return previouslyRead;
         }
 
+        /// <summary>
+        /// Derives proof material only from the fully restored ADA2 journal and
+        /// PQ-verified current capabilities held under this state lease.
+        /// </summary>
+        internal DeepIdV2DirectoryProofMaterial CreateProofMaterial(
+            ReadOnlySpan<byte> queriedDirectoryLeafKey,
+            AccountDirectoryProtectedLkg? callerProtectedLkg = null)
+        {
+            RequireOpen();
+            var restored = previouslyRead ?? throw new InvalidOperationException(
+                "ADA2 state must be read under this lease before proof construction.");
+            if (callerProtectedLkg is not null && !restored.Heads.Any(head =>
+                    Fixed(head.ExactAdh1.Span, callerProtectedLkg.ExactAdh1.Span) &&
+                    Fixed(head.CoreHash.Span, callerProtectedLkg.CoreHash.Span)))
+                throw new CryptographicException(
+                    "The caller DID2 directory floor is outside the restored ADA2 lineage.");
+            return DeepIdV2DirectoryProofMaterialAuthor.Create(
+                restored.CurrentHead, restored.Transitions,
+                restored.CurrentCheckpoints, queriedDirectoryLeafKey,
+                callerProtectedLkg);
+        }
+
         internal DeepIdV2RestoredAuthorityState Write(
             DeepIdV2DirectoryStateRows candidate,
             ulong trustedUnixSeconds)

@@ -119,6 +119,73 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             Assert.Single(restored.Transitions);
             Assert.Equal(first.ExactAdh1.ToArray(),
                 restored.CurrentHead.ExactAdh1.ToArray());
+
+            var material = lease.CreateProofMaterial(
+                first.DirectoryLeafKey.Span);
+            Assert.Equal(AccountDirectoryAdp1ResultKind.CurrentValue,
+                material.ResultKind);
+            Assert.Equal(AccountDirectoryAdp1ResultKind.NonMembership,
+                lease.CreateProofMaterial(Bytes(32, 0x7e)).ResultKind);
+            var observedTime = 1_700_000_405UL;
+            var uncertainty = 5U;
+            var proofRequest = new AccountDirectoryProofAuthoringRequest(
+                fixture.Network, Bytes(32, 0xb1), Bytes(16, 0xb2),
+                4_100, restored.CurrentHead.ExactAdh1.Span,
+                fixture.Snapshot.ExactCurrentXnv1.Span,
+                observedTime, uncertainty,
+                observedTime - uncertainty,
+                observedTime + uncertainty,
+                AccountDirectoryDtt1IssuanceEpoch.Derive(
+                    networkSource.Read(), observedTime, uncertainty), 2);
+            var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(
+                networkSource.Read(), proofRequest, material, fixture.Signers,
+                deploymentProfileId: 1, verifier);
+            var adp = DeepIdV2Adp1Codec.Decode(issued.ExactAdp1V2.Span);
+            Assert.Equal(AccountDirectoryAdp1ResultKind.CurrentValue,
+                adp.ResultKind);
+            Assert.Equal(first.DirectoryLeafKey.ToArray(),
+                issued.QueriedDirectoryLeafKey.ToArray());
+
+            lease.Dispose();
+
+            var viewPath = Path.Combine(root, "current.xnv1");
+            await File.WriteAllBytesAsync(viewPath,
+                fixture.Snapshot.ExactCurrentXnv1.ToArray());
+            using var nonceLedger =
+                new ProtectedFileContactResolveOneUseRequestLedger(
+                    Path.Combine(root, "did2-proof-nonces"), fixture.Network,
+                    Bytes(32, 0x5b));
+            using var proofIssuer = new DeepIdV2DirectoryProofIssuer(
+                networkSource, bootstrap,
+                new DeepIdV2FileCurrentViewSource(viewPath), custody,
+                nonceLedger, new FixedTimeSource(observedTime),
+                statePath, fixture.Network, key, deploymentProfileId: 1);
+            var liveRequest = new DeepIdV2DirectoryProofRequest(
+                fixture.Network, Bytes(32, 0xb3), Bytes(16, 0xb4),
+                4_101, first.DirectoryLeafKey.Span);
+            var liveProof = await proofIssuer.IssueAsync(liveRequest);
+            Assert.Equal(first.ExactAdh1.ToArray(),
+                liveProof.ExactAdh1.ToArray());
+            Assert.Equal(AccountDirectoryAdp1ResultKind.CurrentValue,
+                DeepIdV2Adp1Codec.Decode(liveProof.ExactAdp1V2.Span)
+                    .ResultKind);
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await proofIssuer.IssueAsync(liveRequest));
+
+            var legacyFloor = fixture.Snapshot.CurrentDirectoryHead;
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await proofIssuer.IssueAsync(
+                    new DeepIdV2DirectoryProofRequest(fixture.Network,
+                        Bytes(32, 0xb5), Bytes(16, 0xb6), 4_102,
+                        first.DirectoryLeafKey.Span, legacyFloor)));
+            var damagedView = await File.ReadAllBytesAsync(viewPath);
+            damagedView[^1] ^= 1;
+            await File.WriteAllBytesAsync(viewPath, damagedView);
+            await Assert.ThrowsAsync<AccountDirectoryProofAuthoringException>(
+                async () => await proofIssuer.IssueAsync(
+                    new DeepIdV2DirectoryProofRequest(fixture.Network,
+                        Bytes(32, 0xb7), Bytes(16, 0xb8), 4_103,
+                        first.DirectoryLeafKey.Span)));
         }
         finally
         {

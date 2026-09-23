@@ -41,3 +41,13 @@ independent latest-head rollback floor has not been implemented. V2 current
 proof publication, client cutover and physical Android↔Windows E2E are also
 open gates. The client must never trust the admission receipt alone as a
 fresh directory or contact proof.
+
+The internal DID2-only proof issuer now derives current/non-membership
+material directly from the fully restored ADA2 journal under its exclusive
+lease. It consumes a durable nonce before accessing witness custody, reads a
+signed exact XNV1, and issues and self-verifies a live DTT1/ADP1 V2 using the
+PQ verifier. Its nonce ledger must use a separate path/key from V1 if it is
+ever composed for a deployed service. There is deliberately no HTTP route
+for it yet: the independent rollback floor, ADL1 V2 request/response wire,
+client-bound DAB2 query validation and production composition are required
+first. An arbitrary 32-byte leaf query is not a trusted identity binding.

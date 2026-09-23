@@ -69,7 +69,7 @@ internal sealed class DeepIdV2XPointAuthoritySource
                 : Path.GetFullPath(path))
             .ToArray();
 
-    private static byte[] ReadExact(string path)
+    internal static byte[] ReadExact(string path)
     {
         var current = Path.GetPathRoot(path) ?? throw new InvalidDataException(
             "DID2 authority artifact has no filesystem root.");
