@@ -17,16 +17,23 @@ internal sealed class DeepIdV2DirectoryAuthorityOptions
     public string GenesisHeadCoreHashHex { get; set; } = string.Empty;
     public string StatePath { get; set; } = string.Empty;
     public string IntegrityKeyPath { get; set; } = string.Empty;
+    public bool ProofEnabled { get; set; }
+    public string CurrentXnv1Path { get; set; } = string.Empty;
+    public string ProofRequestLedgerRootPath { get; set; } = string.Empty;
+    public string ProofRequestLedgerIntegrityKeyPath { get; set; } = string.Empty;
     public ushort DeploymentProfileId { get; set; } = 1;
     public ulong HeadValiditySeconds { get; set; } = 3_600;
 }
 
-internal readonly record struct DeepIdV2DirectoryAuthorityHostingState(bool Enabled);
+internal readonly record struct DeepIdV2DirectoryAuthorityHostingState(
+    bool Enabled, bool ProofEnabled);
 
 internal static class DeepIdV2DirectoryAuthorityHostingExtensions
 {
     internal const string EndpointPath =
         "/api/v2/account-directory/genesis-admissions";
+    internal const string ProofEndpointPath =
+        "/api/v2/account-directory/proofs";
 
     internal static DeepIdV2DirectoryAuthorityHostingState
         AddDeepIdV2DirectoryAuthority(this IServiceCollection services,
@@ -36,6 +43,9 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         ArgumentNullException.ThrowIfNull(configuration);
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        if (options.ProofEnabled && !options.Enabled)
+            throw new InvalidOperationException(
+                "DID2 proof publication requires DID2 admission in the same isolated UAT authority.");
         if (!options.Enabled) return default;
         if (environment is null ||
             !(environment.IsDevelopment() || environment.IsEnvironment("UAT")))
@@ -66,7 +76,41 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         services.TryAddSingleton<IDeepIdV2GenesisAuthority>(provider =>
             provider.GetRequiredService<DeepIdV2DurableGenesisAuthority>());
         services.TryAddSingleton<ContactResolveIssuanceAdmissionGate>();
-        return new DeepIdV2DirectoryAuthorityHostingState(true);
+        if (options.ProofEnabled)
+        {
+            services.TryAddSingleton<IDeepIdV2CurrentViewSource>(_ =>
+                new DeepIdV2FileCurrentViewSource(options.CurrentXnv1Path));
+            services.TryAddSingleton<ProtectedFileContactResolveOneUseRequestLedger>(_ =>
+            {
+                var key = DirectoryPublicationProtectedFile.ReadKey(
+                    options.ProofRequestLedgerIntegrityKeyPath);
+                try
+                {
+                    return new ProtectedFileContactResolveOneUseRequestLedger(
+                        options.ProofRequestLedgerRootPath, network, key);
+                }
+                finally { CryptographicOperations.ZeroMemory(key); }
+            });
+            services.TryAddSingleton<DeepIdV2DirectoryProofIssuer>(provider =>
+            {
+                var key = DirectoryPublicationProtectedFile.ReadKey(
+                    options.IntegrityKeyPath);
+                try
+                {
+                    return new DeepIdV2DirectoryProofIssuer(
+                        provider.GetRequiredService<DeepIdV2XPointAuthoritySource>(),
+                        provider.GetRequiredService<DeepIdV2DirectoryBootstrapSource>(),
+                        provider.GetRequiredService<IDeepIdV2CurrentViewSource>(),
+                        provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>(),
+                        provider.GetRequiredService<ProtectedFileContactResolveOneUseRequestLedger>(),
+                        provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(),
+                        options.StatePath, network, key, options.DeploymentProfileId);
+                }
+                finally { CryptographicOperations.ZeroMemory(key); }
+            });
+        }
+        return new DeepIdV2DirectoryAuthorityHostingState(true,
+            options.ProofEnabled);
     }
 
     internal static void MapDeepIdV2DirectoryAuthorityEndpoint(
@@ -78,6 +122,83 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         app.MapPost(EndpointPath, HandleAsync)
             .WithMetadata(new RequestSizeLimitAttribute(
                 DeepIdV2GenesisAdmissionWireCodec.MaximumRequestLength));
+        if (state.ProofEnabled)
+            app.MapPost(ProofEndpointPath, HandleProofAsync)
+                .WithMetadata(new RequestSizeLimitAttribute(
+                    DeepIdV2DirectoryProofWireCodec.RequestLength));
+    }
+
+    private static async Task<IResult> HandleProofAsync(HttpContext context,
+        DeepIdV2DirectoryProofIssuer issuer,
+        ContactResolveIssuanceAdmissionGate admission,
+        ILogger<DeepIdV2DirectoryProofIssuer> logger,
+        CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        var decision = admission.TryAcquire(context.Connection.RemoteIpAddress);
+        if (!decision.IsAccepted)
+        {
+            context.Response.Headers.RetryAfter =
+                decision.RetryAfterSeconds.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
+            return Failure(StatusCodes.Status429TooManyRequests,
+                "proof-rate-limited");
+        }
+        if (!string.Equals(context.Request.ContentType,
+                DeepIdV2DirectoryProofWireCodec.RequestMediaType,
+                StringComparison.OrdinalIgnoreCase))
+            return Failure(StatusCodes.Status415UnsupportedMediaType,
+                "unsupported-media-type");
+        if (context.Request.ContentLength is null)
+            return Failure(StatusCodes.Status411LengthRequired,
+                "content-length-required");
+        if (context.Request.ContentLength !=
+            DeepIdV2DirectoryProofWireCodec.RequestLength)
+            return Failure(StatusCodes.Status413PayloadTooLarge,
+                "proof-request-length-invalid");
+        byte[]? encoded = null;
+        try
+        {
+            encoded = new byte[DeepIdV2DirectoryProofWireCodec.RequestLength];
+            await context.Request.Body.ReadExactlyAsync(encoded,
+                cancellationToken).ConfigureAwait(false);
+            var request = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
+                encoded);
+            return Results.Bytes(await issuer.IssueWireAsync(request,
+                    cancellationToken).ConfigureAwait(false),
+                DeepIdV2DirectoryProofWireCodec.ResponseMediaType);
+        }
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ContactResolveDirectoryTargetNotFoundException)
+        {
+            return Failure(StatusCodes.Status409Conflict,
+                "proof-floor-conflict");
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or FormatException or EndOfStreamException)
+        {
+            return Failure(StatusCodes.Status400BadRequest,
+                "proof-request-invalid");
+        }
+        catch (Exception exception) when (exception is
+            CryptographicException or InvalidDataException or IOException or
+            InvalidOperationException or PlatformNotSupportedException or
+            UnauthorizedAccessException or AccountDirectoryProofAuthoringException)
+        {
+            logger.LogError(exception,
+                "DID2 directory proof authority is unavailable.");
+            return Failure(StatusCodes.Status503ServiceUnavailable,
+                "proof-authority-unavailable");
+        }
+        finally
+        {
+            if (encoded is not null)
+                CryptographicOperations.ZeroMemory(encoded);
+        }
     }
 
     private static async Task<IResult> HandleAsync(HttpContext context,
@@ -194,6 +315,13 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             options.HeadValiditySeconds is < 300 or > 86_400)
             throw new InvalidOperationException(
                 "DID2 directory authority configuration is incomplete.");
+        if (options.ProofEnabled &&
+            (string.IsNullOrWhiteSpace(options.CurrentXnv1Path) ||
+             string.IsNullOrWhiteSpace(options.ProofRequestLedgerRootPath) ||
+             string.IsNullOrWhiteSpace(options.ProofRequestLedgerIntegrityKeyPath) ||
+             !File.Exists(Path.GetFullPath(options.CurrentXnv1Path))))
+            throw new InvalidOperationException(
+                "DID2 proof publication requires an exact XNV1 and a separate protected nonce ledger.");
         var source = new DeepIdV2XPointAuthoritySource(network,
             networkPin, options.ExactAuthorityPaths,
             options.ExactTimePolicyPaths);
@@ -205,6 +333,11 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             .Append(options.GenesisHeadPath)
             .Append(options.StatePath)
             .Append(options.IntegrityKeyPath)
+            .Concat(options.ProofEnabled
+                ? [options.CurrentXnv1Path,
+                    options.ProofRequestLedgerRootPath,
+                    options.ProofRequestLedgerIntegrityKeyPath]
+                : [])
             .Concat(new[]
             {
                 configuration["AccountDirectoryAuthority:StatePath"],
@@ -212,6 +345,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 configuration["ContactResolveProductionAuthority:TrustedTimeStatePath"],
                 configuration["ContactResolveProductionAuthority:TrustedTimeIntegrityKeyPath"],
                 configuration["ContactResolveProductionAuthority:RequestLedgerIntegrityKeyPath"],
+                configuration["ContactResolveProductionAuthority:RequestLedgerRootPath"],
                 configuration["ContactResolveDirectoryArtifacts:StatePath"],
                 configuration["ContactResolveDirectoryArtifacts:IntegrityKeyPath"]
             }.Where(static path => !string.IsNullOrWhiteSpace(path))
@@ -226,6 +360,14 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         var key = DirectoryPublicationProtectedFile.ReadKey(
             options.IntegrityKeyPath);
         CryptographicOperations.ZeroMemory(key);
+        if (options.ProofEnabled)
+        {
+            var proofKey = DirectoryPublicationProtectedFile.ReadKey(
+                options.ProofRequestLedgerIntegrityKeyPath);
+            CryptographicOperations.ZeroMemory(proofKey);
+            _ = DeepIdV2XPointAuthoritySource.ReadExact(
+                options.CurrentXnv1Path);
+        }
         return (network, networkPin, headPin);
     }
 }

@@ -51,6 +51,21 @@ public sealed class DeepIdV2DirectoryAuthorityHostingTests
             StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void ProofPublicationCannotBeEnabledWithoutIsolatedUatAdmission()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DeepIdV2DirectoryAuthority:ProofEnabled"] = "true"
+            }).Build();
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            new ServiceCollection().AddDeepIdV2DirectoryAuthority(
+                configuration, new FixedEnvironment("UAT")));
+        Assert.Contains("requires DID2 admission", error.Message,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class FixedEnvironment(string name) : IHostEnvironment
     {
         public string EnvironmentName { get; set; } = name;

@@ -17,6 +17,9 @@ The `DeepIdV2DirectoryAuthority` configuration requires:
 | `StatePath` / `IntegrityKeyPath` | Separate absolute paths for ADA2 and its nonzero 32-byte HMAC key |
 | `DeploymentProfileId` | Nonzero DID2 deployment profile; currently 1 |
 | `HeadValiditySeconds` | 300–86400 seconds; default 3600 |
+| `ProofEnabled` | Optional UAT-only `DPQ2` proof endpoint; default `false` |
+| `CurrentXnv1Path` | Exact signed current XNV1 supplied by the authority owner |
+| `ProofRequestLedgerRootPath` / `ProofRequestLedgerIntegrityKeyPath` | Separate V2 one-use nonce ledger root and nonzero 32-byte HMAC key; neither may alias V1 custody paths |
 
 First configure protected trusted time and threshold witness custody under
 `ContactResolveProductionAuthority`, and verify their network and key files.
@@ -44,15 +47,19 @@ proof publication, client cutover and physical Android↔Windows E2E are also
 open gates. The client must never trust the admission receipt alone as a
 fresh directory or contact proof.
 
-The internal DID2-only proof issuer now derives current/non-membership
+The DID2-only proof issuer derives current/non-membership
 material directly from the fully restored ADA2 journal under its exclusive
 lease. It consumes a durable nonce before accessing witness custody, reads a
 signed exact XNV1, and issues and self-verifies a live DTT1/ADP1 V2 using the
 PQ verifier. Its nonce ledger must use a separate path/key from V1 if it is
-ever composed for a deployed service. There is deliberately no HTTP route
-for it yet: the independent rollback floor, client-bound DAB2 query
-validation and production HTTP composition are required
-first. An arbitrary 32-byte leaf query is not a trusted identity binding.
+ever composed for a deployed service. In UAT, an explicitly enabled
+`POST /api/v2/account-directory/proofs` accepts only the exact bounded `DPQ2`
+frame and returns `DPP2`; it shares the bounded admission gate but uses its
+own durable one-use nonce ledger. The public route remains disabled by default
+and cannot start outside Development/UAT. An arbitrary 32-byte leaf query is
+not accepted: the leaf is derived from the exact DID2 carried by the frame.
+The independent rollback floor, DAB2-bound client verification and physical
+E2E remain production gates.
 
 The internal issuer also accepts the candidate `DPQ2` frame: exact ADL1 V2
 plus exact DID2, nonce, boot ID and monotonic sample. It derives the leaf,

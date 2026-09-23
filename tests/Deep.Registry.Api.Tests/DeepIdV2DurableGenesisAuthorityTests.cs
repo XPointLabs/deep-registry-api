@@ -4,6 +4,11 @@ using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using System.Net;
+using System.Net.Http.Headers;
 
 namespace Deep.Registry.Api.Tests;
 
@@ -189,6 +194,40 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             Assert.Equal(AccountDirectoryAdp1ResultKind.CurrentValue,
                 DeepIdV2Adp1Codec.Decode(parsedWire.ExactAdp1V2.Span)
                     .ResultKind);
+            var httpRequest = DeepIdV2DirectoryProofWireCodec.EncodeRequest(
+                lookup, exactDid2, Bytes(32, 0xbd), Bytes(16, 0xbe), 4_106);
+            var httpBuilder = WebApplication.CreateBuilder();
+            httpBuilder.WebHost.UseTestServer();
+            httpBuilder.Services.AddSingleton(proofIssuer);
+            httpBuilder.Services.AddSingleton(TimeProvider.System);
+            httpBuilder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
+            await using (var app = httpBuilder.Build())
+            {
+                app.MapDeepIdV2DirectoryAuthorityEndpoint(
+                    new DeepIdV2DirectoryAuthorityHostingState(true, true));
+                await app.StartAsync();
+                using var client = app.GetTestClient();
+                using var content = new ByteArrayContent(httpRequest);
+                content.Headers.ContentType = new MediaTypeHeaderValue(
+                    DeepIdV2DirectoryProofWireCodec.RequestMediaType);
+                using var response = await client.PostAsync(
+                    DeepIdV2DirectoryAuthorityHostingExtensions.ProofEndpointPath,
+                    content);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                var httpProof = DeepIdV2DirectoryProofWireCodec.DecodeResponse(
+                    await response.Content.ReadAsByteArrayAsync(),
+                    DeepIdV2DirectoryProofWireCodec.DecodeRequest(httpRequest));
+                Assert.Equal(first.ExactAdh1.ToArray(),
+                    httpProof.ExactAdh1.ToArray());
+                using var replay = new ByteArrayContent(httpRequest);
+                replay.Headers.ContentType = new MediaTypeHeaderValue(
+                    DeepIdV2DirectoryProofWireCodec.RequestMediaType);
+                using var replayResponse = await client.PostAsync(
+                    DeepIdV2DirectoryAuthorityHostingExtensions.ProofEndpointPath,
+                    replay);
+                Assert.Equal(HttpStatusCode.ServiceUnavailable,
+                    replayResponse.StatusCode);
+            }
             var wrongFloor = DeepIdV2AccountDirectoryLookupCodec.Author(
                 exactDid2, fixture.Network, 0, Bytes(32, 0x7d), 1,
                 new byte[38], new byte[32]);
