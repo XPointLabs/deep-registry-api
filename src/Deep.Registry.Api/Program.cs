@@ -62,7 +62,8 @@ var accountDirectoryAuthority =
         .AddAccountDirectoryAuthority(builder.Services, builder.Configuration);
 var deepIdV2DirectoryAuthority =
     Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
-        .AddDeepIdV2DirectoryAuthority(builder.Services, builder.Configuration);
+        .AddDeepIdV2DirectoryAuthority(builder.Services, builder.Configuration,
+            builder.Environment);
 #endif
 var targetedCurrentValueDirectoryPackages =
     Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions

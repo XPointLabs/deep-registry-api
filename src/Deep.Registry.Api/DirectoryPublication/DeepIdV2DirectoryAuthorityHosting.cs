@@ -30,13 +30,17 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
 
     internal static DeepIdV2DirectoryAuthorityHostingState
         AddDeepIdV2DirectoryAuthority(this IServiceCollection services,
-            IConfiguration configuration)
+            IConfiguration configuration, IHostEnvironment? environment = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         if (!options.Enabled) return default;
+        if (environment is null ||
+            !(environment.IsDevelopment() || environment.IsEnvironment("UAT")))
+            throw new InvalidOperationException(
+                "DID2 admission candidate is restricted to Development/UAT until an independent ADA2 rollback floor is implemented.");
         var (network, networkPin, headPin) = Validate(options, configuration);
         services.TryAddSingleton(_ => new DeepIdV2XPointAuthoritySource(
             network, networkPin, options.ExactAuthorityPaths,

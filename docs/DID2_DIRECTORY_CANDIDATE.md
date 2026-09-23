@@ -31,7 +31,9 @@ dotnet Deep.Registry.Api.dll did2-directory provision-state
 This command re-verifies XNA1/DTS1 from the pinned genesis, verifies the
 signed empty head, writes an HMAC-protected ADA2 file under an exclusive
 lease, prints only its SHA-256, and refuses any existing state or interrupted
-write. It does not enable the HTTP route. UAT may then explicitly set
+write. It does not enable the HTTP route. The admission endpoint refuses to
+start outside `Development` or `UAT` until the independent ADA2 rollback
+floor is implemented. UAT may then explicitly set
 `DeepIdV2DirectoryAuthority:Enabled=true` and keep
 `AccountDirectoryAuthority:Enabled=false`.
 
