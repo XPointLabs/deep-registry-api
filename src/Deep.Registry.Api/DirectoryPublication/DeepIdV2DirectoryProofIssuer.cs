@@ -92,8 +92,8 @@ internal sealed class DeepIdV2FileCurrentViewSource :
 /// Issues a nonce-bound V2 proof only from authenticated ADA2 state, an
 /// independently verified XNA1/DTS1 authority, signed XNV1, trusted time,
 /// a durable one-use ledger and custody-backed threshold witnesses. It is
-/// deliberately not registered on HTTP until the V2 wire and rollback floor
-/// have their own production composition.
+/// exposed over HTTP only in Development/UAT. Production registration still
+/// requires an independent ADA2 latest-head floor and client cutover.
 /// </summary>
 internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
 {

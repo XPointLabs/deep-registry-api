@@ -36,6 +36,18 @@ registration extension fields that are not part of the Deep-native protocol cont
 
 The static admin demo is served at `/`.
 
+## DID2 directory candidate
+
+The isolated DID2 admission and proof endpoints are enabled only in Development/UAT.
+They verify the exact V2 authority and ADA2 state; they are not a production
+identity service yet. The ADA2 store now has an optional independent latest-head
+floor boundary: under its file lease, read refuses a head that differs from the
+external floor, and write advances that floor before replacing ADA2. An
+interrupted replacement can therefore require operator recovery. No production
+floor provider is configured, so production DID2 activation remains prohibited.
+The required trust and recovery semantics are owned by
+[`ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md`](../docs/architecture/ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md).
+
 ## Production call boundary
 
 Calls use a clean-break v2 canonical contract. Signal bodies carry a lowercase

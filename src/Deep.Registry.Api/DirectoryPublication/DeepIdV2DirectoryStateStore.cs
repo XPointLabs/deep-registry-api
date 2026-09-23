@@ -7,6 +7,20 @@ using Deep.Protocol.XPointNetworkV1;
 namespace Deep.Registry.Api.DirectoryPublication;
 
 /// <summary>
+/// An independently durable, rollback-resistant ADA2 latest-head anchor.
+/// Its state must live outside the ADA2 file's backup/restore domain. Advance
+/// is an atomic compare/exchange of exact verified heads; a failed ADA2 write
+/// after a successful advance deliberately requires operator recovery.
+/// </summary>
+internal interface IDeepIdV2DirectoryLatestHeadFloor
+{
+    void RequireCurrent(AccountDirectoryProtectedLkg currentHead);
+
+    void Advance(AccountDirectoryProtectedLkg expectedHead,
+        AccountDirectoryProtectedLkg nextHead);
+}
+
+/// <summary>
 /// ADA2-only HMAC-protected state with one file lease spanning read,
 /// verification and append-only commit. An independent protected latest-head
 /// floor is still required to detect replacement by an older valid HMAC file
@@ -20,6 +34,7 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
     private readonly DeepIdV2DirectoryBootstrapSource bootstrapSource;
     private readonly VerifiedXPointNetworkAuthority authority;
     private readonly IDeepMlDsa65Verifier mlDsa65;
+    private readonly IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor;
     private readonly ushort deploymentProfileId;
     private bool disposed;
 
@@ -29,7 +44,8 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
         DeepIdV2DirectoryBootstrapSource bootstrapSource,
         VerifiedXPointNetworkAuthority authority,
         IDeepMlDsa65Verifier mlDsa65,
-        ushort deploymentProfileId)
+        ushort deploymentProfileId,
+        IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor = null)
     {
         if (string.IsNullOrWhiteSpace(statePath) ||
             integrityKey.Length != 32 ||
@@ -42,6 +58,7 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             throw new ArgumentNullException(nameof(bootstrapSource));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
         this.mlDsa65 = mlDsa65 ?? throw new ArgumentNullException(nameof(mlDsa65));
+        this.latestHeadFloor = latestHeadFloor;
         if (!Fixed(networkId, authority.NetworkId.Span))
             throw new ArgumentException("ADA2 store and XPoint authority networks differ.");
         this.statePath = Path.GetFullPath(statePath);
@@ -98,10 +115,12 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
                     owner.networkId);
             }
             finally { CryptographicOperations.ZeroMemory(encoded); }
-            previouslyRead = DeepIdV2DirectoryStateRestorer.Restore(
+            var restored = DeepIdV2DirectoryStateRestorer.Restore(
                 owner.authority, genesis, rows, trustedUnixSeconds,
                 owner.deploymentProfileId, owner.mlDsa65);
-            return previouslyRead;
+            owner.latestHeadFloor?.RequireCurrent(restored.CurrentHead);
+            previouslyRead = restored;
+            return restored;
         }
 
         /// <summary>
@@ -145,6 +164,11 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
                 payload, owner.integrityKey);
             try
             {
+                // Finish all candidate validation/encoding before the
+                // irreversible external advance. If ADA2 replacement then
+                // fails, the older file must fail closed on the next read.
+                owner.latestHeadFloor?.Advance(prior.CurrentHead,
+                    verified.CurrentHead);
                 DirectoryPublicationProtectedFile.WriteAtomic(
                     owner.statePath, encoded);
             }
