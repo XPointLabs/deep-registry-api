@@ -23,6 +23,7 @@ internal sealed class DeepIdV2DirectoryAuthorityOptions
     public bool ProductionCutoverAttested { get; set; }
     public bool ProofEnabled { get; set; }
     public string CurrentXnv1Path { get; set; } = string.Empty;
+    public List<string> ForwardCheckpointPaths { get; set; } = [];
     public string ProofRequestLedgerRootPath { get; set; } = string.Empty;
     public string ProofRequestLedgerIntegrityKeyPath { get; set; } = string.Empty;
     public ushort DeploymentProfileId { get; set; } = 1;
@@ -92,6 +93,10 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         services.TryAddSingleton<DeepIdV2IssuanceAdmissionGate>();
         if (options.ProofEnabled)
         {
+            if (options.ForwardCheckpointPaths.Count > 0)
+                services.TryAddSingleton<IDeepIdV2ForwardCheckpointSource>(_ =>
+                    new DeepIdV2FileForwardCheckpointSource(
+                        options.ForwardCheckpointPaths));
             services.TryAddSingleton<IDeepIdV2CurrentViewSource>(_ =>
                 new DeepIdV2FileCurrentViewSource(options.CurrentXnv1Path));
             services.TryAddSingleton<ProtectedFileContactResolveOneUseRequestLedger>(_ =>
@@ -119,7 +124,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                         provider.GetRequiredService<ProtectedFileContactResolveOneUseRequestLedger>(),
                         provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(),
                         options.StatePath, network, key, options.DeploymentProfileId,
-                        provider.GetService<IDeepIdV2DirectoryLatestHeadFloor>());
+                        provider.GetService<IDeepIdV2DirectoryLatestHeadFloor>(),
+                        provider.GetService<IDeepIdV2ForwardCheckpointSource>());
                 }
                 finally { CryptographicOperations.ZeroMemory(key); }
             });
@@ -382,6 +388,13 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
              !File.Exists(Path.GetFullPath(options.CurrentXnv1Path))))
             throw new InvalidOperationException(
                 "DID2 proof publication requires an exact XNV1 and a separate protected nonce ledger.");
+        if (options.ForwardCheckpointPaths.Count > 64 ||
+            options.ForwardCheckpointPaths.Count > 0 && !options.ProofEnabled ||
+            options.ForwardCheckpointPaths.Any(path =>
+                string.IsNullOrWhiteSpace(path) ||
+                !File.Exists(Path.GetFullPath(path))))
+            throw new InvalidOperationException(
+                "DID2 forward checkpoints require ordered, existing read-only ADF1 files and proof publication.");
         var source = new DeepIdV2XPointAuthoritySource(network,
             networkPin, options.ExactAuthorityPaths,
             options.ExactTimePolicyPaths);
@@ -393,6 +406,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             .Append(options.GenesisHeadPath)
             .Append(options.StatePath)
             .Append(options.IntegrityKeyPath)
+            .Concat(options.ForwardCheckpointPaths)
             .Concat(options.ProofEnabled
                 ? [options.CurrentXnv1Path,
                     options.ProofRequestLedgerRootPath,

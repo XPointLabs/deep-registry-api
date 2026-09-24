@@ -134,7 +134,8 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
         /// </summary>
         internal DeepIdV2DirectoryProofMaterial CreateProofMaterial(
             ReadOnlySpan<byte> queriedDirectoryLeafKey,
-            AccountDirectoryProtectedLkg? callerProtectedLkg = null)
+            AccountDirectoryProtectedLkg? callerProtectedLkg = null,
+            bool allowRootAuthorizedForward = false)
         {
             RequireOpen();
             var restored = previouslyRead ?? throw new InvalidOperationException(
@@ -150,7 +151,8 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             if (callerProtectedLkg is not null &&
                 callerProtectedLkg.LogGeneration != ulong.MaxValue &&
                 restored.CurrentHead.LogGeneration >
-                callerProtectedLkg.LogGeneration + 1)
+                callerProtectedLkg.LogGeneration + 1 &&
+                !allowRootAuthorizedForward)
                 throw new CryptographicException(
                     "A non-successor DID2 head requires a root-authorized forward checkpoint.");
             return DeepIdV2DirectoryProofMaterialAuthor.Create(

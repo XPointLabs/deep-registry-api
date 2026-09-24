@@ -278,6 +278,60 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 verified.CurrentCheckpoint!.Binding, fixture.Authority, 1, 2);
             Assert.Equal(2UL, firstAtLatest.NextProtectedLkg.TreeSize);
             Assert.NotNull(firstAtLatest.CurrentCheckpoint);
+            await factory.DisposeAsync();
+
+            // The offline root signs a forward checkpoint over the original
+            // protected floor. Registry imports only the signed artifact.
+            var checkpointPath = Path.Combine(root, "forward.adf1");
+            await File.WriteAllBytesAsync(checkpointPath,
+                fixture.SignDid2ForwardCheckpoint(initial,
+                    verified.NextProtectedLkg));
+            await using var forwardFactory = new WebApplicationFactory<Program>()
+                .WithWebHostBuilder(builder =>
+                {
+                    Configure(builder, paths, fixture.Network, null);
+                    builder.UseSetting("DeepIdV2DirectoryAuthority:ProofEnabled",
+                        "true");
+                    builder.UseSetting("DeepIdV2DirectoryAuthority:CurrentXnv1Path",
+                        currentView);
+                    builder.UseSetting(
+                        "DeepIdV2DirectoryAuthority:ProofRequestLedgerRootPath",
+                        Path.Combine(root, "proof-ledger"));
+                    builder.UseSetting(
+                        "DeepIdV2DirectoryAuthority:ProofRequestLedgerIntegrityKeyPath",
+                        proofKey);
+                    builder.UseSetting(
+                        "DeepIdV2DirectoryAuthority:ForwardCheckpointPaths:0",
+                        checkpointPath);
+                });
+            using var forwardAdmissionHttp = forwardFactory.CreateClient();
+            forwardAdmissionHttp.BaseAddress = new Uri("https://registry.example/");
+            using var forwardAdmissionTransport = new HttpServiceRequestTransport(
+                forwardAdmissionHttp,
+                DeepIdV2GenesisAdmissionClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var forwardAdmission = new DeepIdV2GenesisAdmissionClient(
+                forwardAdmissionTransport);
+            using var forwardProofHttp = forwardFactory.CreateClient();
+            forwardProofHttp.BaseAddress = new Uri("https://registry.example/");
+            using var forwardProofTransport = new HttpServiceRequestTransport(
+                forwardProofHttp,
+                DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var forwardVerifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var forwardProof = new DeepIdV2DirectoryProofClient(
+                forwardProofTransport, new IncreasingMonotonicClock(),
+                forwardVerifier, secondFloor);
+            var secondVerified = await secondAccounts.AdmitAndVerifyGenesisAsync(
+                forwardAdmission, forwardProof, fixture.Authority);
+            Assert.NotNull(secondVerified.CurrentCheckpoint);
+            Assert.Equal(2UL, secondVerified.NextProtectedLkg.TreeSize);
+            Assert.Equal(secondVerified.NextProtectedLkg.CoreHash.ToArray(),
+                (await secondFloor.RestoreAsync(fixture.Authority, default))
+                .CoreHash.ToArray());
         }
         finally
         {

@@ -577,6 +577,44 @@ internal sealed class ContactResolveAuthoringFixture : IDisposable
             DeepIdV2DirectorySparseMap.EmptyMapRoot.ToArray(),
             minimumReader: 2));
 
+    internal byte[] SignDid2ForwardCheckpoint(
+        AccountDirectoryProtectedLkg source,
+        AccountDirectoryProtectedLkg target)
+    {
+        Span<byte> preimage = stackalloc byte[49];
+        preimage[0] = 0;
+        BinaryPrimitives.WriteUInt64BigEndian(preimage[1..9],
+            source.LogGeneration);
+        BinaryPrimitives.WriteUInt64BigEndian(preimage[9..17],
+            source.TreeSize);
+        source.CoreHash.Span.CopyTo(preimage[17..]);
+        var coveredRoot = SHA256.HashData(preimage);
+        var targetReference = Reference("ADH1", target.CoreHash.Span);
+        var placeholder = new[]
+        {
+            new AccountDirectoryAdf1RootReceipt(Bytes(0x20, 32),
+                Bytes(0xaa, 64)),
+        };
+        var unsigned = new AccountDirectoryAdf1(Network, 0,
+            new byte[32], source.LogGeneration, source.LogGeneration,
+            1, coveredRoot, targetReference, target.TreeSize,
+            target.AppendLogMerkleRoot.Span,
+            target.CurrentValueMapRoot.Span,
+            Authority.AuthorityCoreReference.Span, 1_700_000_400,
+            2, placeholder);
+        var signature = PublicKeyAuth.SignDetached(
+            AccountDirectoryCrypto.ComputeAdf1SigningInput(unsigned),
+            root.PrivateKey);
+        return AccountDirectoryAdf1Codec.Encode(new AccountDirectoryAdf1(
+            Network, 0, new byte[32], source.LogGeneration,
+            source.LogGeneration, 1, coveredRoot, targetReference,
+            target.TreeSize, target.AppendLogMerkleRoot.Span,
+            target.CurrentValueMapRoot.Span,
+            Authority.AuthorityCoreReference.Span, 1_700_000_400,
+            2, [new AccountDirectoryAdf1RootReceipt(Bytes(0x20, 32),
+                signature)]));
+    }
+
     internal static ContactResolveAuthoringFixture Create(bool currentValue)
     {
         var network = Bytes(0x11, 16);

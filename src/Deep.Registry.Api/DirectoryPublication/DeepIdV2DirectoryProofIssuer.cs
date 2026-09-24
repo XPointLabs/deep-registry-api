@@ -107,6 +107,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
     private readonly byte[] networkId;
     private readonly byte[] integrityKey;
     private readonly IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor;
+    private readonly IDeepIdV2ForwardCheckpointSource? forwardCheckpointSource;
     private readonly ushort deploymentProfileId;
     private bool disposed;
 
@@ -119,7 +120,8 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         IContactResolveTrustedTimeContextSource trustedTimeSource,
         string statePath, ReadOnlySpan<byte> networkId,
         ReadOnlySpan<byte> integrityKey, ushort deploymentProfileId,
-        IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor = null)
+        IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor = null,
+        IDeepIdV2ForwardCheckpointSource? forwardCheckpointSource = null)
     {
         this.networkAuthoritySource = networkAuthoritySource ??
             throw new ArgumentNullException(nameof(networkAuthoritySource));
@@ -143,6 +145,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         this.networkId = networkId.ToArray();
         this.integrityKey = integrityKey.ToArray();
         this.latestHeadFloor = latestHeadFloor;
+        this.forwardCheckpointSource = forwardCheckpointSource;
         this.deploymentProfileId = deploymentProfileId;
     }
 
@@ -179,8 +182,20 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var restored = await lease.ReadAsync(upper, cancellationToken)
             .ConfigureAwait(false);
         var callerFloor = ResolveCallerFloor(restored, request);
+        var needsForward = callerFloor is not null &&
+            callerFloor.LogGeneration != ulong.MaxValue &&
+            restored.CurrentHead.LogGeneration >
+                callerFloor.LogGeneration + 1;
         var material = lease.CreateProofMaterial(request.DirectoryLeafKey.Span,
-            callerFloor);
+            callerFloor,
+            allowRootAuthorizedForward: needsForward &&
+                forwardCheckpointSource is not null);
+        var forward = needsForward
+            ? (forwardCheckpointSource ?? throw new CryptographicException(
+                "A root-authorized DID2 forward checkpoint is unavailable."))
+                .Read(authority, restored,
+                    request.DirectoryLeafKey.Span, callerFloor!)
+            : null;
         var exactXnv1 = await currentViewSource.ReadExactXnv1Async(
             cancellationToken).ConfigureAwait(false);
         var latestProofExpiry = trusted.ObservedUnixTime > ulong.MaxValue - 30
@@ -205,10 +220,15 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             supportedReader: 2);
         var signers = await witnessCustody.GetSignersAsync(authority,
             cancellationToken).ConfigureAwait(false);
-        return await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(
-            authority, authorRequest, material, signers,
-            deploymentProfileId, mlDsa65, cancellationToken)
-            .ConfigureAwait(false);
+        return forward is null
+            ? await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(
+                authority, authorRequest, material, signers,
+                deploymentProfileId, mlDsa65, cancellationToken)
+                .ConfigureAwait(false)
+            : await DeepIdV2DirectoryProofAuthor.IssueWithForwardTailAsync(
+                authority, authorRequest, material, forward, signers,
+                deploymentProfileId, mlDsa65, cancellationToken)
+                .ConfigureAwait(false);
     }
 
     internal async ValueTask<byte[]> IssueWireAsync(
