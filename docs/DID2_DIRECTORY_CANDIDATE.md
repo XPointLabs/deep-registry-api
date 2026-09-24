@@ -24,8 +24,24 @@ The `DeepIdV2DirectoryAuthority` configuration requires:
 First configure protected trusted time and threshold witness custody under
 `ContactResolveProductionAuthority`, and verify their network and key files.
 Use only a newly signed V2 empty head (`minimumReader >= 2`, V2 empty-map
-root); never copy ADA1 into ADA2. With V1 admission disabled and the V2
-settings supplied, initialize the state once from inside the Registry runtime:
+root); never copy ADA1 into ADA2. With the exact XNA1/DTS1 genesis paths and
+independent XNA1 core-hash pin configured, V1 admission disabled, and an empty
+absolute `GenesisHeadPath`, author the head once using the configured
+threshold witness custody. The two numeric arguments are operator-approved
+Unix-second bounds inside the verified XNA1 validity interval (at most 24h):
+
+```text
+dotnet Deep.Registry.Api.dll did2-directory author-genesis-head <validFromUnix> <validUntilUnix>
+```
+
+The command creates only the public signed ADH1, self-verifies its V2 empty
+roots and witness threshold, prints its core hash, and refuses a pre-existing
+head, interrupted authoring file, missing/insufficient custody, cross-network
+keys, overlapping paths or a stale configured head pin. It never emits seeds.
+Review and independently pin that printed hash as
+`GenesisHeadCoreHashHex`; the command does not set the pin for you. With the
+V2 state/key settings supplied, initialize ADA2 once from inside the Registry
+runtime:
 
 ```text
 dotnet Deep.Registry.Api.dll did2-directory provision-state
