@@ -14,10 +14,12 @@ namespace Deep.Registry.Api.DirectoryPublication;
 /// </summary>
 internal interface IDeepIdV2DirectoryLatestHeadFloor
 {
-    void RequireCurrent(AccountDirectoryProtectedLkg currentHead);
+    ValueTask RequireCurrentAsync(AccountDirectoryProtectedLkg currentHead,
+        CancellationToken cancellationToken = default);
 
-    void Advance(AccountDirectoryProtectedLkg expectedHead,
-        AccountDirectoryProtectedLkg nextHead);
+    ValueTask AdvanceAsync(AccountDirectoryProtectedLkg expectedHead,
+        AccountDirectoryProtectedLkg nextHead,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -96,7 +98,8 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             this.fileLease = fileLease;
         }
 
-        internal DeepIdV2RestoredAuthorityState Read(ulong trustedUnixSeconds)
+        internal async ValueTask<DeepIdV2RestoredAuthorityState> ReadAsync(
+            ulong trustedUnixSeconds, CancellationToken cancellationToken = default)
         {
             RequireOpen();
             var genesis = owner.bootstrapSource.Read(owner.authority);
@@ -118,7 +121,9 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             var restored = DeepIdV2DirectoryStateRestorer.Restore(
                 owner.authority, genesis, rows, trustedUnixSeconds,
                 owner.deploymentProfileId, owner.mlDsa65);
-            owner.latestHeadFloor?.RequireCurrent(restored.CurrentHead);
+            if (owner.latestHeadFloor is { } floor)
+                await floor.RequireCurrentAsync(restored.CurrentHead,
+                    cancellationToken).ConfigureAwait(false);
             previouslyRead = restored;
             return restored;
         }
@@ -145,9 +150,9 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
                 callerProtectedLkg);
         }
 
-        internal DeepIdV2RestoredAuthorityState Write(
+        internal async ValueTask<DeepIdV2RestoredAuthorityState> WriteAsync(
             DeepIdV2DirectoryStateRows candidate,
-            ulong trustedUnixSeconds)
+            ulong trustedUnixSeconds, CancellationToken cancellationToken = default)
         {
             RequireOpen();
             ArgumentNullException.ThrowIfNull(candidate);
@@ -167,8 +172,10 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
                 // Finish all candidate validation/encoding before the
                 // irreversible external advance. If ADA2 replacement then
                 // fails, the older file must fail closed on the next read.
-                owner.latestHeadFloor?.Advance(prior.CurrentHead,
-                    verified.CurrentHead);
+                if (owner.latestHeadFloor is { } floor)
+                    await floor.AdvanceAsync(prior.CurrentHead,
+                        verified.CurrentHead, cancellationToken)
+                        .ConfigureAwait(false);
                 DirectoryPublicationProtectedFile.WriteAtomic(
                     owner.statePath, encoded);
             }

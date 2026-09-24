@@ -62,26 +62,47 @@ This command re-verifies XNA1/DTS1 from the pinned genesis, verifies the
 signed empty head, writes an HMAC-protected ADA2 file under an exclusive
 lease, prints only its SHA-256, and refuses any existing state or interrupted
 write. It does not enable the HTTP route. The admission endpoint refuses to
-start outside `Development` or `UAT` until the independent ADA2 rollback
-floor is implemented. UAT may then explicitly set
+start outside `Development` or `UAT` while production floor deployment,
+recovery and client verification remain open. UAT may explicitly set
 `DeepIdV2DirectoryAuthority:Enabled=true` and keep
 `AccountDirectoryAuthority:Enabled=false`.
 
-Do not enable this candidate in production yet. An older valid HMAC-protected
-ADA2 snapshot can still replace the current file across restarts because an
-independent latest-head rollback floor has not been implemented. V2 current
-proof publication, client cutover and physical Android↔Windows E2E are also
-open gates. The client must never trust the admission receipt alone as a
-fresh directory or contact proof.
+Do not enable this candidate in production yet. A PostgreSQL latest-head
+floor provider is implemented but has not been provisioned in an independently
+operated and restored production database or exercised through a production
+recovery drill. V2 current proof publication, client cutover and physical
+Android↔Windows E2E are also open gates. The client must never trust the
+admission receipt alone as a fresh directory or contact proof.
 
-The ADA2 store's external floor dependency is now threaded through both
-genesis admission and proof issuance, including optional DI resolution in the
-host. One injected test floor is used by both paths, and an old valid ADA2
-snapshot is rejected on either path. No production floor provider is registered:
-an HMAC-protected file on
-the same backup/restore domain would not satisfy this gate. Production hosting
-remains fail-closed until an independently durable provider and its recovery
-procedure are implemented and verified.
+The ADA2 store's external floor dependency is threaded through both genesis
+admission and proof issuance. Set
+`DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString` via a
+secret environment variable to register the PostgreSQL provider in isolated
+UAT. It performs an exact-head, network-bound atomic compare/exchange; missing
+rows, stale heads, duplicate genesis provisioning and unavailable PostgreSQL
+fail closed. Neither startup nor request handling creates tables or rows.
+The schema is [did2-latest-head-floor.sql](sql/did2-latest-head-floor.sql).
+Its database, snapshot schedule and restore authority MUST be independent of
+the ADA2 filesystem. A local container, same-host volume or database restored
+from the same snapshot is not a production rollback floor. Production hosting
+still rejects DID2 until independent topology, recovery and client verification
+have been demonstrated. For a remote floor, authenticate the PostgreSQL server
+with `SSL Mode=VerifyFull` and a pinned private CA/root certificate, and keep
+the provisioning and runtime database roles separate. This is internal service
+authentication, not a requirement for users to own public certificates.
+
+Provisioning order for isolated UAT: create the schema with a DBA role; verify
+the signed empty ADH1; provision ADA2 from that exact head; set the floor
+connection using a provisioning role and run `did2-directory provision-floor`
+exactly once; switch the runtime DSN to a role with only `SELECT`/`UPDATE` on
+the floor table; enable DID2 admission/proof. A repeated provisioning command
+must fail. Keep the DSN and credentials out of the repository. If the floor
+has advanced but ADA2 replacement failed, restore the matching or newer
+verified ADA2 from independent backups; never move the floor backwards or
+reinitialize it from the older file. If the external floor itself is missing
+or rolled back, keep endpoints closed and reconcile against independently
+retained signed heads and audit evidence before any operator repair. Test a
+stale-file restore and a floor outage before production approval.
 
 The DID2-only proof issuer derives current/non-membership
 material directly from the fully restored ADA2 journal under its exclusive

@@ -7,11 +7,86 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2DirectoryAuthorityHttpTests
 {
+    [Fact]
+    public async Task PostgreSqlFloorRejectsRestoredOldAda2OverRealHttpWhenConfigured()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(
+            "DEEP_TEST_DID2_FLOOR_POSTGRES");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+        if (!(OperatingSystem.IsWindows() ||
+              (OperatingSystem.IsLinux() &&
+               System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
+               System.Runtime.InteropServices.Architecture.X64)))
+            return;
+        var schema = "did2_http_floor_" + Guid.NewGuid().ToString("N");
+        var schemaConnection = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            SearchPath = schema
+        }.ConnectionString;
+        await using var admin = new NpgsqlConnection(connectionString);
+        await admin.OpenAsync();
+        await using (var setup = new NpgsqlCommand(
+                         $"CREATE SCHEMA \"{schema}\"; " +
+                         $"CREATE TABLE \"{schema}\".deep_did2_latest_head_floor (" +
+                         "network_id bytea PRIMARY KEY CHECK (octet_length(network_id) = 16), " +
+                         "exact_adh1 bytea NOT NULL CHECK (octet_length(exact_adh1) BETWEEN 1 AND 4096), " +
+                         "core_hash bytea NOT NULL CHECK (octet_length(core_hash) = 32))",
+                         admin))
+            await setup.ExecuteNonQueryAsync();
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-did2-http-pg-floor", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var fixture = ContactResolveAuthoringFixture.Create(
+                currentValue: false);
+            var paths = await ProvisionAsync(root, fixture);
+            var oldAda2 = await File.ReadAllBytesAsync(paths.StatePath);
+            using var floor = new DeepIdV2PostgreSqlLatestHeadFloor(
+                schemaConnection, fixture.Network);
+            await floor.ProvisionGenesisAsync(
+                new AccountDirectoryProtectedLkg(paths.Head));
+            await using var factory = new WebApplicationFactory<Program>()
+                .WithWebHostBuilder(builder => Configure(builder, paths,
+                    fixture.Network, null, schemaConnection));
+            using var client = factory.CreateClient();
+            var request = await File.ReadAllBytesAsync(Path.Combine(
+                AppContext.BaseDirectory, "Fixtures", "did2-genesis.dga1v2"));
+            using (var first = new ByteArrayContent(request))
+            {
+                first.Headers.ContentType = new(
+                    DeepIdV2GenesisAdmissionWireCodec.RequestMediaType);
+                using var response = await client.PostAsync(
+                    DeepIdV2DirectoryAuthorityHostingExtensions.EndpointPath,
+                    first);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+            await File.WriteAllBytesAsync(paths.StatePath, oldAda2);
+            using var replay = new ByteArrayContent(request);
+            replay.Headers.ContentType = new(
+                DeepIdV2GenesisAdmissionWireCodec.RequestMediaType);
+            using var rejected = await client.PostAsync(
+                DeepIdV2DirectoryAuthorityHostingExtensions.EndpointPath,
+                replay);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable,
+                rejected.StatusCode);
+            Assert.Equal(oldAda2, await File.ReadAllBytesAsync(paths.StatePath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            await using var cleanup = new NpgsqlCommand(
+                $"DROP SCHEMA \"{schema}\" CASCADE", admin);
+            await cleanup.ExecuteNonQueryAsync();
+        }
+    }
+
     [Fact]
     public async Task RealV2RoutePersistsPqGenesisAndReplaysExactReceipt()
     {
@@ -164,7 +239,8 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
     }
 
     private static void Configure(IWebHostBuilder builder, Paths paths,
-        byte[] network, IDeepIdV2GenesisAuthority? fake)
+        byte[] network, IDeepIdV2GenesisAuthority? fake,
+        string? floorConnectionString = null)
     {
         var networkHex = Convert.ToHexString(network);
         builder.UseSetting("ContactResolveProductionAuthority:Enabled", "true");
@@ -204,6 +280,10 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Convert.ToHexString(paths.HeadPin));
         builder.UseSetting("DeepIdV2DirectoryAuthority:StatePath", paths.StatePath);
         builder.UseSetting("DeepIdV2DirectoryAuthority:IntegrityKeyPath", paths.KeyPath);
+        if (floorConnectionString is not null)
+            builder.UseSetting(
+                "DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString",
+                floorConnectionString);
         builder.ConfigureServices(services =>
         {
             if (fake is not null)

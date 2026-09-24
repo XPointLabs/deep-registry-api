@@ -176,7 +176,8 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             integrityKey, networkId, bootstrapSource, authority,
             mlDsa65, deploymentProfileId, latestHeadFloor);
         using var lease = store.Open(cancellationToken);
-        var restored = lease.Read(upper);
+        var restored = await lease.ReadAsync(upper, cancellationToken)
+            .ConfigureAwait(false);
         var callerFloor = ResolveCallerFloor(restored, request);
         var material = lease.CreateProofMaterial(request.DirectoryLeafKey.Span,
             callerFloor);

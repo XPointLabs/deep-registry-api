@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Deep.Protocol.AccountDirectoryV1;
+using Npgsql;
 
 namespace Deep.Registry.Api.DirectoryPublication;
 
@@ -28,6 +29,10 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 string.Equals(args[1], "verify-genesis-head",
                     StringComparison.Ordinal))
                 VerifyGenesisHead(configuration);
+            else if (args.Length == 2 &&
+                string.Equals(args[1], "provision-floor",
+                    StringComparison.Ordinal))
+                ProvisionFloor(configuration, cancellationToken);
             else if (args.Length == 4 &&
                 string.Equals(args[1], "author-genesis-head",
                     StringComparison.Ordinal) &&
@@ -49,7 +54,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
         catch (Exception exception) when (exception is
             ArgumentException or IOException or CryptographicException or
             InvalidDataException or InvalidOperationException or
-            FormatException or UnauthorizedAccessException)
+            FormatException or UnauthorizedAccessException or NpgsqlException)
         {
             Console.Error.WriteLine(
                 $"DID2 directory operator action failed closed ({exception.GetType().Name}).");
@@ -111,6 +116,41 @@ internal static class DeepIdV2DirectoryOperatorCommand
             authority, head, coreHash);
         Console.Out.WriteLine(
             $"Verified DID2 genesis ADH1 core hash: {Convert.ToHexString(coreHash)}");
+    }
+
+    private static void ProvisionFloor(IConfiguration configuration,
+        CancellationToken cancellationToken)
+    {
+        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
+            throw new InvalidOperationException(
+                "DID2 floor cannot be provisioned while ADA1 admission is enabled.");
+        var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
+            .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        if (string.IsNullOrWhiteSpace(
+                options.LatestHeadFloorPostgreSqlConnectionString) ||
+            string.IsNullOrWhiteSpace(options.GenesisHeadPath) ||
+            !Path.IsPathFullyQualified(options.GenesisHeadPath))
+            throw new ArgumentException(
+                "DID2 floor connection and absolute signed genesis path are required.");
+        var network = DirectoryPublicationHostingExtensions.Hex(
+            options.NetworkIdHex, 16, "DID2 directory network ID");
+        var networkPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisAuthorityCoreHashHex, 32,
+            "DID2 genesis XNA1 core hash");
+        var headPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisHeadCoreHashHex, 32,
+            "DID2 genesis ADH1 core hash");
+        var authority = new DeepIdV2XPointAuthoritySource(network,
+            networkPin, options.ExactAuthorityPaths,
+            options.ExactTimePolicyPaths).Read();
+        var genesis = new DeepIdV2DirectoryBootstrapSource(
+            options.GenesisHeadPath, headPin).Read(authority);
+        using var floor = new DeepIdV2PostgreSqlLatestHeadFloor(
+            options.LatestHeadFloorPostgreSqlConnectionString, network);
+        floor.ProvisionGenesisAsync(genesis, cancellationToken).AsTask()
+            .GetAwaiter().GetResult();
+        Console.Out.WriteLine(
+            $"DID2 external genesis floor provisioned: {Convert.ToHexString(genesis.CoreHash.Span)}");
     }
 
     private static void AuthorGenesisHead(IConfiguration configuration,

@@ -101,7 +101,8 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
                 integrityKey, networkId, bootstrapSource, authority,
                 mlDsa65, deploymentProfileId, latestHeadFloor);
             using var lease = store.Open(cancellationToken);
-            var prior = lease.Read(upper);
+            var prior = await lease.ReadAsync(upper, cancellationToken)
+                .ConfigureAwait(false);
             foreach (var row in prior.AdmissionRows)
             {
                 var previous = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
@@ -148,7 +149,8 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
                 authored.ExactAllTransitions,
                 prior.AdmissionRows.Append(new DeepIdV2DirectoryAdmissionRow(
                     upper, exactRequest)).ToArray());
-            var committed = lease.Write(rows, upper);
+            var committed = await lease.WriteAsync(rows, upper,
+                cancellationToken).ConfigureAwait(false);
             return Receipt(request.OperationId.Span, admitted,
                 committed.CurrentHead);
         }

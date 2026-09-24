@@ -124,7 +124,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                 key, fixture.Network, bootstrap, networkSource.Read(),
                 verifier, 1);
             using var lease = store.Open();
-            var restored = lease.Read(1_700_000_405);
+            var restored = await lease.ReadAsync(1_700_000_405);
             Assert.Single(restored.AdmissionRows);
             Assert.Single(restored.Transitions);
             Assert.Equal(first.ExactAdh1.ToArray(),
@@ -356,19 +356,24 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
         public int RequireCount { get; private set; }
         public int AdvanceCount { get; private set; }
 
-        public void RequireCurrent(AccountDirectoryProtectedLkg currentHead)
+        public ValueTask RequireCurrentAsync(
+            AccountDirectoryProtectedLkg currentHead,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             RequireCount++;
             if (!CryptographicOperations.FixedTimeEquals(
                     currentHash, currentHead.CoreHash.Span))
                 throw new CryptographicException(
                     "The injected DID2 floor rejects rollback.");
+            return ValueTask.CompletedTask;
         }
 
-        public void Advance(AccountDirectoryProtectedLkg expectedHead,
-            AccountDirectoryProtectedLkg nextHead)
+        public async ValueTask AdvanceAsync(AccountDirectoryProtectedLkg expectedHead,
+            AccountDirectoryProtectedLkg nextHead,
+            CancellationToken cancellationToken = default)
         {
-            RequireCurrent(expectedHead);
+            await RequireCurrentAsync(expectedHead, cancellationToken);
             currentHash = nextHead.CoreHash.ToArray();
             AdvanceCount++;
         }

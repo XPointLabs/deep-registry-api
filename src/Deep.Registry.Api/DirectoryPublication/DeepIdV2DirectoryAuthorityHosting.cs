@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace Deep.Registry.Api.DirectoryPublication;
 
@@ -17,6 +18,7 @@ internal sealed class DeepIdV2DirectoryAuthorityOptions
     public string GenesisHeadCoreHashHex { get; set; } = string.Empty;
     public string StatePath { get; set; } = string.Empty;
     public string IntegrityKeyPath { get; set; } = string.Empty;
+    public string LatestHeadFloorPostgreSqlConnectionString { get; set; } = string.Empty;
     public bool ProofEnabled { get; set; }
     public string CurrentXnv1Path { get; set; } = string.Empty;
     public string ProofRequestLedgerRootPath { get; set; } = string.Empty;
@@ -52,6 +54,11 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             throw new InvalidOperationException(
                 "DID2 admission candidate is restricted to Development/UAT until an independent ADA2 rollback floor is implemented.");
         var (network, networkPin, headPin) = Validate(options, configuration);
+        if (!string.IsNullOrWhiteSpace(
+                options.LatestHeadFloorPostgreSqlConnectionString))
+            services.TryAddSingleton<IDeepIdV2DirectoryLatestHeadFloor>(_ =>
+                new DeepIdV2PostgreSqlLatestHeadFloor(
+                    options.LatestHeadFloorPostgreSqlConnectionString, network));
         services.TryAddSingleton(_ => new DeepIdV2XPointAuthoritySource(
             network, networkPin, options.ExactAuthorityPaths,
             options.ExactTimePolicyPaths));
@@ -189,7 +196,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         catch (Exception exception) when (exception is
             CryptographicException or InvalidDataException or IOException or
             InvalidOperationException or PlatformNotSupportedException or
-            UnauthorizedAccessException or AccountDirectoryProofAuthoringException)
+            UnauthorizedAccessException or AccountDirectoryProofAuthoringException or
+            NpgsqlException)
         {
             logger.LogError(exception,
                 "DID2 directory proof authority is unavailable.");
@@ -271,7 +279,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         catch (Exception exception) when (exception is
             CryptographicException or InvalidDataException or IOException or
             InvalidOperationException or PlatformNotSupportedException or
-            UnauthorizedAccessException)
+            UnauthorizedAccessException or NpgsqlException)
         {
             logger.LogError(exception,
                 "DID2 directory authority is unavailable.");
