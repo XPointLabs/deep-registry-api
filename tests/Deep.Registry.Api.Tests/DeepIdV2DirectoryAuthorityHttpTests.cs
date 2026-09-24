@@ -1,6 +1,7 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
@@ -83,7 +84,10 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             var verified = await accounts.AdmitAndVerifyGenesisAsync(admission,
                 proof, authority);
             Assert.NotNull(verified.CurrentCheckpoint);
-            Assert.Equal(1UL, verified.NextProtectedLkg.TreeSize);
+            // A long-running external canary may already contain other
+            // admitted accounts. The signed proof must confirm this exact
+            // account, not assume a freshly reset directory.
+            Assert.True(verified.NextProtectedLkg.TreeSize >= 1);
             Assert.Equal(created.PermanentId,
                 (await accounts.GetCurrentAsync())!.PermanentId);
             Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
@@ -250,17 +254,30 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var secondProof = new DeepIdV2DirectoryProofClient(
                 secondProofTransport, new IncreasingMonotonicClock(),
                 secondVerifier, secondFloor);
-            var caughtUp = await secondAccounts.AdmitAndVerifyGenesisAsync(
-                secondAdmission, secondProof, fixture.Authority);
-            Assert.NotNull(caughtUp.CurrentCheckpoint);
-            Assert.Equal(2UL, caughtUp.NextProtectedLkg.TreeSize);
-            Assert.Equal(caughtUp.NextProtectedLkg.CoreHash.ToArray(),
-                (await secondFloor.RestoreAsync(fixture.Authority, default))
-                .CoreHash.ToArray());
-            var sameHead = await secondProof.FetchOwnGenesisAsync(
-                caughtUp.CurrentCheckpoint!.Binding, fixture.Authority, 1, 2);
-            Assert.Equal(caughtUp.NextProtectedLkg.CoreHash.ToArray(),
-                sameHead.NextProtectedLkg.CoreHash.ToArray());
+            await Assert.ThrowsAsync<IOException>(async () =>
+                await secondAccounts.AdmitAndVerifyGenesisAsync(
+                    secondAdmission, secondProof, fixture.Authority));
+            var secondProtected = await secondFloor.RestoreAsync(
+                fixture.Authority, default);
+            Assert.Equal(0UL, secondProtected.TreeSize);
+            var secondWire = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
+                await secondAccounts.PrepareGenesisAdmissionAsync());
+            var secondDid = DeepIdV2Codec.DecodeDid2(
+                secondWire.Admission.ExactDid2.Span);
+            var secondLeaf = DeepIdV2AccountDirectoryCodec
+                .ComputeDirectoryLeafKey(fixture.Network, secondDid);
+            var directRequest = new DeepIdV2DirectoryProofRequest(
+                fixture.Network, Bytes(32, 0x77), Bytes(16, 0x78),
+                4_000, secondLeaf, secondProtected);
+            var noCheckpoint = await Assert.ThrowsAsync<CryptographicException>(
+                async () => await factory.Services.GetRequiredService<
+                    DeepIdV2DirectoryProofIssuer>().IssueAsync(directRequest));
+            Assert.Contains("forward checkpoint", noCheckpoint.Message,
+                StringComparison.OrdinalIgnoreCase);
+            var firstAtLatest = await proof.FetchOwnGenesisAsync(
+                verified.CurrentCheckpoint!.Binding, fixture.Authority, 1, 2);
+            Assert.Equal(2UL, firstAtLatest.NextProtectedLkg.TreeSize);
+            Assert.NotNull(firstAtLatest.CurrentCheckpoint);
         }
         finally
         {

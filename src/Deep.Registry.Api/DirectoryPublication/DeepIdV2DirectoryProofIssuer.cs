@@ -191,7 +191,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             epoch.ValidUntil,
             authority.ExpiresAt,
             authority.Dts1ExpiresAt,
-            material.CurrentHead.Head.ValidUntil - 1
+            restored.CurrentHead.Head.ValidUntil - 1
         }.Min();
         if (expiresAt <= upper)
             throw new CryptographicException(
@@ -199,7 +199,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var authorRequest = new AccountDirectoryProofAuthoringRequest(
             networkId, request.Nonce.Span, request.BootId.Span,
             request.ClientMonotonicSendSample,
-            material.CurrentHead.ExactAdh1.Span, exactXnv1.Span,
+            restored.CurrentHead.ExactAdh1.Span, exactXnv1.Span,
             trusted.ObservedUnixTime, trusted.UncertaintySeconds,
             trusted.ObservedUnixTime, expiresAt, epoch,
             supportedReader: 2);

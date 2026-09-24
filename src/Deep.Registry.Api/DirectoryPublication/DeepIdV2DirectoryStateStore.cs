@@ -144,23 +144,19 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
                     Fixed(head.CoreHash.Span, callerProtectedLkg.CoreHash.Span)))
                 throw new CryptographicException(
                     "The caller DID2 directory floor is outside the restored ADA2 lineage.");
-            // A newly created device may start at the pinned genesis while
-            // several admissions already exist. Supply one still-current,
-            // exact signed successor at a time; the client may use these
-            // only as bounded catch-up steps, never as a final contact proof.
-            var target = restored.CurrentHead;
+            // DTT1 authenticates the current head. Never re-sign an older
+            // still-valid head as current merely to bridge an LKG gap.
+            // A non-successor needs a root-authorized forward checkpoint.
             if (callerProtectedLkg is not null &&
                 callerProtectedLkg.LogGeneration != ulong.MaxValue &&
-                target.LogGeneration > callerProtectedLkg.LogGeneration + 1)
-            {
-                target = restored.Heads.First(head =>
-                    head.LogGeneration == callerProtectedLkg.LogGeneration + 1);
-            }
-            var prefix = checked((int)target.TreeSize);
+                restored.CurrentHead.LogGeneration >
+                callerProtectedLkg.LogGeneration + 1)
+                throw new CryptographicException(
+                    "A non-successor DID2 head requires a root-authorized forward checkpoint.");
             return DeepIdV2DirectoryProofMaterialAuthor.Create(
-                target, restored.Transitions.Take(prefix).ToArray(),
-                restored.CurrentCheckpoints.Take(prefix).ToArray(),
-                queriedDirectoryLeafKey, callerProtectedLkg);
+                restored.CurrentHead, restored.Transitions,
+                restored.CurrentCheckpoints, queriedDirectoryLeafKey,
+                callerProtectedLkg);
         }
 
         internal async ValueTask<DeepIdV2RestoredAuthorityState> WriteAsync(
