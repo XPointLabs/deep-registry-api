@@ -77,7 +77,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             var exactRequest = await File.ReadAllBytesAsync(Path.Combine(
                 AppContext.BaseDirectory, "Fixtures", "did2-genesis.dga1v2"));
             Assert.Equal(
-                "A6FE30927D2E22C1DD6A09C049E614BA57C0B4E5C83860322ADEF8F6B40CB391",
+                "41E1223F9FAB685F698FACA5F924F9BD2426753ED6989A934322BB0983920F67",
                 Convert.ToHexString(SHA256.HashData(exactRequest)));
             var request = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 exactRequest);
@@ -332,7 +332,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                 Enumerable.Repeat((byte)0x91, 32).ToArray(),
                 new DeepIdV2GenesisAdmissionRequest(
                     Bytes(644, 2), Bytes(356, 3), [Bytes(776, 4)],
-                    Bytes(2036, 5), Bytes(3711, 6), Bytes(426, 7),
+                    Bytes(DeepIdV2Codec.Did2Length, 5), Bytes(3711, 6), Bytes(426, 7),
                     Bytes(458, 8), []));
             await Assert.ThrowsAsync<AccountDirectoryGenesisAdmissionException>(
                 async () => await authority.AdmitAsync(forged));
