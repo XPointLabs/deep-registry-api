@@ -97,9 +97,11 @@ $serverKey = Join-Path $target 'floor-server.key.pem'
 $serverRequest = Join-Path $target 'floor-server.csr.pem'
 $serverCertificate = Join-Path $target 'floor-server.crt.pem'
 
-Invoke-OpenSsl @('genpkey', '-algorithm', 'ED25519', '-out', $caKey)
 Invoke-OpenSsl @(
-    'req', '-new', '-x509', '-key', $caKey, '-days', '1825',
+    'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:3072',
+    '-out', $caKey)
+Invoke-OpenSsl @(
+    'req', '-new', '-x509', '-sha256', '-key', $caKey, '-days', '1825',
     '-subj', '/CN=Deep-DID2-Floor-Internal-CA',
     '-addext', 'basicConstraints=critical,CA:TRUE',
     '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
@@ -115,7 +117,7 @@ Invoke-OpenSsl @(
     '-addext', 'extendedKeyUsage=serverAuth',
     '-out', $serverRequest)
 Invoke-OpenSsl @(
-    'x509', '-req', '-in', $serverRequest,
+    'x509', '-req', '-sha256', '-in', $serverRequest,
     '-CA', $caCertificate, '-CAkey', $caKey, '-CAcreateserial',
     '-days', '397', '-copy_extensions', 'copy',
     '-out', $serverCertificate)
