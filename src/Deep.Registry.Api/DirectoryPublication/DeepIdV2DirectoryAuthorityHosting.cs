@@ -1,4 +1,5 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
+using System.Net;
 using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Microsoft.AspNetCore.Mvc;
@@ -19,6 +20,7 @@ internal sealed class DeepIdV2DirectoryAuthorityOptions
     public string StatePath { get; set; } = string.Empty;
     public string IntegrityKeyPath { get; set; } = string.Empty;
     public string LatestHeadFloorPostgreSqlConnectionString { get; set; } = string.Empty;
+    public bool ProductionCutoverAttested { get; set; }
     public bool ProofEnabled { get; set; }
     public string CurrentXnv1Path { get; set; } = string.Empty;
     public string ProofRequestLedgerRootPath { get; set; } = string.Empty;
@@ -49,10 +51,14 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             throw new InvalidOperationException(
                 "DID2 proof publication requires DID2 admission in the same isolated UAT authority.");
         if (!options.Enabled) return default;
-        if (environment is null ||
-            !(environment.IsDevelopment() || environment.IsEnvironment("UAT")))
+        if (environment is null)
             throw new InvalidOperationException(
-                "DID2 admission candidate is restricted to Development/UAT until an independent ADA2 rollback floor is implemented.");
+                "DID2 admission requires an explicit hosting environment.");
+        if (environment.IsProduction())
+            RequireProductionCutover(options);
+        else if (!(environment.IsDevelopment() || environment.IsEnvironment("UAT")))
+            throw new InvalidOperationException(
+                "DID2 admission is unavailable in an unrecognized environment.");
         var (network, networkPin, headPin) = Validate(options, configuration);
         if (!string.IsNullOrWhiteSpace(
                 options.LatestHeadFloorPostgreSqlConnectionString))
@@ -295,6 +301,50 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
 
     private static IResult Failure(int status, string code) =>
         Results.Json(new { code }, statusCode: status);
+
+    private static void RequireProductionCutover(
+        DeepIdV2DirectoryAuthorityOptions options)
+    {
+        if (!options.ProductionCutoverAttested || !options.ProofEnabled ||
+            string.IsNullOrWhiteSpace(
+                options.LatestHeadFloorPostgreSqlConnectionString))
+            throw new InvalidOperationException(
+                "Production DID2 requires an attested independent rollback floor and current proof publication.");
+        NpgsqlConnectionStringBuilder connection;
+        try
+        {
+            connection = new NpgsqlConnectionStringBuilder(
+                options.LatestHeadFloorPostgreSqlConnectionString);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidOperationException(
+                "Production DID2 floor connection configuration is invalid.",
+                exception);
+        }
+        var hosts = (connection.Host ?? string.Empty).Split(',',
+            StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (hosts.Length != 1 || IsLocalFloorHost(hosts[0]) ||
+            connection.SslMode != SslMode.VerifyFull ||
+            (connection.TryGetValue("Trust Server Certificate", out var trust) &&
+             trust is true) ||
+            string.IsNullOrWhiteSpace(connection.RootCertificate) ||
+            !Path.IsPathFullyQualified(connection.RootCertificate) ||
+            !File.Exists(connection.RootCertificate))
+            throw new InvalidOperationException(
+                "Production DID2 rollback floor requires one remote PostgreSQL host and VerifyFull TLS with an exact local root certificate.");
+    }
+
+    private static bool IsLocalFloorHost(string host)
+    {
+        var canonical = host.TrimEnd('.').Trim('[', ']');
+        return canonical.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            canonical.StartsWith("/", StringComparison.Ordinal) ||
+            (IPAddress.TryParse(canonical, out var address) &&
+             (IPAddress.IsLoopback(address) ||
+              address.Equals(IPAddress.Any) ||
+              address.Equals(IPAddress.IPv6Any)));
+    }
 
     private static (byte[] Network, byte[] NetworkPin, byte[] HeadPin)
         Validate(DeepIdV2DirectoryAuthorityOptions options,

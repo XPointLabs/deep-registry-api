@@ -7,6 +7,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Npgsql;
 
 namespace Deep.Registry.Api.Tests;
 
@@ -52,6 +53,95 @@ public sealed class DeepIdV2DirectoryAuthorityHostingTests
                 configuration, new FixedEnvironment(Environments.Production)));
         Assert.Contains("rollback floor", error.Message,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProductionDid2RejectsInsecureOrLocalFloorBeforeOpeningAuthority()
+    {
+        var rootCertificatePath = Path.GetTempFileName();
+        try
+        {
+            foreach (var (host, sslMode, trust, rootPath) in new[]
+                     {
+                         ("floor.example", SslMode.Prefer, false, rootCertificatePath),
+                         ("localhost", SslMode.VerifyFull, false, rootCertificatePath),
+                         ("127.0.0.2", SslMode.VerifyFull, false, rootCertificatePath),
+                         ("0.0.0.0", SslMode.VerifyFull, false, rootCertificatePath),
+                         ("floor.example", SslMode.VerifyFull, true, rootCertificatePath),
+                         ("floor.example", SslMode.VerifyFull, false, string.Empty)
+                     })
+            {
+                var floorConnection = new NpgsqlConnectionStringBuilder
+                {
+                    Host = host,
+                    SslMode = sslMode,
+                    RootCertificate = rootPath
+                };
+                if (trust) floorConnection["Trust Server Certificate"] = true;
+                var configuration = new ConfigurationBuilder()
+                    .AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["DeepIdV2DirectoryAuthority:Enabled"] = "true",
+                        ["DeepIdV2DirectoryAuthority:ProofEnabled"] = "true",
+                        ["DeepIdV2DirectoryAuthority:ProductionCutoverAttested"] = "true",
+                        ["DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString"] =
+                            floorConnection.ConnectionString
+                    }).Build();
+                var error = Assert.Throws<InvalidOperationException>(() =>
+                    new ServiceCollection().AddDeepIdV2DirectoryAuthority(
+                        configuration, new FixedEnvironment(Environments.Production)));
+                Assert.Contains("VerifyFull TLS", error.Message,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally { File.Delete(rootCertificatePath); }
+    }
+
+    [Fact]
+    public void ProductionDid2RequiresExplicitCutoverAttestation()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DeepIdV2DirectoryAuthority:Enabled"] = "true",
+                ["DeepIdV2DirectoryAuthority:ProofEnabled"] = "true",
+                ["DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString"] =
+                    "Host=floor.example;SSL Mode=VerifyFull;Root Certificate=C:\\floor-ca.pem"
+            }).Build();
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            new ServiceCollection().AddDeepIdV2DirectoryAuthority(
+                configuration, new FixedEnvironment(Environments.Production)));
+        Assert.Contains("attested", error.Message,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProductionDid2CanPassTheCutoverGateOnlyWithPinnedRemoteTls()
+    {
+        var rootCertificatePath = Path.GetTempFileName();
+        try
+        {
+            var connection = new NpgsqlConnectionStringBuilder
+            {
+                Host = "floor.example",
+                SslMode = SslMode.VerifyFull,
+                RootCertificate = rootCertificatePath
+            }.ConnectionString;
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DeepIdV2DirectoryAuthority:Enabled"] = "true",
+                    ["DeepIdV2DirectoryAuthority:ProofEnabled"] = "true",
+                    ["DeepIdV2DirectoryAuthority:ProductionCutoverAttested"] = "true",
+                    ["DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString"] = connection
+                }).Build();
+            var error = Assert.Throws<InvalidOperationException>(() =>
+                new ServiceCollection().AddDeepIdV2DirectoryAuthority(
+                    configuration, new FixedEnvironment(Environments.Production)));
+            Assert.Contains("protected trusted time", error.Message,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        finally { File.Delete(rootCertificatePath); }
     }
 
     [Fact]

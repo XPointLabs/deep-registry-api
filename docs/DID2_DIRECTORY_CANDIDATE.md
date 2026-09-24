@@ -17,7 +17,8 @@ The `DeepIdV2DirectoryAuthority` configuration requires:
 | `StatePath` / `IntegrityKeyPath` | Separate absolute paths for ADA2 and its nonzero 32-byte HMAC key |
 | `DeploymentProfileId` | Nonzero DID2 deployment profile; currently 1 |
 | `HeadValiditySeconds` | 300–86400 seconds; default 3600 |
-| `ProofEnabled` | Optional UAT-only `DPQ2` proof endpoint; default `false` |
+| `ProofEnabled` | Optional UAT `DPQ2` proof endpoint; required for production; default `false` |
+| `ProductionCutoverAttested` | Operator attestation after independent floor topology, restore drill and client E2E; default `false` |
 | `CurrentXnv1Path` | Exact signed current XNV1 supplied by the authority owner |
 | `ProofRequestLedgerRootPath` / `ProofRequestLedgerIntegrityKeyPath` | Separate V2 one-use nonce ledger root and nonzero 32-byte HMAC key; neither may alias V1 custody paths |
 
@@ -61,9 +62,15 @@ dotnet Deep.Registry.Api.dll did2-directory provision-state
 This command re-verifies XNA1/DTS1 from the pinned genesis, verifies the
 signed empty head, writes an HMAC-protected ADA2 file under an exclusive
 lease, prints only its SHA-256, and refuses any existing state or interrupted
-write. It does not enable the HTTP route. The admission endpoint refuses to
-start outside `Development` or `UAT` while production floor deployment,
-recovery and client verification remain open. UAT may explicitly set
+write. It does not enable the HTTP route. In production the admission endpoint
+requires `ProductionCutoverAttested=true`, `ProofEnabled=true` and one remote
+PostgreSQL floor endpoint configured with `SSL Mode=VerifyFull` and an absolute
+local root-certificate path. This flag is an operator attestation, not proof
+of independent backup/restore topology or the physical client gate. Before
+mapping any production HTTP route, startup also verifies trusted time, the
+signed authority chain, the complete ADA2 journal and its exact external
+floor, and constructs the proof issuer with its protected nonce ledger; an
+outage or mismatch aborts startup. UAT may explicitly set
 `DeepIdV2DirectoryAuthority:Enabled=true` and keep
 `AccountDirectoryAuthority:Enabled=false`.
 
@@ -84,9 +91,9 @@ fail closed. Neither startup nor request handling creates tables or rows.
 The schema is [did2-latest-head-floor.sql](sql/did2-latest-head-floor.sql).
 Its database, snapshot schedule and restore authority MUST be independent of
 the ADA2 filesystem. A local container, same-host volume or database restored
-from the same snapshot is not a production rollback floor. Production hosting
-still rejects DID2 until independent topology, recovery and client verification
-have been demonstrated. For a remote floor, authenticate the PostgreSQL server
+from the same snapshot is not a production rollback floor. Production cutover
+must wait until independent topology, recovery and client verification have
+been demonstrated. Authenticate the PostgreSQL server
 with `SSL Mode=VerifyFull` and a pinned private CA/root certificate, and keep
 the provisioning and runtime database roles separate. This is internal service
 authentication, not a requirement for users to own public certificates.
@@ -113,7 +120,7 @@ ever composed for a deployed service. In UAT, an explicitly enabled
 `POST /api/v2/account-directory/proofs` accepts only the exact bounded `DPQ2`
 frame and returns `DPP2`; it shares the bounded admission gate but uses its
 own durable one-use nonce ledger. The public route remains disabled by default
-and cannot start outside Development/UAT. An arbitrary 32-byte leaf query is
+and cannot start in production without the attested floor gate. An arbitrary 32-byte leaf query is
 not accepted: the leaf is derived from the exact DID2 carried by the frame.
 The independent rollback floor, DAB2-bound client verification and physical
 E2E remain production gates.

@@ -74,6 +74,12 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                     1_700_000_400), statePath, fixture.Network, key,
                 deploymentProfileId: 1, headValiditySeconds: 3_600,
                 latestHeadFloor: floor);
+            await authority.RequireReadyAsync();
+            Assert.True(floor.RequireCount > 0);
+            floor.RejectReads = true;
+            await Assert.ThrowsAsync<CryptographicException>(
+                async () => await authority.RequireReadyAsync());
+            floor.RejectReads = false;
             var exactRequest = await File.ReadAllBytesAsync(Path.Combine(
                 AppContext.BaseDirectory, "Fixtures", "did2-genesis.dga1v2"));
             Assert.Equal(
@@ -355,6 +361,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
 
         public int RequireCount { get; private set; }
         public int AdvanceCount { get; private set; }
+        public bool RejectReads { get; set; }
 
         public ValueTask RequireCurrentAsync(
             AccountDirectoryProtectedLkg currentHead,
@@ -362,7 +369,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             RequireCount++;
-            if (!CryptographicOperations.FixedTimeEquals(
+            if (RejectReads || !CryptographicOperations.FixedTimeEquals(
                     currentHash, currentHead.CoreHash.Span))
                 throw new CryptographicException(
                     "The injected DID2 floor rejects rollback.");

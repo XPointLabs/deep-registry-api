@@ -68,6 +68,39 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
         this.headValiditySeconds = headValiditySeconds;
     }
 
+    /// <summary>
+    /// Production startup barrier. No HTTP endpoint may open until the
+    /// trusted time, signed authority, complete ADA2 journal and independent
+    /// exact-head floor agree. This performs no admission or floor mutation.
+    /// </summary>
+    internal async ValueTask RequireReadyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (latestHeadFloor is null)
+            throw new InvalidOperationException(
+                "Production DID2 requires an independent latest-head floor.");
+        var trusted = await trustedTimeSource.ReadAsync(cancellationToken)
+            .ConfigureAwait(false);
+        trusted.Validate();
+        var lower = trusted.ObservedUnixTime - trusted.UncertaintySeconds;
+        var upper = checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds);
+        var authority = networkAuthoritySource.Read();
+        if (!CryptographicOperations.FixedTimeEquals(
+                authority.NetworkId.Span, networkId) ||
+            lower < authority.NotBefore || upper >= authority.ExpiresAt)
+            throw new CryptographicException(
+                "Production DID2 authority does not cover the trusted-time interval.");
+        using var verifier = DeepMlDsa65CandidateVerifierFactory
+            .OpenForCurrentProcess();
+        using var store = new DeepIdV2DirectoryStateStore(statePath,
+            integrityKey, networkId, bootstrapSource, authority, verifier,
+            deploymentProfileId, latestHeadFloor);
+        using var lease = store.Open(cancellationToken);
+        _ = await lease.ReadAsync(upper, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async ValueTask<DeepIdV2GenesisAdmissionReceipt> AdmitAsync(
         DeepIdV2GenesisAdmissionWireRequest request,
         CancellationToken cancellationToken = default)

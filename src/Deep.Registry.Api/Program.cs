@@ -118,6 +118,17 @@ builder.Services.AddHostedService<RegistryReconciliationWorker>();
 
 var app = builder.Build();
 
+#if DEEP_PROTOCOL_DIRECTORY_V1
+if (app.Environment.IsProduction() && deepIdV2DirectoryAuthority.Enabled)
+{
+    await app.Services.GetRequiredService<
+            Deep.Registry.Api.DirectoryPublication.DeepIdV2DurableGenesisAuthority>()
+        .RequireReadyAsync();
+    _ = app.Services.GetRequiredService<
+        Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryProofIssuer>();
+}
+#endif
+
 app.UseDefaultFiles();
 app.UseStaticFiles();
 if (useForwardedHeaders) app.UseForwardedHeaders();
