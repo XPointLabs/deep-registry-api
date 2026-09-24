@@ -1,4 +1,5 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
+using System.Diagnostics;
 using System.Net;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.XPointNetworkV1;
@@ -19,6 +20,82 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2DirectoryAuthorityHttpTests
 {
+    [Fact]
+    public async Task ExternalRegistryAcceptsAndProvesFreshDid2GenesisWhenConfigured()
+    {
+        var origin = Environment.GetEnvironmentVariable(
+            "DEEP_TEST_DID2_EXTERNAL_ORIGIN");
+        if (string.IsNullOrWhiteSpace(origin)) return;
+        if (!(OperatingSystem.IsWindows() ||
+              (OperatingSystem.IsLinux() &&
+               System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
+               System.Runtime.InteropServices.Architecture.X64)))
+            return;
+
+        static string Required(string name) =>
+            Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
+                ? value
+                : throw new InvalidOperationException(
+                    $"The external DID2 test requires {name}.");
+
+        var network = Convert.FromHexString(Required(
+            "DEEP_TEST_DID2_EXTERNAL_NETWORK_ID"));
+        var xnaPin = Convert.FromHexString(Required(
+            "DEEP_TEST_DID2_EXTERNAL_XNA1_PIN"));
+        var headPin = Convert.FromHexString(Required(
+            "DEEP_TEST_DID2_EXTERNAL_ADH1_PIN"));
+        var authority = new DeepIdV2XPointAuthoritySource(network, xnaPin,
+            [Required("DEEP_TEST_DID2_EXTERNAL_XNA1_PATH")],
+            [Required("DEEP_TEST_DID2_EXTERNAL_DTS1_PATH")]).Read();
+        var genesisHead = await File.ReadAllBytesAsync(Required(
+            "DEEP_TEST_DID2_EXTERNAL_ADH1_PATH"));
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-did2-external-registry", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var secureStorage = new InMemoryDeepSecureStorage();
+            var accounts = new DeepIdV2AccountService(secureStorage, root,
+                network, 1, new SystemClock(),
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            var created = await accounts.CreateAsync("DID2 External Probe");
+            var protectedFloor = await accounts.OpenDirectoryLkgStoreAsync(
+                authority, genesisHead, headPin);
+            Assert.Equal(0UL, (await protectedFloor.RestoreAsync(authority,
+                default)).TreeSize);
+
+            using var admissionHttp = new HttpClient { BaseAddress = new Uri(origin) };
+            using var admissionTransport = new HttpServiceRequestTransport(
+                admissionHttp,
+                DeepIdV2GenesisAdmissionClient.CreateTransportOptions(origin),
+                HttpServiceEndpointPolicy.Production);
+            using var admission = new DeepIdV2GenesisAdmissionClient(
+                admissionTransport);
+            using var proofHttp = new HttpClient { BaseAddress = new Uri(origin) };
+            using var proofTransport = new HttpServiceRequestTransport(
+                proofHttp,
+                DeepIdV2DirectoryProofClient.CreateTransportOptions(origin),
+                HttpServiceEndpointPolicy.Production);
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var proof = new DeepIdV2DirectoryProofClient(proofTransport,
+                new ExternalMonotonicClock(), verifier, protectedFloor);
+            var verified = await accounts.AdmitAndVerifyGenesisAsync(admission,
+                proof, authority);
+            Assert.NotNull(verified.CurrentCheckpoint);
+            Assert.Equal(1UL, verified.NextProtectedLkg.TreeSize);
+            Assert.Equal(created.PermanentId,
+                (await accounts.GetCurrentAsync())!.PermanentId);
+            Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
+                (await protectedFloor.RestoreAsync(authority, default))
+                .CoreHash.ToArray());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task CreatedClientAccountRequiresAndCommitsRealRegistryProof()
     {
@@ -464,6 +541,22 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             return ValueTask.FromResult(new OnionMonotonicReading(
                 Bytes(16, 0xc1), checked((ulong)Interlocked.Increment(
                     ref sample))));
+        }
+    }
+
+    private sealed class ExternalMonotonicClock : IOnionMonotonicClock
+    {
+        private readonly byte[] bootId =
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        private readonly long started = Stopwatch.GetTimestamp();
+
+        public ValueTask<OnionMonotonicReading> ReadAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            return ValueTask.FromResult(new OnionMonotonicReading(bootId,
+                checked(1_000UL + (ulong)Math.Floor(elapsed.TotalSeconds))));
         }
     }
 
