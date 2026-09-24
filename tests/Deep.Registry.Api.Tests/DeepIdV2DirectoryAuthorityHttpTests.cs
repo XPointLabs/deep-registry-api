@@ -3,6 +3,11 @@ using System.Net;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
+using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.AccountDirectoryV2;
+using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,6 +18,115 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2DirectoryAuthorityHttpTests
 {
+    [Fact]
+    public async Task CreatedClientAccountRequiresAndCommitsRealRegistryProof()
+    {
+        if (!(OperatingSystem.IsWindows() ||
+              (OperatingSystem.IsLinux() &&
+               System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
+               System.Runtime.InteropServices.Architecture.X64)))
+            return;
+        using var fixture = ContactResolveAuthoringFixture.Create(
+            currentValue: false);
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-did2-client-registry", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var paths = await ProvisionAsync(root, fixture);
+            var clientRoot = Path.Combine(root, "client");
+            Directory.CreateDirectory(clientRoot);
+            var currentView = Path.Combine(root, "current.xnv1");
+            var proofKey = Path.Combine(root, "proof-ledger.key");
+            await File.WriteAllBytesAsync(currentView,
+                fixture.Snapshot.ExactCurrentXnv1.ToArray());
+            await File.WriteAllBytesAsync(proofKey, Bytes(32, 0x6b));
+            await using var factory = new WebApplicationFactory<Program>()
+                .WithWebHostBuilder(builder =>
+                {
+                    Configure(builder, paths, fixture.Network, null);
+                    builder.UseSetting("DeepIdV2DirectoryAuthority:ProofEnabled",
+                        "true");
+                    builder.UseSetting("DeepIdV2DirectoryAuthority:CurrentXnv1Path",
+                        currentView);
+                    builder.UseSetting(
+                        "DeepIdV2DirectoryAuthority:ProofRequestLedgerRootPath",
+                        Path.Combine(root, "proof-ledger"));
+                    builder.UseSetting(
+                        "DeepIdV2DirectoryAuthority:ProofRequestLedgerIntegrityKeyPath",
+                        proofKey);
+                });
+            using var secureStorage = new InMemoryDeepSecureStorage();
+            var accounts = new DeepIdV2AccountService(secureStorage,
+                clientRoot, fixture.Network, 1,
+                new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(
+                    1_700_000_400)),
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            var created = await accounts.CreateAsync("Alice");
+            var protectedFloor = await accounts.OpenDirectoryLkgStoreAsync(
+                fixture.Authority, paths.Head, paths.HeadPin);
+            var initial = await protectedFloor.RestoreAsync(fixture.Authority,
+                default);
+            Assert.Equal(0UL, initial.TreeSize);
+
+            using var admissionHttp = factory.CreateClient();
+            admissionHttp.BaseAddress = new Uri("https://registry.example/");
+            using var admissionTransport = new HttpServiceRequestTransport(
+                admissionHttp,
+                DeepIdV2GenesisAdmissionClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var admission = new DeepIdV2GenesisAdmissionClient(
+                admissionTransport);
+            using var proofHttp = factory.CreateClient();
+            proofHttp.BaseAddress = new Uri("https://registry.example/");
+            using var proofTransport = new HttpServiceRequestTransport(
+                proofHttp,
+                DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var proof = new DeepIdV2DirectoryProofClient(
+                proofTransport, new IncreasingMonotonicClock(), verifier,
+                protectedFloor);
+            var verified = await accounts.AdmitAndVerifyGenesisAsync(
+                admission, proof, fixture.Authority);
+            Assert.NotNull(verified.CurrentCheckpoint);
+            Assert.Equal(1UL, verified.NextProtectedLkg.TreeSize);
+            var dtt = AccountDirectoryDtt1Codec.Decode(
+                verified.ExactDtt1.Span);
+            Assert.Equal(1_700_000_400UL, dtt.IssuedAt);
+            Assert.InRange(dtt.ExpiresAt,
+                dtt.ObservedUnixTime + dtt.UncertaintySeconds + 1,
+                dtt.ObservedUnixTime + 30);
+            Assert.True(verified.IsCurrentAtMonotonic(
+                Bytes(16, 0xc1), verified.MonotonicSample + 1));
+            Assert.False(verified.IsCurrentAtMonotonic(
+                Bytes(16, 0xc1),
+                verified.FreshnessDeadlineMonotonicSeconds));
+            Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
+                (await protectedFloor.RestoreAsync(fixture.Authority, default))
+                .CoreHash.ToArray());
+            var reopened = new DeepIdV2AccountService(secureStorage,
+                clientRoot, fixture.Network, 1,
+                new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(
+                    1_700_000_400)),
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            Assert.Equal(created.PermanentId,
+                (await reopened.GetCurrentAsync())!.PermanentId);
+            var reopenedFloor = await reopened.OpenDirectoryLkgStoreAsync(
+                fixture.Authority, paths.Head, paths.HeadPin);
+            Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
+                (await reopenedFloor.RestoreAsync(fixture.Authority, default))
+                .CoreHash.ToArray());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task PostgreSqlFloorRejectsRestoredOldAda2OverRealHttpWhenConfigured()
     {
@@ -316,6 +430,20 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(new ContactResolveTrustedTimeContext(
                 Bytes(16, 0xc1), 4_000, 1_700_000_400, 5));
+        }
+    }
+
+    private sealed class IncreasingMonotonicClock : IOnionMonotonicClock
+    {
+        private long sample = 4_000;
+
+        public ValueTask<OnionMonotonicReading> ReadAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(new OnionMonotonicReading(
+                Bytes(16, 0xc1), checked((ulong)Interlocked.Increment(
+                    ref sample))));
         }
     }
 

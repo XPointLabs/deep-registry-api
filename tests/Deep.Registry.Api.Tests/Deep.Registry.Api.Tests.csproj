@@ -43,6 +43,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Deep.Registry.Api\Deep.Registry.Api.csproj" />
+    <ProjectReference Include="..\..\..\deep-client-shared\src\Deep.Client.Shared\Deep.Client.Shared.csproj"
+                      Condition="'$(DeepProtocolLocalCutover)' == 'true'" />
     <ProjectReference Include="..\..\..\xnode\src\XNode.Core\XNode.Core.csproj"
                       Condition="'$(DirectoryVerifierFocused)' != 'true'" />
     <ProjectReference Include="..\..\..\xnode\src\XNode.Registry\XNode.Registry.csproj"

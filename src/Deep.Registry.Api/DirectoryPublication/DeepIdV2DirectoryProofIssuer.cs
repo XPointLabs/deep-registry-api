@@ -183,13 +183,26 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             callerFloor);
         var exactXnv1 = await currentViewSource.ReadExactXnv1Async(
             cancellationToken).ConfigureAwait(false);
+        var latestProofExpiry = trusted.ObservedUnixTime > ulong.MaxValue - 30
+            ? ulong.MaxValue : trusted.ObservedUnixTime + 30;
+        var expiresAt = new[]
+        {
+            latestProofExpiry,
+            epoch.ValidUntil,
+            authority.ExpiresAt,
+            authority.Dts1ExpiresAt,
+            restored.CurrentHead.Head.ValidUntil - 1
+        }.Min();
+        if (expiresAt <= upper)
+            throw new CryptographicException(
+                "DID2 proof has no usable nonce-bound lifetime.");
         var authorRequest = new AccountDirectoryProofAuthoringRequest(
             networkId, request.Nonce.Span, request.BootId.Span,
             request.ClientMonotonicSendSample,
             restored.CurrentHead.ExactAdh1.Span, exactXnv1.Span,
             trusted.ObservedUnixTime, trusted.UncertaintySeconds,
-            trusted.ObservedUnixTime - trusted.UncertaintySeconds,
-            upper, epoch, supportedReader: 2);
+            trusted.ObservedUnixTime, expiresAt, epoch,
+            supportedReader: 2);
         var signers = await witnessCustody.GetSignersAsync(authority,
             cancellationToken).ConfigureAwait(false);
         return await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(

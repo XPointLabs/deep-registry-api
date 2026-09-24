@@ -118,6 +118,15 @@ not accepted: the leaf is derived from the exact DID2 carried by the frame.
 The independent rollback floor, DAB2-bound client verification and physical
 E2E remain production gates.
 
+The issuer now sets DTT1 `issued-at` to the authenticated observation and
+allows at most 30 seconds until `expires-at`, clipped by the issuance epoch,
+XNA1/DTS1 policy and current ADH1 validity. If the complete uncertainty
+interval leaves no post-observation lifetime, it refuses to issue. The former
+`expires-at = observed + uncertainty` made any subsequent client monotonic
+second fail. A Registry↔client-shared TestServer integration now creates a
+real DID2 account, admits it, verifies live DTT1/ADP1 V2 and durably commits
+the SQLCipher floor. This is local contract evidence, not physical E2E.
+
 The internal issuer also accepts the candidate `DPQ2` frame: exact ADL1 V2
 plus exact DID2, nonce, boot ID and monotonic sample. It derives the leaf,
 matches the ADL1 lookup, resolves the caller's generation/hash floor only
