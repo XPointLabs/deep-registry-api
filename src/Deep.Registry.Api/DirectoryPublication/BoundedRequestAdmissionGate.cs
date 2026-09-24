@@ -145,6 +145,20 @@ internal sealed class ContactResolveIssuanceAdmissionGate(TimeProvider timeProvi
     internal BoundedAdmissionDecision TryAcquire(IPAddress? address) => gate.TryAcquire(address);
 }
 
+/// <summary>
+/// DID2 enrollment can require several directly successive proofs from one
+/// device. Keep its budget separate from contact resolution, while retaining
+/// the same six-per-window global ceiling required by the one-use ledger.
+/// </summary>
+internal sealed class DeepIdV2IssuanceAdmissionGate(TimeProvider timeProvider)
+{
+    private readonly BoundedRequestAdmissionGate gate = new(
+        timeProvider, perSourceLimit: 6, globalLimit: 6,
+        TimeSpan.FromSeconds(10), TimeSpan.FromMinutes(2));
+
+    internal BoundedAdmissionDecision TryAcquire(IPAddress? address) => gate.TryAcquire(address);
+}
+
 internal sealed class ContactRouteClosureAdmissionGate(TimeProvider timeProvider)
 {
     private readonly BoundedRequestAdmissionGate gate = new(

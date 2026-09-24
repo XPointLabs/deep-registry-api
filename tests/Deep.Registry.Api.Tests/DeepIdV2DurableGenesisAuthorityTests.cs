@@ -212,7 +212,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             httpBuilder.WebHost.UseTestServer();
             httpBuilder.Services.AddSingleton(proofIssuer);
             httpBuilder.Services.AddSingleton(TimeProvider.System);
-            httpBuilder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
+            httpBuilder.Services.AddSingleton<DeepIdV2IssuanceAdmissionGate>();
             await using (var app = httpBuilder.Build())
             {
                 app.MapDeepIdV2DirectoryAuthorityEndpoint(

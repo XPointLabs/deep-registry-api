@@ -89,7 +89,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         });
         services.TryAddSingleton<IDeepIdV2GenesisAuthority>(provider =>
             provider.GetRequiredService<DeepIdV2DurableGenesisAuthority>());
-        services.TryAddSingleton<ContactResolveIssuanceAdmissionGate>();
+        services.TryAddSingleton<DeepIdV2IssuanceAdmissionGate>();
         if (options.ProofEnabled)
         {
             services.TryAddSingleton<IDeepIdV2CurrentViewSource>(_ =>
@@ -145,7 +145,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
 
     private static async Task<IResult> HandleProofAsync(HttpContext context,
         DeepIdV2DirectoryProofIssuer issuer,
-        ContactResolveIssuanceAdmissionGate admission,
+        DeepIdV2IssuanceAdmissionGate admission,
         ILogger<DeepIdV2DirectoryProofIssuer> logger,
         CancellationToken cancellationToken)
     {
@@ -219,7 +219,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
 
     private static async Task<IResult> HandleAsync(HttpContext context,
         IDeepIdV2GenesisAuthority authority,
-        ContactResolveIssuanceAdmissionGate admission,
+        DeepIdV2IssuanceAdmissionGate admission,
         ILogger<DeepIdV2DurableGenesisAuthority> logger,
         CancellationToken cancellationToken)
     {

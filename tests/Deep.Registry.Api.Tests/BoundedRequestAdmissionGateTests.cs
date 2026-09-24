@@ -75,6 +75,20 @@ public sealed class BoundedRequestAdmissionGateTests
             ContactResolveIssuanceAdmissionGate.MinimumLedgerCapacity);
     }
 
+    [Fact]
+    public void Did2_enrollment_allows_bounded_same_source_catch_up()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1_700_000_000));
+        var gate = new DeepIdV2IssuanceAdmissionGate(clock);
+        var source = IPAddress.Parse("192.0.2.1");
+        for (var index = 0; index < 6; index++)
+            Assert.True(gate.TryAcquire(source).IsAccepted);
+        Assert.Equal(10U, gate.TryAcquire(source).RetryAfterSeconds);
+        Assert.False(gate.TryAcquire(IPAddress.Parse("192.0.2.2")).IsAccepted);
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(gate.TryAcquire(source).IsAccepted);
+    }
+
     private static BoundedRequestAdmissionGate Gate(
         TimeProvider clock,
         int perSource,

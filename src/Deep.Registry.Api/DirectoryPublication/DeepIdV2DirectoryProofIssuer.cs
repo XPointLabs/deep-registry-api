@@ -191,7 +191,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             epoch.ValidUntil,
             authority.ExpiresAt,
             authority.Dts1ExpiresAt,
-            restored.CurrentHead.Head.ValidUntil - 1
+            material.CurrentHead.Head.ValidUntil - 1
         }.Min();
         if (expiresAt <= upper)
             throw new CryptographicException(
@@ -199,7 +199,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var authorRequest = new AccountDirectoryProofAuthoringRequest(
             networkId, request.Nonce.Span, request.BootId.Span,
             request.ClientMonotonicSendSample,
-            restored.CurrentHead.ExactAdh1.Span, exactXnv1.Span,
+            material.CurrentHead.ExactAdh1.Span, exactXnv1.Span,
             trusted.ObservedUnixTime, trusted.UncertaintySeconds,
             trusted.ObservedUnixTime, expiresAt, epoch,
             supportedReader: 2);
@@ -233,8 +233,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             Fixed(head.CoreHash.Span, hash));
         if (matching is null)
             throw new ContactResolveDirectoryTargetNotFoundException();
-        return matching.LogGeneration == restored.CurrentHead.LogGeneration
-            ? null : matching;
+        return matching;
     }
 
     public void Dispose()

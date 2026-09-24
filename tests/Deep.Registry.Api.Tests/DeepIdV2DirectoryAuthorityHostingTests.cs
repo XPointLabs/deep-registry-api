@@ -167,7 +167,7 @@ public sealed class DeepIdV2DirectoryAuthorityHostingTests
         builder.Services.AddSingleton<IDeepIdV2GenesisAuthority>(
             new UnusedGenesisAuthority());
         builder.Services.AddSingleton(TimeProvider.System);
-        builder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
+        builder.Services.AddSingleton<DeepIdV2IssuanceAdmissionGate>();
         await using var app = builder.Build();
         app.MapDeepIdV2DirectoryAuthorityEndpoint(
             new DeepIdV2DirectoryAuthorityHostingState(true, false));

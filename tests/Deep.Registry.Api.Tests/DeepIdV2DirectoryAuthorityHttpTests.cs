@@ -217,6 +217,50 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
                 (await reopenedFloor.RestoreAsync(fixture.Authority, default))
                 .CoreHash.ToArray());
+
+            var secondRoot = Path.Combine(root, "second-client");
+            Directory.CreateDirectory(secondRoot);
+            using var secondStorage = new InMemoryDeepSecureStorage();
+            var secondAccounts = new DeepIdV2AccountService(secondStorage,
+                secondRoot, fixture.Network, 1,
+                new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(
+                    1_700_000_400)),
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            _ = await secondAccounts.CreateAsync("Bob");
+            var secondFloor = await secondAccounts.OpenDirectoryLkgStoreAsync(
+                fixture.Authority, paths.Head, paths.HeadPin);
+            using var secondAdmissionHttp = factory.CreateClient();
+            secondAdmissionHttp.BaseAddress = new Uri("https://registry.example/");
+            using var secondAdmissionTransport = new HttpServiceRequestTransport(
+                secondAdmissionHttp,
+                DeepIdV2GenesisAdmissionClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var secondAdmission = new DeepIdV2GenesisAdmissionClient(
+                secondAdmissionTransport);
+            using var secondProofHttp = factory.CreateClient();
+            secondProofHttp.BaseAddress = new Uri("https://registry.example/");
+            using var secondProofTransport = new HttpServiceRequestTransport(
+                secondProofHttp,
+                DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var secondVerifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var secondProof = new DeepIdV2DirectoryProofClient(
+                secondProofTransport, new IncreasingMonotonicClock(),
+                secondVerifier, secondFloor);
+            var caughtUp = await secondAccounts.AdmitAndVerifyGenesisAsync(
+                secondAdmission, secondProof, fixture.Authority);
+            Assert.NotNull(caughtUp.CurrentCheckpoint);
+            Assert.Equal(2UL, caughtUp.NextProtectedLkg.TreeSize);
+            Assert.Equal(caughtUp.NextProtectedLkg.CoreHash.ToArray(),
+                (await secondFloor.RestoreAsync(fixture.Authority, default))
+                .CoreHash.ToArray());
+            var sameHead = await secondProof.FetchOwnGenesisAsync(
+                caughtUp.CurrentCheckpoint!.Binding, fixture.Authority, 1, 2);
+            Assert.Equal(caughtUp.NextProtectedLkg.CoreHash.ToArray(),
+                sameHead.NextProtectedLkg.CoreHash.ToArray());
         }
         finally
         {
