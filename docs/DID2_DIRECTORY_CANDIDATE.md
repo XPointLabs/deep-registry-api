@@ -40,7 +40,18 @@ head, interrupted authoring file, missing/insufficient custody, cross-network
 keys, overlapping paths or a stale configured head pin. It never emits seeds.
 Review and independently pin that printed hash as
 `GenesisHeadCoreHashHex`; the command does not set the pin for you. With the
-V2 state/key settings supplied, initialize ADA2 once from inside the Registry
+exact signed head present, the following read-only command re-verifies the
+pinned XNA1/DTS1 lineage, threshold signatures and V2 empty-map genesis,
+then prints the ADH1 core hash without reading witness seeds or writing state:
+
+```text
+dotnet Deep.Registry.Api.dll did2-directory verify-genesis-head
+```
+
+If `GenesisHeadCoreHashHex` is already configured, a mismatch fails closed.
+Review the output against the authoring record and store the approved pin in
+protected deployment configuration; the head file itself is not an independent
+pin. With the V2 state/key settings supplied, initialize ADA2 once from inside the Registry
 runtime:
 
 ```text

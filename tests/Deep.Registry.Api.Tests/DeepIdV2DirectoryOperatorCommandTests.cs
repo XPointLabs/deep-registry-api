@@ -85,8 +85,17 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
             Assert.Equal(fixture.CreateDid2GenesisHead(), head);
             var headPin = AccountDirectoryCrypto.ComputeAdh1CoreHash(
                 AccountDirectoryAdh1Codec.Decode(head));
+            Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "verify-genesis-head"], config));
+            Assert.False(File.Exists(statePath));
+            config["DeepIdV2DirectoryAuthority:GenesisHeadCoreHashHex"] =
+                Convert.ToHexString(Enumerable.Repeat((byte)0x33, 32).ToArray());
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "verify-genesis-head"], config));
             config["DeepIdV2DirectoryAuthority:GenesisHeadCoreHashHex"] =
                 Convert.ToHexString(headPin);
+            Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "verify-genesis-head"], config));
             Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
                 ["did2-directory", "author-genesis-head",
                     "1700000000", "1700010000"], config));
@@ -104,6 +113,11 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
             Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
                 ["did2-directory", "provision-state"], config));
             Assert.Equal(encoded, await File.ReadAllBytesAsync(statePath));
+            var tamperedHead = head.ToArray();
+            tamperedHead[^1] ^= 1;
+            await File.WriteAllBytesAsync(headPath, tamperedHead);
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "verify-genesis-head"], config));
         }
         finally
         {

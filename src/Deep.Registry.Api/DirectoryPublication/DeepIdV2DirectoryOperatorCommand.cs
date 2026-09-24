@@ -1,6 +1,8 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using Deep.Protocol.AccountDirectoryV1;
 
 namespace Deep.Registry.Api.DirectoryPublication;
@@ -22,6 +24,10 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 string.Equals(args[1], "provision-state",
                     StringComparison.Ordinal))
                 Provision(configuration, cancellationToken);
+            else if (args.Length == 2 &&
+                string.Equals(args[1], "verify-genesis-head",
+                    StringComparison.Ordinal))
+                VerifyGenesisHead(configuration);
             else if (args.Length == 4 &&
                 string.Equals(args[1], "author-genesis-head",
                     StringComparison.Ordinal) &&
@@ -49,6 +55,62 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 $"DID2 directory operator action failed closed ({exception.GetType().Name}).");
             return 2;
         }
+    }
+
+    private static void VerifyGenesisHead(IConfiguration configuration)
+    {
+        var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
+            .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        if (string.IsNullOrWhiteSpace(options.GenesisHeadPath) ||
+            !Path.IsPathFullyQualified(options.GenesisHeadPath))
+            throw new ArgumentException(
+                "The DID2 genesis head path must be absolute.");
+        var paths = options.ExactAuthorityPaths
+            .Concat(options.ExactTimePolicyPaths)
+            .Append(options.GenesisHeadPath)
+            .ToArray();
+        if (paths.Any(static path => string.IsNullOrWhiteSpace(path) ||
+                !Path.IsPathFullyQualified(path)))
+            throw new ArgumentException(
+                "Every DID2 genesis input path must be absolute.");
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (paths.Select(Path.GetFullPath).Distinct(comparer).Count() != paths.Length)
+            throw new ArgumentException(
+                "DID2 genesis input paths must be distinct.");
+        var network = DirectoryPublicationHostingExtensions.Hex(
+            options.NetworkIdHex, 16, "DID2 directory network ID");
+        var networkPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisAuthorityCoreHashHex, 32,
+            "DID2 genesis XNA1 core hash");
+        var authority = new DeepIdV2XPointAuthoritySource(network,
+            networkPin, options.ExactAuthorityPaths,
+            options.ExactTimePolicyPaths).Read();
+        var head = DeepIdV2XPointAuthoritySource.ReadExact(
+            Path.GetFullPath(options.GenesisHeadPath));
+        if (head.Length > 4096)
+            throw new InvalidDataException("DID2 genesis head is oversized.");
+        var decoded = AccountDirectoryAdh1Codec.Decode(head);
+        var unsigned = AccountDirectoryAdh1Codec.EncodeUnsigned(decoded);
+        var domain = Encoding.ASCII.GetBytes(
+            "Deep/AccountDirectory/V1/ADH1/core");
+        var preimage = new byte[checked(domain.Length + 5 + unsigned.Length)];
+        domain.CopyTo(preimage, 0);
+        BinaryPrimitives.WriteUInt32BigEndian(
+            preimage.AsSpan(domain.Length + 1), checked((uint)unsigned.Length));
+        unsigned.CopyTo(preimage, domain.Length + 5);
+        var coreHash = SHA256.HashData(preimage);
+        if (!string.IsNullOrWhiteSpace(options.GenesisHeadCoreHashHex) &&
+            !CryptographicOperations.FixedTimeEquals(coreHash,
+                DirectoryPublicationHostingExtensions.Hex(
+                    options.GenesisHeadCoreHashHex, 32,
+                    "DID2 genesis ADH1 core hash")))
+            throw new CryptographicException(
+                "The configured DID2 genesis head pin differs from the signed head.");
+        _ = DeepIdV2DirectoryBootstrapVerifier.RestoreGenesis(
+            authority, head, coreHash);
+        Console.Out.WriteLine(
+            $"Verified DID2 genesis ADH1 core hash: {Convert.ToHexString(coreHash)}");
     }
 
     private static void AuthorGenesisHead(IConfiguration configuration,
