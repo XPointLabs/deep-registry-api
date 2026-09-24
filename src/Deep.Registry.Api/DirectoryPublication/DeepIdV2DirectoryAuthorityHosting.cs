@@ -49,7 +49,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         if (options.ProofEnabled && !options.Enabled)
             throw new InvalidOperationException(
-                "DID2 proof publication requires DID2 admission in the same isolated UAT authority.");
+                "DID2 proof publication requires DID2 admission in the same authority.");
         if (!options.Enabled) return default;
         if (environment is null)
             throw new InvalidOperationException(
