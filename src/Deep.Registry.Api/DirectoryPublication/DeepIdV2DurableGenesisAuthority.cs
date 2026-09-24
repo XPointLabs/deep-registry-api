@@ -30,6 +30,7 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
     private readonly string statePath;
     private readonly byte[] networkId;
     private readonly byte[] integrityKey;
+    private readonly IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor;
     private readonly ushort deploymentProfileId;
     private readonly ulong headValiditySeconds;
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -42,7 +43,8 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
         IContactResolveTrustedTimeContextSource trustedTimeSource,
         string statePath, ReadOnlySpan<byte> networkId,
         ReadOnlySpan<byte> integrityKey, ushort deploymentProfileId,
-        ulong headValiditySeconds)
+        ulong headValiditySeconds,
+        IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor = null)
     {
         this.networkAuthoritySource = networkAuthoritySource ??
             throw new ArgumentNullException(nameof(networkAuthoritySource));
@@ -61,6 +63,7 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
         this.statePath = Path.GetFullPath(statePath);
         this.networkId = networkId.ToArray();
         this.integrityKey = integrityKey.ToArray();
+        this.latestHeadFloor = latestHeadFloor;
         this.deploymentProfileId = deploymentProfileId;
         this.headValiditySeconds = headValiditySeconds;
     }
@@ -96,7 +99,7 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
                 .OpenForCurrentProcess();
             using var store = new DeepIdV2DirectoryStateStore(statePath,
                 integrityKey, networkId, bootstrapSource, authority,
-                mlDsa65, deploymentProfileId);
+                mlDsa65, deploymentProfileId, latestHeadFloor);
             using var lease = store.Open(cancellationToken);
             var prior = lease.Read(upper);
             foreach (var row in prior.AdmissionRows)

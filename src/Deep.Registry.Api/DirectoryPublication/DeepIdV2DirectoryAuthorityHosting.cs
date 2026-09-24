@@ -69,7 +69,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                     provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>(),
                     provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(),
                     options.StatePath, network, key,
-                    options.DeploymentProfileId, options.HeadValiditySeconds);
+                    options.DeploymentProfileId, options.HeadValiditySeconds,
+                    provider.GetService<IDeepIdV2DirectoryLatestHeadFloor>());
             }
             finally { CryptographicOperations.ZeroMemory(key); }
         });
@@ -104,7 +105,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                         provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>(),
                         provider.GetRequiredService<ProtectedFileContactResolveOneUseRequestLedger>(),
                         provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(),
-                        options.StatePath, network, key, options.DeploymentProfileId);
+                        options.StatePath, network, key, options.DeploymentProfileId,
+                        provider.GetService<IDeepIdV2DirectoryLatestHeadFloor>());
                 }
                 finally { CryptographicOperations.ZeroMemory(key); }
             });

@@ -41,12 +41,12 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             await File.WriteAllBytesAsync(headPath, head);
             await File.WriteAllBytesAsync(authorityPath, fixture.ExactXna1);
             await File.WriteAllBytesAsync(policyPath, fixture.ExactDts1);
-            await File.WriteAllBytesAsync(statePath,
-                DirectoryPublicationProtectedFile.Protect(
-                    DeepIdV2DirectoryStateCodec.Encode(fixture.Network,
-                        new DeepIdV2DirectoryStateRows(
-                            [new DeepIdV2DirectoryHeadRow(head, headHash)],
-                            [], [])), key));
+            var genesisProtectedState = DirectoryPublicationProtectedFile.Protect(
+                DeepIdV2DirectoryStateCodec.Encode(fixture.Network,
+                    new DeepIdV2DirectoryStateRows(
+                        [new DeepIdV2DirectoryHeadRow(head, headHash)],
+                        [], [])), key);
+            await File.WriteAllBytesAsync(statePath, genesisProtectedState);
             var witnessOptions = new List<ContactResolveWitnessCustodyOptions>();
             for (var index = 0; index < 2; index++)
             {
@@ -67,10 +67,13 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                 headPath, headHash);
             var networkSource = new DeepIdV2XPointAuthoritySource(
                 fixture.Network, networkPin, [authorityPath], [policyPath]);
+            var floor = new TrackingLatestHeadFloor(
+                bootstrap.Read(networkSource.Read()));
             using var authority = new DeepIdV2DurableGenesisAuthority(
                 networkSource, bootstrap, custody, new FixedTimeSource(
                     1_700_000_400), statePath, fixture.Network, key,
-                deploymentProfileId: 1, headValiditySeconds: 3_600);
+                deploymentProfileId: 1, headValiditySeconds: 3_600,
+                latestHeadFloor: floor);
             var exactRequest = await File.ReadAllBytesAsync(Path.Combine(
                 AppContext.BaseDirectory, "Fixtures", "did2-genesis.dga1v2"));
             Assert.Equal(
@@ -79,6 +82,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             var request = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 exactRequest);
             var first = await authority.AdmitAsync(request);
+            Assert.Equal(1, floor.AdvanceCount);
             var firstHead = AccountDirectoryAdh1Codec.Decode(first.ExactAdh1.Span);
             Assert.Equal(1UL, firstHead.TreeSize);
             Assert.Equal((ushort)2, firstHead.MinimumReader);
@@ -88,7 +92,8 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             using (var restarted = new DeepIdV2DurableGenesisAuthority(
                        networkSource, bootstrap, custody, new FixedTimeSource(
                            1_700_000_400), statePath, fixture.Network, key,
-                       deploymentProfileId: 1, headValiditySeconds: 3_600))
+                       deploymentProfileId: 1, headValiditySeconds: 3_600,
+                       latestHeadFloor: floor))
                 Assert.Equal(first.ExactAdh1.ToArray(),
                     (await restarted.AdmitAsync(request)).ExactAdh1.ToArray());
             var duplicateLeaf = new DeepIdV2GenesisAdmissionWireRequest(
@@ -164,7 +169,8 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                 networkSource, bootstrap,
                 new DeepIdV2FileCurrentViewSource(viewPath), custody,
                 nonceLedger, new FixedTimeSource(observedTime),
-                statePath, fixture.Network, key, deploymentProfileId: 1);
+                statePath, fixture.Network, key, deploymentProfileId: 1,
+                latestHeadFloor: floor);
             var liveRequest = new DeepIdV2DirectoryProofRequest(
                 fixture.Network, Bytes(32, 0xb3), Bytes(16, 0xb4),
                 4_101, first.DirectoryLeafKey.Span);
@@ -252,6 +258,15 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                     new DeepIdV2DirectoryProofRequest(fixture.Network,
                         Bytes(32, 0xb7), Bytes(16, 0xb8), 4_103,
                         first.DirectoryLeafKey.Span)));
+            Assert.True(floor.RequireCount >= 3);
+            await File.WriteAllBytesAsync(statePath, genesisProtectedState);
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await authority.AdmitAsync(request));
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await proofIssuer.IssueAsync(
+                    new DeepIdV2DirectoryProofRequest(fixture.Network,
+                        Bytes(32, 0xc4), Bytes(16, 0xc5), 4_107,
+                        first.DirectoryLeafKey.Span)));
         }
         finally
         {
@@ -331,6 +346,33 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
 
     private static byte[] Bytes(int count, byte value) =>
         Enumerable.Repeat(value, count).ToArray();
+
+    private sealed class TrackingLatestHeadFloor(
+        AccountDirectoryProtectedLkg initial) :
+        IDeepIdV2DirectoryLatestHeadFloor
+    {
+        private byte[] currentHash = initial.CoreHash.ToArray();
+
+        public int RequireCount { get; private set; }
+        public int AdvanceCount { get; private set; }
+
+        public void RequireCurrent(AccountDirectoryProtectedLkg currentHead)
+        {
+            RequireCount++;
+            if (!CryptographicOperations.FixedTimeEquals(
+                    currentHash, currentHead.CoreHash.Span))
+                throw new CryptographicException(
+                    "The injected DID2 floor rejects rollback.");
+        }
+
+        public void Advance(AccountDirectoryProtectedLkg expectedHead,
+            AccountDirectoryProtectedLkg nextHead)
+        {
+            RequireCurrent(expectedHead);
+            currentHash = nextHead.CoreHash.ToArray();
+            AdvanceCount++;
+        }
+    }
 
     private sealed class FixedTimeSource(ulong unixTime = 1_700_000_200)
         : IContactResolveTrustedTimeContextSource

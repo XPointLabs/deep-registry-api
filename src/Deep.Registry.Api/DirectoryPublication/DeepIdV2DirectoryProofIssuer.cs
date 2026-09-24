@@ -106,6 +106,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
     private readonly string statePath;
     private readonly byte[] networkId;
     private readonly byte[] integrityKey;
+    private readonly IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor;
     private readonly ushort deploymentProfileId;
     private bool disposed;
 
@@ -117,7 +118,8 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         IContactResolveOneUseRequestLedger requestLedger,
         IContactResolveTrustedTimeContextSource trustedTimeSource,
         string statePath, ReadOnlySpan<byte> networkId,
-        ReadOnlySpan<byte> integrityKey, ushort deploymentProfileId)
+        ReadOnlySpan<byte> integrityKey, ushort deploymentProfileId,
+        IDeepIdV2DirectoryLatestHeadFloor? latestHeadFloor = null)
     {
         this.networkAuthoritySource = networkAuthoritySource ??
             throw new ArgumentNullException(nameof(networkAuthoritySource));
@@ -140,6 +142,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         this.statePath = Path.GetFullPath(statePath);
         this.networkId = networkId.ToArray();
         this.integrityKey = integrityKey.ToArray();
+        this.latestHeadFloor = latestHeadFloor;
         this.deploymentProfileId = deploymentProfileId;
     }
 
@@ -171,7 +174,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             .OpenForCurrentProcess();
         using var store = new DeepIdV2DirectoryStateStore(statePath,
             integrityKey, networkId, bootstrapSource, authority,
-            mlDsa65, deploymentProfileId);
+            mlDsa65, deploymentProfileId, latestHeadFloor);
         using var lease = store.Open(cancellationToken);
         var restored = lease.Read(upper);
         var callerFloor = ResolveCallerFloor(restored, request);

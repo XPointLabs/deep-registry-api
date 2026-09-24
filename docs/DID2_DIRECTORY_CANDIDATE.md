@@ -47,6 +47,15 @@ proof publication, client cutover and physical Android↔Windows E2E are also
 open gates. The client must never trust the admission receipt alone as a
 fresh directory or contact proof.
 
+The ADA2 store's external floor dependency is now threaded through both
+genesis admission and proof issuance, including optional DI resolution in the
+host. One injected test floor is used by both paths, and an old valid ADA2
+snapshot is rejected on either path. No production floor provider is registered:
+an HMAC-protected file on
+the same backup/restore domain would not satisfy this gate. Production hosting
+remains fail-closed until an independently durable provider and its recovery
+procedure are implemented and verified.
+
 The DID2-only proof issuer derives current/non-membership
 material directly from the fully restored ADA2 journal under its exclusive
 lease. It consumes a durable nonce before accessing witness custody, reads a
