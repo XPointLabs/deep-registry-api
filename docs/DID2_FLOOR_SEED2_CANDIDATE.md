@@ -2,8 +2,10 @@
 
 Status on 2026-09-24: the isolated PostgreSQL service is deployed and healthy,
 with the exact-source firewall active before Docker starts. Registry has not
-been cut over; the floor has no signed genesis row, and the restore/outage
-drill and physical client gate remain open.
+been cut over. The floor has the exact signed genesis row. A consistent dump
+was copied to private local backup and restored byte-for-byte in an isolated
+temporary container; global roles were backed up but not replayed. The
+outage/old-ADA2 drill and physical client gate remain open.
 
 Read-only inventory on 2026-09-24 found the Registry and seed2 on separate
 hosts. Seed2 runs
@@ -24,14 +26,16 @@ The generator refuses to overwrite keys and refuses a parent directory
 granting access beyond the operator, SYSTEM and Administrators.
 
 The candidate has completed backup, container isolation, single-source
-firewall, TLS `verify-full`, non-TLS rejection, schema and role-grant checks.
+firewall, TLS `verify-full`, non-TLS rejection, schema, signed genesis row,
+exact-byte match and role-grant checks.
 Before it can become an active production rollback floor:
 
-1. Author and independently pin the signed empty V2 head, provision ADA2 and
-   insert that exact head once using the separate provisioning role. Verify
-   row equality from the Registry runtime using only `SELECT`/`UPDATE`.
+1. Re-check the protected ADA2 state against the floor using only the runtime
+   role in a production startup preflight; keep the provisioning role out of
+   the running Registry container.
 2. Demonstrate floor outage rejection, restored-old-ADA2 rejection, and a
-   recovery drill using seed2 backups independent of Registry snapshots.
+   complete recovery drill including global roles. Use seed2 backups
+   independent of Registry snapshots.
    Never reset the floor to an older head.
 3. Only after those checks and client verification may the explicit
    `ProductionCutoverAttested` switch be considered. It remains `false` now.

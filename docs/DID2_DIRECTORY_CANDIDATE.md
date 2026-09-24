@@ -74,12 +74,13 @@ outage or mismatch aborts startup. UAT may explicitly set
 `DeepIdV2DirectoryAuthority:Enabled=true` and keep
 `AccountDirectoryAuthority:Enabled=false`.
 
-Do not enable this candidate in production yet. A PostgreSQL latest-head
-floor provider is implemented but has not been provisioned in an independently
-operated and restored production database or exercised through a production
-recovery drill. V2 current proof publication, client cutover and physical
-Android↔Windows E2E are also open gates. The client must never trust the
-admission receipt alone as a fresh directory or contact proof.
+Do not enable this candidate in production yet. The PostgreSQL latest-head
+floor is deployed separately from Registry ADA2 and contains the exact signed
+empty head. Its logical dump restored that row byte-for-byte in a temporary
+isolated database. Production startup outage/old-ADA2 rejection and complete
+role recovery have not been demonstrated. V2 current proof publication, client
+cutover and physical Android↔Windows E2E are also open gates. The client must
+never trust the admission receipt alone as a fresh directory or contact proof.
 
 The ADA2 store's external floor dependency is threaded through both genesis
 admission and proof issuance. Set
