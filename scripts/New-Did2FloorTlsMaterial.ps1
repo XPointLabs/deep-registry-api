@@ -1,9 +1,13 @@
+[CmdletBinding(DefaultParameterSetName = 'Dns')]
 param(
     [Parameter(Mandatory = $true)]
     [string] $OutputDirectory,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Dns')]
     [string] $ServerDnsName,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Ip')]
+    [string] $ServerIpAddress,
 
     [string] $OpenSslPath
 )
@@ -14,8 +18,26 @@ $ErrorActionPreference = 'Stop'
 if (-not [IO.Path]::IsPathFullyQualified($OutputDirectory)) {
     throw 'The floor TLS output directory must be absolute.'
 }
-if ($ServerDnsName -notmatch '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$') {
-    throw 'The floor server name must be one exact DNS hostname.'
+if ($PSCmdlet.ParameterSetName -eq 'Ip') {
+    $ip = $null
+    if (-not [Net.IPAddress]::TryParse($ServerIpAddress, [ref]$ip) -or
+        $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+        $ip.ToString() -cne $ServerIpAddress -or
+        [Net.IPAddress]::IsLoopback($ip) -or
+        $ip.Equals([Net.IPAddress]::Any) -or
+        $ip.GetAddressBytes()[0] -ge 224) {
+        throw 'The floor server address must be one canonical unicast IPv4 address.'
+    }
+    $serverName = $ServerIpAddress
+    $subjectAlternativeName = "IP:$ServerIpAddress"
+    $verifyNameOption = '-verify_ip'
+} else {
+    if ($ServerDnsName -notmatch '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$') {
+        throw 'The floor server name must be one exact DNS hostname.'
+    }
+    $serverName = $ServerDnsName
+    $subjectAlternativeName = "DNS:$ServerDnsName"
+    $verifyNameOption = '-verify_hostname'
 }
 $target = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $target) {
@@ -86,8 +108,8 @@ Invoke-OpenSsl @(
     'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:3072',
     '-out', $serverKey)
 Invoke-OpenSsl @(
-    'req', '-new', '-key', $serverKey, '-subj', "/CN=$ServerDnsName",
-    '-addext', "subjectAltName=DNS:$ServerDnsName",
+    'req', '-new', '-key', $serverKey, '-subj', "/CN=$serverName",
+    '-addext', "subjectAltName=$subjectAlternativeName",
     '-addext', 'basicConstraints=critical,CA:FALSE',
     '-addext', 'keyUsage=critical,digitalSignature,keyEncipherment',
     '-addext', 'extendedKeyUsage=serverAuth',
@@ -98,7 +120,7 @@ Invoke-OpenSsl @(
     '-days', '397', '-copy_extensions', 'copy',
     '-out', $serverCertificate)
 Invoke-OpenSsl @(
-    'verify', '-CAfile', $caCertificate, '-verify_hostname', $ServerDnsName,
+    'verify', '-CAfile', $caCertificate, $verifyNameOption, $serverName,
     '-purpose', 'sslserver', $serverCertificate)
 
 foreach ($name in @('postgres-admin.password', 'floor-provision.password',
@@ -124,6 +146,6 @@ foreach ($file in Get-ChildItem -LiteralPath $target -File) {
     }
 }
 
-Write-Output "DID2 floor TLS material authored and verified for $ServerDnsName."
+Write-Output 'DID2 floor TLS material authored and verified for the exact server identity.'
 Write-Output 'Keep floor-ca.key.pem offline. Copy only the CA certificate, server certificate, server key and role credentials required by the floor host.'
 Invoke-OpenSsl @('x509', '-in', $serverCertificate, '-noout', '-fingerprint', '-sha256')
