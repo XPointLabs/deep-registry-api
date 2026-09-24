@@ -7,6 +7,7 @@ using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -105,6 +106,25 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.False(verified.IsCurrentAtMonotonic(
                 Bytes(16, 0xc1),
                 verified.FreshnessDeadlineMonotonicSeconds));
+            using (var prekeys = await accounts
+                       .OpenLocalPreKeyAuthoringAuthorityAsync())
+            {
+                var currentDirectory = ApplicationCoreVerifier.StartDmd1Lineage(
+                    verified.CurrentCheckpoint!.Directory).Next;
+                var context = new Dpk2AuthoringContext(currentDirectory,
+                    1, 1, 1, 1_700_000_400, 1_700_000_400,
+                    1_700_086_800);
+                if (OperatingSystem.IsWindows())
+                {
+                    using var offering = prekeys.AuthorOneTime(context);
+                    Assert.Equal(prekeys.DeviceId.ToArray(),
+                        offering.Record.ResponderDeviceId.ToArray());
+                    Assert.Equal(32, offering.ExactDpk2Hash.Length);
+                }
+                else
+                    Assert.Throws<PlatformNotSupportedException>(() =>
+                        prekeys.AuthorOneTime(context));
+            }
             Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
                 (await protectedFloor.RestoreAsync(fixture.Authority, default))
                 .CoreHash.ToArray());

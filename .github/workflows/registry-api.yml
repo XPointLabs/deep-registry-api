@@ -22,6 +22,14 @@ jobs:
           token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
           path: deep-protocol
 
+      - name: Checkout shared client
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/deep-client-shared
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
+          path: deep-client-shared
+
       - name: Checkout xnode
         uses: actions/checkout@v4
         with:
