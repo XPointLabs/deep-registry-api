@@ -332,6 +332,29 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.Equal(secondVerified.NextProtectedLkg.CoreHash.ToArray(),
                 (await secondFloor.RestoreAsync(fixture.Authority, default))
                 .CoreHash.ToArray());
+
+            // Alice can discover Bob from the exact DID2 alone. The returned
+            // binding and checkpoint must be authenticated by the proof,
+            // not supplied by the caller or inherited from a V1 address.
+            using var peerProofHttp = forwardFactory.CreateClient();
+            peerProofHttp.BaseAddress = new Uri("https://registry.example/");
+            using var peerProofTransport = new HttpServiceRequestTransport(
+                peerProofHttp,
+                DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var peerVerifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var peerProof = new DeepIdV2DirectoryProofClient(
+                peerProofTransport, new IncreasingMonotonicClock(),
+                peerVerifier, protectedFloor);
+            var discovered = await peerProof.FetchByDid2Async(secondDid,
+                fixture.Authority, 1, 2);
+            Assert.NotNull(discovered.CurrentCheckpoint);
+            Assert.Equal(secondDid.CanonicalBytes.ToArray(),
+                discovered.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes
+                    .ToArray());
+            Assert.Equal(2UL, discovered.NextProtectedLkg.TreeSize);
         }
         finally
         {
