@@ -95,6 +95,26 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
                 (await protectedFloor.RestoreAsync(authority, default))
                 .CoreHash.ToArray());
+            var contactExport = Environment.GetEnvironmentVariable(
+                "DEEP_TEST_DID2_EXTERNAL_CONTACT_EXPORT");
+            if (!string.IsNullOrWhiteSpace(contactExport))
+            {
+                var exactAdmission = await accounts.PrepareGenesisAdmissionAsync();
+                try
+                {
+                    var exactDid2 = DeepIdV2GenesisAdmissionWireCodec
+                        .DecodeRequest(exactAdmission).Admission.ExactDid2;
+                    await using var output = new FileStream(
+                        Path.GetFullPath(contactExport), FileMode.CreateNew,
+                        FileAccess.Write, FileShare.None);
+                    await using var writer = new StreamWriter(output,
+                        new System.Text.UTF8Encoding(false));
+                    await writer.WriteLineAsync(created.PermanentId.CanonicalText);
+                    await writer.WriteLineAsync(
+                        Convert.ToHexString(exactDid2.Span));
+                }
+                finally { CryptographicOperations.ZeroMemory(exactAdmission); }
+            }
         }
         finally
         {
