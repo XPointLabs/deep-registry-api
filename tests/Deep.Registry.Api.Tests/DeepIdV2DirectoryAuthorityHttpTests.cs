@@ -140,6 +140,12 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                         "DeepIdV2DirectoryAuthority:ProofRequestLedgerIntegrityKeyPath",
                         proofKey);
                 });
+            using (var readinessClient = factory.CreateClient())
+            using (var readiness = await readinessClient.GetAsync(
+                       DeepIdV2DirectoryAuthorityHostingExtensions
+                           .ReadinessEndpointPath))
+                Assert.Equal(HttpStatusCode.ServiceUnavailable,
+                    readiness.StatusCode); // No independent latest-head floor.
             using var secureStorage = new InMemoryDeepSecureStorage();
             var accounts = new DeepIdV2AccountService(secureStorage,
                 clientRoot, fixture.Network, 1,
@@ -480,6 +486,10 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 .WithWebHostBuilder(builder => Configure(builder, paths,
                     fixture.Network, null, schemaConnection));
             using var client = factory.CreateClient();
+            using (var readiness = await client.GetAsync(
+                       DeepIdV2DirectoryAuthorityHostingExtensions
+                           .ReadinessEndpointPath))
+                Assert.Equal(HttpStatusCode.OK, readiness.StatusCode);
             var request = await File.ReadAllBytesAsync(Path.Combine(
                 AppContext.BaseDirectory, "Fixtures", "did2-genesis.dga1v2"));
             using (var first = new ByteArrayContent(request))

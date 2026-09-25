@@ -69,9 +69,10 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                 fixture.Network, networkPin, [authorityPath], [policyPath]);
             var floor = new TrackingLatestHeadFloor(
                 bootstrap.Read(networkSource.Read()));
+            var timeSource = new FixedTimeSource(1_700_000_400);
             using var authority = new DeepIdV2DurableGenesisAuthority(
-                networkSource, bootstrap, custody, new FixedTimeSource(
-                    1_700_000_400), statePath, fixture.Network, key,
+                networkSource, bootstrap, custody, timeSource,
+                statePath, fixture.Network, key,
                 deploymentProfileId: 1, headValiditySeconds: 3_600,
                 latestHeadFloor: floor);
             await authority.RequireReadyAsync();
@@ -80,6 +81,12 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             await Assert.ThrowsAsync<CryptographicException>(
                 async () => await authority.RequireReadyAsync());
             floor.RejectReads = false;
+            timeSource.UnixTime = AccountDirectoryAdh1Codec.Decode(head)
+                .ValidUntil - 5;
+            var staleHead = await Assert.ThrowsAsync<CryptographicException>(
+                async () => await authority.RequireReadyAsync());
+            Assert.Contains("current head", staleHead.Message);
+            timeSource.UnixTime = 1_700_000_400;
             var exactRequest = await File.ReadAllBytesAsync(Path.Combine(
                 AppContext.BaseDirectory, "Fixtures", "did2-genesis.dga1v2"));
             Assert.Equal(
@@ -389,12 +396,14 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
     private sealed class FixedTimeSource(ulong unixTime = 1_700_000_200)
         : IContactResolveTrustedTimeContextSource
     {
+        public ulong UnixTime { get; set; } = unixTime;
+
         public ValueTask<ContactResolveTrustedTimeContext> ReadAsync(
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(new ContactResolveTrustedTimeContext(
-                Bytes(16, 0xc1), 4_000, unixTime, 5));
+                Bytes(16, 0xc1), 4_000, UnixTime, 5));
         }
     }
 }

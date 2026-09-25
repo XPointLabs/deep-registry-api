@@ -39,6 +39,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         "/api/v2/account-directory/genesis-admissions";
     internal const string ProofEndpointPath =
         "/api/v2/account-directory/proofs";
+    internal const string ReadinessEndpointPath = "/health/did2/ready";
 
     internal static DeepIdV2DirectoryAuthorityHostingState
         AddDeepIdV2DirectoryAuthority(this IServiceCollection services,
@@ -140,6 +141,33 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
     {
         ArgumentNullException.ThrowIfNull(app);
         if (!state.Enabled) return;
+        app.MapGet(ReadinessEndpointPath, async (
+            [FromServices] DeepIdV2DurableGenesisAuthority authority,
+            ILogger<DeepIdV2DurableGenesisAuthority> logger,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                await authority.RequireReadyAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                return Results.Ok(new { ok = true });
+            }
+            catch (OperationCanceledException) when (
+                cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is
+                CryptographicException or InvalidDataException or IOException or
+                InvalidOperationException or PlatformNotSupportedException or
+                UnauthorizedAccessException or NpgsqlException)
+            {
+                logger.LogError(exception,
+                    "DID2 directory authority is not ready.");
+                return Results.Json(new { code = "did2-authority-unavailable" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        });
         app.MapPost(EndpointPath, HandleAsync)
             .WithMetadata(new RequestSizeLimitAttribute(
                 DeepIdV2GenesisAdmissionWireCodec.MaximumRequestLength));

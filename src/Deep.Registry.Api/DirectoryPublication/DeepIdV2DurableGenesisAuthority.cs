@@ -97,8 +97,12 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
             integrityKey, networkId, bootstrapSource, authority, verifier,
             deploymentProfileId, latestHeadFloor);
         using var lease = store.Open(cancellationToken);
-        _ = await lease.ReadAsync(upper, cancellationToken)
+        var restored = await lease.ReadAsync(upper, cancellationToken)
             .ConfigureAwait(false);
+        if (lower < restored.CurrentHead.Head.ValidFrom ||
+            upper >= restored.CurrentHead.Head.ValidUntil - 1)
+            throw new CryptographicException(
+                "Production DID2 current head cannot cover a new proof.");
     }
 
     public async ValueTask<DeepIdV2GenesisAdmissionReceipt> AdmitAsync(
