@@ -513,8 +513,17 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             var refreshConfig = new ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?>
                 {
+                    ["ContactResolveProductionAuthority:Enabled"] = "true",
                     ["ContactResolveProductionAuthority:NetworkIdHex"] =
                         Convert.ToHexString(fixture.Network),
+                    ["ContactResolveProductionAuthority:TrustedTimeStatePath"] =
+                        paths.TimeStatePath,
+                    ["ContactResolveProductionAuthority:TrustedTimeIntegrityKeyPath"] =
+                        paths.TimeKeyPath,
+                    ["ContactResolveProductionAuthority:RequestLedgerRootPath"] =
+                        paths.LedgerRootPath,
+                    ["ContactResolveProductionAuthority:RequestLedgerIntegrityKeyPath"] =
+                        paths.LedgerKeyPath,
                     ["ContactResolveProductionAuthority:Witnesses:0:WitnessIdHex"] =
                         Convert.ToHexString(Bytes(32, 0x40)),
                     ["ContactResolveProductionAuthority:Witnesses:0:KeyGeneration"] = "0",
@@ -545,8 +554,18 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 DeepIdV2DirectoryOperatorCommand.RefreshCurrentHead(
                     refreshConfig, 1_700_000_500, 1_700_004_100,
                     1_700_000_500, default));
-            DeepIdV2DirectoryOperatorCommand.RefreshCurrentHead(refreshConfig,
-                1_700_005_000, 1_700_008_600, 1_700_005_000, default);
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "refresh-current-head",
+                    "1700004970", "1700008570"], refreshConfig));
+            _ = ProtectedMonotonicContactResolveTrustedTimeSource.Provision(
+                paths.TimeStatePath, fixture.Network, Bytes(32, 0x61),
+                1_700_005_000, 1_700_008_600, 5,
+                ReadOnlySpan<byte>.Empty,
+                ProtectedMonotonicContactResolveTrustedTimeSource
+                    .ReadPlatformMonotonicSeconds(), Bytes(16, 0xc1));
+            Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "refresh-current-head",
+                    "1700004970", "1700008570"], refreshConfig));
             await using (var readFloor = new NpgsqlConnection(schemaConnection))
             {
                 await readFloor.OpenAsync();

@@ -103,6 +103,10 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
             Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
                 ["did2-directory", "provision-state"], config));
             var encoded = await File.ReadAllBytesAsync(statePath);
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "refresh-current-head",
+                    "1700000500", "1700004100"], config));
+            Assert.Equal(encoded, await File.ReadAllBytesAsync(statePath));
             var rows = DeepIdV2DirectoryStateCodec.Decode(
                 DirectoryPublicationProtectedFile.Verify(encoded, key),
                 fixture.Network);

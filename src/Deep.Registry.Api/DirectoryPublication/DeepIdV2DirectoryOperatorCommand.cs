@@ -52,8 +52,13 @@ internal static class DeepIdV2DirectoryOperatorCommand
                     CultureInfo.InvariantCulture, out var refreshFrom) &&
                 ulong.TryParse(args[3], NumberStyles.None,
                     CultureInfo.InvariantCulture, out var refreshUntil))
+            {
+                var trusted = ReadOperatorTrustedTime(configuration,
+                    cancellationToken);
                 RefreshCurrentHead(configuration, refreshFrom, refreshUntil,
-                    CurrentUnixSeconds(), cancellationToken);
+                    trusted.ObservedUnixTime, cancellationToken,
+                    trusted.UncertaintySeconds);
+            }
             else if (args.Length == 4 &&
                 string.Equals(args[1], "author-genesis-head",
                     StringComparison.Ordinal) &&
@@ -75,7 +80,8 @@ internal static class DeepIdV2DirectoryOperatorCommand
         catch (Exception exception) when (exception is
             ArgumentException or IOException or CryptographicException or
             InvalidDataException or InvalidOperationException or
-            FormatException or UnauthorizedAccessException or NpgsqlException)
+            FormatException or UnauthorizedAccessException or OverflowException or
+            NpgsqlException)
         {
             Console.Error.WriteLine(
                 $"DID2 directory operator action failed closed ({exception.GetType().Name}).");
@@ -86,7 +92,8 @@ internal static class DeepIdV2DirectoryOperatorCommand
     internal static void RefreshCurrentHead(IConfiguration configuration,
         ulong validFromUnixSeconds, ulong validUntilUnixSeconds,
         ulong observedUnixSeconds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        uint uncertaintySeconds = 0)
     {
         if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
             throw new InvalidOperationException(
@@ -122,10 +129,15 @@ internal static class DeepIdV2DirectoryOperatorCommand
             paths.Length)
             throw new ArgumentException(
                 "DID2 refresh paths must be distinct.");
-        if (observedUnixSeconds == 0 ||
-            validFromUnixSeconds > checked(observedUnixSeconds + 60) ||
-            checked(validFromUnixSeconds + 300) < observedUnixSeconds ||
+        if (observedUnixSeconds <= uncertaintySeconds ||
+            uncertaintySeconds > 30 ||
+            validFromUnixSeconds >
+                observedUnixSeconds - uncertaintySeconds ||
+            checked(validFromUnixSeconds + 300) <
+                checked(observedUnixSeconds + uncertaintySeconds) ||
             validUntilUnixSeconds <= validFromUnixSeconds ||
+            validUntilUnixSeconds <=
+                checked(observedUnixSeconds + uncertaintySeconds) ||
             validUntilUnixSeconds - validFromUnixSeconds >
                 options.HeadValiditySeconds)
             throw new CryptographicException(
@@ -146,6 +158,12 @@ internal static class DeepIdV2DirectoryOperatorCommand
         var authority = new DeepIdV2XPointAuthoritySource(network,
             authorityPin, options.ExactAuthorityPaths,
             options.ExactTimePolicyPaths).Read();
+        var trustedLower = observedUnixSeconds - uncertaintySeconds;
+        var trustedUpper = checked(observedUnixSeconds + uncertaintySeconds);
+        if (trustedLower < authority.NotBefore ||
+            trustedUpper >= authority.ExpiresAt)
+            throw new CryptographicException(
+                "The DID2 operator trusted-time interval is outside the signed authority.");
         var genesis = new DeepIdV2DirectoryBootstrapSource(
             options.GenesisHeadPath, genesisPin);
         var key = DirectoryPublicationProtectedFile.ReadKey(
@@ -164,11 +182,11 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 key, network, genesis, authority, verifier,
                 options.DeploymentProfileId, floor);
             using var lease = store.Open(cancellationToken);
-            var prior = lease.ReadAsync(observedUnixSeconds,
+            var prior = lease.ReadAsync(trustedUpper,
                 cancellationToken).AsTask().GetAwaiter().GetResult();
             if (prior.CurrentHead.TreeSize == 0 ||
                 prior.CurrentHead.Head.ValidUntil >
-                checked(observedUnixSeconds + 300))
+                checked(trustedUpper + 300))
                 throw new InvalidOperationException(
                     "The DID2 nonempty current head does not yet need refresh.");
             var request = new DeepIdV2DirectoryHeadMutationRequest(
@@ -194,7 +212,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
                     authored.CoreHash)).ToArray();
             var candidate = new DeepIdV2DirectoryStateRows(heads,
                 prior.Transitions, prior.AdmissionRows);
-            _ = lease.WriteAsync(candidate, observedUnixSeconds,
+            _ = lease.WriteAsync(candidate, trustedUpper,
                 cancellationToken).AsTask().GetAwaiter().GetResult();
             Console.Out.WriteLine(
                 $"Refreshed DID2 ADH1 generation/tree: {authored.ProtectedHead.LogGeneration}/{authored.ProtectedHead.TreeSize}");
@@ -204,11 +222,25 @@ internal static class DeepIdV2DirectoryOperatorCommand
         finally { CryptographicOperations.ZeroMemory(key); }
     }
 
-    private static ulong CurrentUnixSeconds()
+    private static ContactResolveTrustedTimeContext ReadOperatorTrustedTime(
+        IConfiguration configuration, CancellationToken cancellationToken)
     {
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        return now > 0 ? checked((ulong)now) : throw new InvalidOperationException(
-            "The DID2 operator clock is invalid.");
+        var options = ContactResolveProductionAuthorityServiceCollectionExtensions
+            .ReadRequiredOptions(configuration);
+        var network = DirectoryPublicationHostingExtensions.Hex(
+            options.NetworkIdHex, 16, "ContactResolve production authority network ID");
+        var key = DirectoryPublicationProtectedFile.ReadKey(
+            options.TrustedTimeIntegrityKeyPath);
+        try
+        {
+            using var source = new ProtectedMonotonicContactResolveTrustedTimeSource(
+                options.TrustedTimeStatePath, network, key);
+            var trusted = source.ReadAsync(cancellationToken).AsTask()
+                .GetAwaiter().GetResult();
+            trusted.Validate();
+            return trusted;
+        }
+        finally { CryptographicOperations.ZeroMemory(key); }
     }
 
     private static void ExportCurrentHead(IConfiguration configuration,
