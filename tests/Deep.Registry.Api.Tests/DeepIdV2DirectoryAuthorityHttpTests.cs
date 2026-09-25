@@ -419,6 +419,17 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 discovered.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes
                     .ToArray());
             Assert.Equal(2UL, discovered.NextProtectedLkg.TreeSize);
+            var secondDescriptor = (await secondAccounts.GetCurrentAsync())!
+                .PermanentId;
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await peerProof.FetchByContactDescriptorAsync(
+                    created.PermanentId, secondDid, fixture.Authority, 1, 2));
+            var descriptorBound = await peerProof
+                .FetchByContactDescriptorAsync(secondDescriptor, secondDid,
+                    fixture.Authority, 1, 2);
+            Assert.Equal(secondDid.CanonicalBytes.ToArray(),
+                descriptorBound.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes
+                    .ToArray());
         }
         finally
         {
