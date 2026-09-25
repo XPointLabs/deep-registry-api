@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Deep.Protocol.AccountDirectoryV1;
+using Deep.Protocol.ApplicationCore;
 using Npgsql;
 
 namespace Deep.Registry.Api.DirectoryPublication;
@@ -34,6 +35,20 @@ internal static class DeepIdV2DirectoryOperatorCommand
                     StringComparison.Ordinal))
                 ProvisionFloor(configuration, cancellationToken);
             else if (args.Length == 4 &&
+                string.Equals(args[1], "export-current-head",
+                    StringComparison.Ordinal))
+                ExportCurrentHead(configuration, args[2], args[3],
+                    cancellationToken);
+            else if (args.Length == 4 &&
+                string.Equals(args[1], "refresh-current-head",
+                    StringComparison.Ordinal) &&
+                ulong.TryParse(args[2], NumberStyles.None,
+                    CultureInfo.InvariantCulture, out var refreshFrom) &&
+                ulong.TryParse(args[3], NumberStyles.None,
+                    CultureInfo.InvariantCulture, out var refreshUntil))
+                RefreshCurrentHead(configuration, refreshFrom, refreshUntil,
+                    CurrentUnixSeconds(), cancellationToken);
+            else if (args.Length == 4 &&
                 string.Equals(args[1], "author-genesis-head",
                     StringComparison.Ordinal) &&
                 ulong.TryParse(args[2], NumberStyles.None,
@@ -60,6 +75,210 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 $"DID2 directory operator action failed closed ({exception.GetType().Name}).");
             return 2;
         }
+    }
+
+    internal static void RefreshCurrentHead(IConfiguration configuration,
+        ulong validFromUnixSeconds, ulong validUntilUnixSeconds,
+        ulong observedUnixSeconds,
+        CancellationToken cancellationToken)
+    {
+        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
+            throw new InvalidOperationException(
+                "DID2 head refresh cannot run while ADA1 admission is enabled.");
+        var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
+            .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        var custodyOptions = configuration.GetSection(
+                "ContactResolveProductionAuthority")
+            .Get<ContactResolveProductionAuthorityOptions>() ?? new();
+        if (string.IsNullOrWhiteSpace(options.StatePath) ||
+            string.IsNullOrWhiteSpace(options.IntegrityKeyPath) ||
+            string.IsNullOrWhiteSpace(options.GenesisHeadPath) ||
+            string.IsNullOrWhiteSpace(
+                options.LatestHeadFloorPostgreSqlConnectionString) ||
+            options.DeploymentProfileId == 0 ||
+            options.HeadValiditySeconds is < 60 or > 86_400)
+            throw new ArgumentException(
+                "DID2 refresh requires complete state, custody and independent floor configuration.");
+        var paths = options.ExactAuthorityPaths
+            .Concat(options.ExactTimePolicyPaths)
+            .Concat([options.StatePath, options.IntegrityKeyPath,
+                options.GenesisHeadPath])
+            .Concat(custodyOptions.Witnesses.Select(static entry =>
+                entry?.Ed25519SeedPath ?? string.Empty))
+            .ToArray();
+        if (paths.Any(static path => string.IsNullOrWhiteSpace(path) ||
+                !Path.IsPathFullyQualified(path)))
+            throw new ArgumentException(
+                "DID2 refresh inputs must have distinct absolute paths.");
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (paths.Select(Path.GetFullPath).Distinct(comparer).Count() !=
+            paths.Length)
+            throw new ArgumentException(
+                "DID2 refresh paths must be distinct.");
+        if (observedUnixSeconds == 0 ||
+            validFromUnixSeconds > checked(observedUnixSeconds + 60) ||
+            checked(validFromUnixSeconds + 300) < observedUnixSeconds ||
+            validUntilUnixSeconds <= validFromUnixSeconds ||
+            validUntilUnixSeconds - validFromUnixSeconds >
+                options.HeadValiditySeconds)
+            throw new CryptographicException(
+                "DID2 refresh interval is outside the current operator time window.");
+        var network = DirectoryPublicationHostingExtensions.Hex(
+            options.NetworkIdHex, 16, "DID2 directory network ID");
+        var custodyNetwork = DirectoryPublicationHostingExtensions.Hex(
+            custodyOptions.NetworkIdHex, 16, "DID2 witness custody network ID");
+        if (!CryptographicOperations.FixedTimeEquals(network, custodyNetwork))
+            throw new CryptographicException(
+                "DID2 refresh witness custody belongs to another network.");
+        var authorityPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisAuthorityCoreHashHex, 32,
+            "DID2 genesis XNA1 core hash");
+        var genesisPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisHeadCoreHashHex, 32,
+            "DID2 genesis ADH1 core hash");
+        var authority = new DeepIdV2XPointAuthoritySource(network,
+            authorityPin, options.ExactAuthorityPaths,
+            options.ExactTimePolicyPaths).Read();
+        var genesis = new DeepIdV2DirectoryBootstrapSource(
+            options.GenesisHeadPath, genesisPin);
+        var key = DirectoryPublicationProtectedFile.ReadKey(
+            options.IntegrityKeyPath);
+        try
+        {
+            using var custody = new FileContactResolveDtt1WitnessCustody(
+                network, custodyOptions.Witnesses);
+            var signers = custody.GetHeadSignersAsync(authority,
+                cancellationToken).AsTask().GetAwaiter().GetResult();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var floor = new DeepIdV2PostgreSqlLatestHeadFloor(
+                options.LatestHeadFloorPostgreSqlConnectionString, network);
+            using var store = new DeepIdV2DirectoryStateStore(options.StatePath,
+                key, network, genesis, authority, verifier,
+                options.DeploymentProfileId, floor);
+            using var lease = store.Open(cancellationToken);
+            var prior = lease.ReadAsync(observedUnixSeconds,
+                cancellationToken).AsTask().GetAwaiter().GetResult();
+            if (prior.CurrentHead.TreeSize == 0 ||
+                prior.CurrentHead.Head.ValidUntil >
+                checked(observedUnixSeconds + 300))
+                throw new InvalidOperationException(
+                    "The DID2 nonempty current head does not yet need refresh.");
+            var request = new DeepIdV2DirectoryHeadMutationRequest(
+                prior.Transitions, prior.CurrentCheckpoints, [],
+                validFromUnixSeconds, validUntilUnixSeconds,
+                Math.Max((ushort)2, prior.CurrentHead.Head.MinimumReader));
+            var authored = DeepIdV2DirectoryHeadAuthor.AdvanceAsync(
+                authority, prior.CurrentHead, request, signers,
+                cancellationToken).AsTask().GetAwaiter().GetResult();
+            if (authored.ProtectedHead.TreeSize != prior.CurrentHead.TreeSize ||
+                !CryptographicOperations.FixedTimeEquals(
+                    authored.ProtectedHead.AppendLogMerkleRoot.Span,
+                    prior.CurrentHead.AppendLogMerkleRoot.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    authored.ProtectedHead.CurrentValueMapRoot.Span,
+                    prior.CurrentHead.CurrentValueMapRoot.Span))
+                throw new CryptographicException(
+                    "A DID2 head refresh changed directory content.");
+            var heads = prior.Heads.Select(static head =>
+                    new DeepIdV2DirectoryHeadRow(head.ExactAdh1,
+                        head.CoreHash))
+                .Append(new DeepIdV2DirectoryHeadRow(authored.ExactAdh1,
+                    authored.CoreHash)).ToArray();
+            var candidate = new DeepIdV2DirectoryStateRows(heads,
+                prior.Transitions, prior.AdmissionRows);
+            _ = lease.WriteAsync(candidate, observedUnixSeconds,
+                cancellationToken).AsTask().GetAwaiter().GetResult();
+            Console.Out.WriteLine(
+                $"Refreshed DID2 ADH1 generation/tree: {authored.ProtectedHead.LogGeneration}/{authored.ProtectedHead.TreeSize}");
+            Console.Out.WriteLine(
+                $"Refreshed DID2 ADH1 core hash: {Convert.ToHexString(authored.CoreHash.Span)}");
+        }
+        finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private static ulong CurrentUnixSeconds()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        return now > 0 ? checked((ulong)now) : throw new InvalidOperationException(
+            "The DID2 operator clock is invalid.");
+    }
+
+    private static void ExportCurrentHead(IConfiguration configuration,
+        string expectedFloorCoreHashHex, string outputPath,
+        CancellationToken cancellationToken)
+    {
+        var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
+            .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        if (string.IsNullOrWhiteSpace(options.StatePath) ||
+            string.IsNullOrWhiteSpace(options.IntegrityKeyPath) ||
+            string.IsNullOrWhiteSpace(options.GenesisHeadPath) ||
+            !Path.IsPathFullyQualified(options.StatePath) ||
+            !Path.IsPathFullyQualified(options.IntegrityKeyPath) ||
+            !Path.IsPathFullyQualified(options.GenesisHeadPath) ||
+            !Path.IsPathFullyQualified(outputPath))
+            throw new ArgumentException(
+                "Current-head export requires exact absolute state, key, genesis and output paths.");
+        var allPaths = options.ExactAuthorityPaths
+            .Concat(options.ExactTimePolicyPaths)
+            .Concat([options.StatePath, options.IntegrityKeyPath,
+                options.GenesisHeadPath, outputPath])
+            .Select(Path.GetFullPath).ToArray();
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (allPaths.Distinct(comparer).Count() != allPaths.Length)
+            throw new ArgumentException(
+                "Current-head export inputs and output must be distinct.");
+        var expectedFloorHash = DirectoryPublicationHostingExtensions.Hex(
+            expectedFloorCoreHashHex, 32,
+            "independently observed current DID2 floor core hash");
+        var network = DirectoryPublicationHostingExtensions.Hex(
+            options.NetworkIdHex, 16, "DID2 directory network ID");
+        var authorityPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisAuthorityCoreHashHex, 32,
+            "DID2 genesis XNA1 core hash");
+        var genesisPin = DirectoryPublicationHostingExtensions.Hex(
+            options.GenesisHeadCoreHashHex, 32,
+            "DID2 genesis ADH1 core hash");
+        var authority = new DeepIdV2XPointAuthoritySource(network,
+            authorityPin, options.ExactAuthorityPaths,
+            options.ExactTimePolicyPaths).Read();
+        var genesis = new DeepIdV2DirectoryBootstrapSource(
+            options.GenesisHeadPath, genesisPin);
+        var key = DirectoryPublicationProtectedFile.ReadKey(
+            options.IntegrityKeyPath);
+        try
+        {
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var store = new DeepIdV2DirectoryStateStore(options.StatePath,
+                key, network, genesis, authority, verifier,
+                options.DeploymentProfileId);
+            using var lease = store.Open(cancellationToken);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            if (now <= 0)
+                throw new InvalidOperationException("The operator clock is invalid.");
+            var restored = lease.ReadAsync(checked((ulong)now),
+                cancellationToken).AsTask().GetAwaiter().GetResult();
+            var current = restored.CurrentHead;
+            if (current.TreeSize == 0 ||
+                !CryptographicOperations.FixedTimeEquals(
+                    current.CoreHash.Span, expectedFloorHash))
+                throw new CryptographicException(
+                    "Authenticated ADA2 head differs from the independently observed current floor.");
+            var exactOutput = Path.GetFullPath(outputPath);
+            using var stream = new FileStream(exactOutput,
+                FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096,
+                FileOptions.WriteThrough);
+            stream.Write(current.ExactAdh1.Span);
+            stream.Flush(flushToDisk: true);
+            Console.Out.WriteLine(
+                $"Verified DID2 current ADH1 core hash: {Convert.ToHexString(current.CoreHash.Span)}");
+            Console.Out.WriteLine(
+                $"Verified DID2 current ADH1 generation/tree: {current.LogGeneration}/{current.TreeSize}");
+        }
+        finally { CryptographicOperations.ZeroMemory(key); }
     }
 
     private static void VerifyGenesisHead(IConfiguration configuration)

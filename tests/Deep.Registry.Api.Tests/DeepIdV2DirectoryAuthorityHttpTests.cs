@@ -13,6 +13,7 @@ using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
@@ -280,6 +281,40 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.NotNull(firstAtLatest.CurrentCheckpoint);
             await factory.DisposeAsync();
 
+            // Offline export reads the authenticated ADA2 journal and only
+            // writes the head matching an independently observed floor pin.
+            var exportPath = Path.Combine(root, "current-export.adh1");
+            var exportConfig = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DeepIdV2DirectoryAuthority:NetworkIdHex"] =
+                        Convert.ToHexString(fixture.Network),
+                    ["DeepIdV2DirectoryAuthority:GenesisAuthorityCoreHashHex"] =
+                        Convert.ToHexString(paths.NetworkPin),
+                    ["DeepIdV2DirectoryAuthority:ExactAuthorityPaths:0"] =
+                        paths.AuthorityPath,
+                    ["DeepIdV2DirectoryAuthority:ExactTimePolicyPaths:0"] =
+                        paths.PolicyPath,
+                    ["DeepIdV2DirectoryAuthority:GenesisHeadPath"] =
+                        paths.HeadPath,
+                    ["DeepIdV2DirectoryAuthority:GenesisHeadCoreHashHex"] =
+                        Convert.ToHexString(paths.HeadPin),
+                    ["DeepIdV2DirectoryAuthority:StatePath"] = paths.StatePath,
+                    ["DeepIdV2DirectoryAuthority:IntegrityKeyPath"] =
+                        paths.KeyPath
+                }).Build();
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "export-current-head",
+                    Convert.ToHexString(Bytes(32, 0x55)), exportPath],
+                exportConfig));
+            Assert.False(File.Exists(exportPath));
+            Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "export-current-head",
+                    Convert.ToHexString(firstAtLatest.NextProtectedLkg.CoreHash.Span),
+                    exportPath], exportConfig));
+            Assert.Equal(firstAtLatest.NextProtectedLkg.ExactAdh1.ToArray(),
+                await File.ReadAllBytesAsync(exportPath));
+
             // The offline root signs a forward checkpoint over the original
             // protected floor. Registry imports only the signed artifact.
             var checkpointPath = Path.Combine(root, "forward.adf1");
@@ -415,6 +450,68 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                     DeepIdV2DirectoryAuthorityHostingExtensions.EndpointPath,
                     first);
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+            byte[] beforeRefreshHash;
+            await using (var readFloor = new NpgsqlConnection(schemaConnection))
+            {
+                await readFloor.OpenAsync();
+                await using var read = new NpgsqlCommand(
+                    "SELECT core_hash FROM deep_did2_latest_head_floor",
+                    readFloor);
+                beforeRefreshHash = (byte[])(await read.ExecuteScalarAsync())!;
+            }
+            var refreshConfig = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ContactResolveProductionAuthority:NetworkIdHex"] =
+                        Convert.ToHexString(fixture.Network),
+                    ["ContactResolveProductionAuthority:Witnesses:0:WitnessIdHex"] =
+                        Convert.ToHexString(Bytes(32, 0x40)),
+                    ["ContactResolveProductionAuthority:Witnesses:0:KeyGeneration"] = "0",
+                    ["ContactResolveProductionAuthority:Witnesses:0:Ed25519SeedPath"] =
+                        paths.WitnessPath,
+                    ["ContactResolveProductionAuthority:Witnesses:1:WitnessIdHex"] =
+                        Convert.ToHexString(Bytes(32, 0x41)),
+                    ["ContactResolveProductionAuthority:Witnesses:1:KeyGeneration"] = "0",
+                    ["ContactResolveProductionAuthority:Witnesses:1:Ed25519SeedPath"] =
+                        paths.Witness2Path,
+                    ["DeepIdV2DirectoryAuthority:NetworkIdHex"] =
+                        Convert.ToHexString(fixture.Network),
+                    ["DeepIdV2DirectoryAuthority:GenesisAuthorityCoreHashHex"] =
+                        Convert.ToHexString(paths.NetworkPin),
+                    ["DeepIdV2DirectoryAuthority:ExactAuthorityPaths:0"] =
+                        paths.AuthorityPath,
+                    ["DeepIdV2DirectoryAuthority:ExactTimePolicyPaths:0"] =
+                        paths.PolicyPath,
+                    ["DeepIdV2DirectoryAuthority:GenesisHeadPath"] = paths.HeadPath,
+                    ["DeepIdV2DirectoryAuthority:GenesisHeadCoreHashHex"] =
+                        Convert.ToHexString(paths.HeadPin),
+                    ["DeepIdV2DirectoryAuthority:StatePath"] = paths.StatePath,
+                    ["DeepIdV2DirectoryAuthority:IntegrityKeyPath"] = paths.KeyPath,
+                    ["DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString"] =
+                        schemaConnection
+                }).Build();
+            Assert.Throws<InvalidOperationException>(() =>
+                DeepIdV2DirectoryOperatorCommand.RefreshCurrentHead(
+                    refreshConfig, 1_700_000_500, 1_700_004_100,
+                    1_700_000_500, default));
+            DeepIdV2DirectoryOperatorCommand.RefreshCurrentHead(refreshConfig,
+                1_700_005_000, 1_700_008_600, 1_700_005_000, default);
+            await using (var readFloor = new NpgsqlConnection(schemaConnection))
+            {
+                await readFloor.OpenAsync();
+                await using var read = new NpgsqlCommand(
+                    "SELECT exact_adh1, core_hash FROM deep_did2_latest_head_floor",
+                    readFloor);
+                await using var row = await read.ExecuteReaderAsync();
+                Assert.True(await row.ReadAsync());
+                var refreshed = AccountDirectoryProtectedLkgFactory.Restore(
+                    fixture.Authority, (byte[])row[0], (byte[])row[1]);
+                Assert.Equal(2UL, refreshed.LogGeneration);
+                Assert.Equal(1UL, refreshed.TreeSize);
+                Assert.Equal(beforeRefreshHash,
+                    refreshed.Head.PredecessorAdh1CoreHash.ToArray());
+                Assert.False(await row.ReadAsync());
             }
             await File.WriteAllBytesAsync(paths.StatePath, oldAda2);
             using var replay = new ByteArrayContent(request);
