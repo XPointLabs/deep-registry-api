@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
@@ -314,6 +315,34 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                     exportPath], exportConfig));
             Assert.Equal(firstAtLatest.NextProtectedLkg.ExactAdh1.ToArray(),
                 await File.ReadAllBytesAsync(exportPath));
+            var lineageDirectory = Path.Combine(root, "covered-lineage");
+            Directory.CreateDirectory(lineageDirectory);
+            Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "export-covered-lineage",
+                    Convert.ToHexString(firstAtLatest.NextProtectedLkg.CoreHash.Span),
+                    lineageDirectory], exportConfig));
+            using (var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(
+                       Path.Combine(lineageDirectory, "manifest.json"))))
+            {
+                Assert.Equal("deep-did2-authenticated-covered-lineage.v1",
+                    manifest.RootElement.GetProperty("schema").GetString());
+                Assert.Equal(Convert.ToHexString(
+                        firstAtLatest.NextProtectedLkg.CoreHash.Span),
+                    manifest.RootElement.GetProperty(
+                        "currentFloorCoreHashHex").GetString());
+                Assert.Equal(2, manifest.RootElement.GetProperty(
+                    "coveredHeads").GetArrayLength());
+            }
+            Assert.Equal(initial.ExactAdh1.ToArray(),
+                await File.ReadAllBytesAsync(Path.Combine(lineageDirectory,
+                    "head-0000.adh1")));
+            Assert.Equal(verified.NextProtectedLkg.ExactAdh1.ToArray(),
+                await File.ReadAllBytesAsync(Path.Combine(lineageDirectory,
+                    "head-0001.adh1")));
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "export-covered-lineage",
+                    Convert.ToHexString(firstAtLatest.NextProtectedLkg.CoreHash.Span),
+                    lineageDirectory], exportConfig));
 
             // The offline root signs a forward checkpoint over the original
             // protected floor. Registry imports only the signed artifact.

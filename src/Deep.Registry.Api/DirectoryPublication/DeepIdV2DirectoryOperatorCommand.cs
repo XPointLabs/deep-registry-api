@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Npgsql;
@@ -38,7 +39,12 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 string.Equals(args[1], "export-current-head",
                     StringComparison.Ordinal))
                 ExportCurrentHead(configuration, args[2], args[3],
-                    cancellationToken);
+                    exportLineage: false, cancellationToken);
+            else if (args.Length == 4 &&
+                string.Equals(args[1], "export-covered-lineage",
+                    StringComparison.Ordinal))
+                ExportCurrentHead(configuration, args[2], args[3],
+                    exportLineage: true, cancellationToken);
             else if (args.Length == 4 &&
                 string.Equals(args[1], "refresh-current-head",
                     StringComparison.Ordinal) &&
@@ -207,7 +213,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
 
     private static void ExportCurrentHead(IConfiguration configuration,
         string expectedFloorCoreHashHex, string outputPath,
-        CancellationToken cancellationToken)
+        bool exportLineage, CancellationToken cancellationToken)
     {
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
@@ -268,6 +274,11 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 throw new CryptographicException(
                     "Authenticated ADA2 head differs from the independently observed current floor.");
             var exactOutput = Path.GetFullPath(outputPath);
+            if (exportLineage)
+            {
+                ExportCoveredLineage(restored.Heads, current, exactOutput);
+                return;
+            }
             using var stream = new FileStream(exactOutput,
                 FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096,
                 FileOptions.WriteThrough);
@@ -279,6 +290,63 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 $"Verified DID2 current ADH1 generation/tree: {current.LogGeneration}/{current.TreeSize}");
         }
         finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private static void ExportCoveredLineage(
+        IReadOnlyList<AccountDirectoryProtectedLkg> heads,
+        AccountDirectoryProtectedLkg current, string outputDirectory)
+    {
+        if (heads.Count is < 2 or > 4097 ||
+            !Directory.Exists(outputDirectory) ||
+            (File.GetAttributes(outputDirectory) &
+                FileAttributes.ReparsePoint) != 0 ||
+            Directory.EnumerateFileSystemEntries(outputDirectory).Any() ||
+            !CryptographicOperations.FixedTimeEquals(
+                heads[^1].ExactAdh1.Span, current.ExactAdh1.Span))
+            throw new InvalidOperationException(
+                "DID2 covered-lineage export requires a complete nonempty history and a new empty output directory.");
+        for (var index = 0; index < heads.Count - 1; index++)
+            if (heads[index].LogGeneration != (ulong)index)
+                throw new CryptographicException(
+                    "The DID2 covered-head history is not contiguous.");
+        var entries = new List<object>(heads.Count - 1);
+        for (var index = 0; index < heads.Count - 1; index++)
+        {
+            var head = heads[index];
+            var name = $"head-{index:D4}.adh1";
+            var path = Path.Combine(outputDirectory, name);
+            using (var stream = new FileStream(path, FileMode.CreateNew,
+                FileAccess.Write, FileShare.None, 4096,
+                FileOptions.WriteThrough))
+            {
+                stream.Write(head.ExactAdh1.Span);
+                stream.Flush(flushToDisk: true);
+            }
+            entries.Add(new
+            {
+                generation = head.LogGeneration,
+                fileName = name,
+                coreHashHex = Convert.ToHexString(head.CoreHash.Span),
+                sha256Hex = Convert.ToHexString(
+                    SHA256.HashData(head.ExactAdh1.Span))
+            });
+        }
+        var manifest = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schema = "deep-did2-authenticated-covered-lineage.v1",
+            currentFloorCoreHashHex = Convert.ToHexString(
+                current.CoreHash.Span),
+            coveredHeads = entries
+        });
+        using (var stream = new FileStream(Path.Combine(outputDirectory,
+            "manifest.json"), FileMode.CreateNew, FileAccess.Write,
+            FileShare.None, 4096, FileOptions.WriteThrough))
+        {
+            stream.Write(manifest);
+            stream.Flush(flushToDisk: true);
+        }
+        Console.Out.WriteLine(
+            $"Exported {entries.Count} exact DID2 covered heads under independently observed floor {Convert.ToHexString(current.CoreHash.Span)}");
     }
 
     private static void VerifyGenesisHead(IConfiguration configuration)
