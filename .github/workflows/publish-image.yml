@@ -1,9 +1,6 @@
 name: Publish registry image
 
 on:
-  push:
-    tags:
-      - registry-image-*
   workflow_dispatch:
     inputs:
       image_tag:
@@ -25,19 +22,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/deep-protocol
-          ref: ${{ github.ref_type == 'tag' && 'release-candidate/prod-20260909' || github.ref_name }}
+          ref: ${{ github.ref_name }}
           token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
           path: deep-protocol
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/deep-client-shared
-          ref: ${{ github.ref_type == 'tag' && 'release-candidate/prod-20260909' || github.ref_name }}
+          ref: ${{ github.ref_name }}
           token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
           path: deep-client-shared
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/xnode
-          ref: ${{ github.ref_type == 'tag' && 'release-candidate/prod-20260909' || github.ref_name }}
+          ref: ${{ github.ref_name }}
           token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
           path: xnode
       - uses: actions/setup-dotnet@v4
@@ -67,7 +64,7 @@ jobs:
           push: true
           build-args: |
             DEEP_PROTOCOL_REVISION=${{ steps.protocol.outputs.sha }}
-          tags: ghcr.io/xpointlabs/deep-registry-api:${{ inputs.image_tag || github.ref_name }}
+          tags: ghcr.io/xpointlabs/deep-registry-api:${{ inputs.image_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/XPointLabs/deep-registry-api
             org.opencontainers.image.revision=${{ github.sha }}
