@@ -456,6 +456,44 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.Equal(secondDid.CanonicalBytes.ToArray(),
                 descriptorBound.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes
                     .ToArray());
+
+            // The imported root checkpoint targets head 1. After another
+            // admission, a genesis-floor reader must receive a live DTT1 for
+            // head 3, not a freshly signed copy of the older anchor/head 2.
+            var thirdRoot = Path.Combine(root, "third-client");
+            Directory.CreateDirectory(thirdRoot);
+            using var thirdStorage = new InMemoryDeepSecureStorage();
+            var thirdAccounts = new DeepIdV2AccountService(thirdStorage,
+                thirdRoot, fixture.Network, 1,
+                new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(
+                    1_700_000_400)),
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            _ = await thirdAccounts.CreateAsync("Charlie");
+            var thirdFloor = await thirdAccounts.OpenDirectoryLkgStoreAsync(
+                fixture.Authority, paths.Head, paths.HeadPin);
+            using var thirdProofHttp = forwardFactory.CreateClient();
+            thirdProofHttp.BaseAddress = new Uri("https://registry.example/");
+            using var thirdProofTransport = new HttpServiceRequestTransport(
+                thirdProofHttp,
+                DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                    "https://registry.example/"),
+                HttpServiceEndpointPolicy.Production);
+            using var thirdVerifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var thirdProof = new DeepIdV2DirectoryProofClient(
+                thirdProofTransport, new IncreasingMonotonicClock(),
+                thirdVerifier, thirdFloor);
+            var thirdVerified = await thirdAccounts.AdmitAndVerifyGenesisAsync(
+                forwardAdmission, thirdProof, fixture.Authority);
+            Assert.Equal(3UL, thirdVerified.NextProtectedLkg.LogGeneration);
+            Assert.Equal(3UL, thirdVerified.NextProtectedLkg.TreeSize);
+            Assert.Equal(3UL, AccountDirectoryDtt1Codec.Decode(
+                thirdVerified.ExactDtt1.Span).CurrentAdh1Generation);
+            Assert.Equal(thirdVerified.NextProtectedLkg.CoreHash.ToArray(),
+                AccountDirectoryDtt1Codec.Decode(thirdVerified.ExactDtt1.Span)
+                    .CurrentAdh1CoreHash.ToArray());
+            Assert.NotEqual(firstAtLatest.NextProtectedLkg.CoreHash.ToArray(),
+                thirdVerified.NextProtectedLkg.CoreHash.ToArray());
         }
         finally
         {
