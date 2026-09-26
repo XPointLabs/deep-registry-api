@@ -11,6 +11,7 @@ using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.MessagingCrypto;
+using Deep.Protocol.MessagingWire;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -18,6 +19,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
+using Sodium;
 
 namespace Deep.Registry.Api.Tests;
 
@@ -422,6 +424,48 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.Equal(secondVerified.NextProtectedLkg.CoreHash.ToArray(),
                 (await secondFloor.RestoreAsync(fixture.Authority, default))
                 .CoreHash.ToArray());
+
+            // Exercise the DID2 account-owned initiator boundary using the
+            // actual Registry proof and a second account's signed DPK2. The
+            // device DH1 operation is durably burned before Protocol consumes
+            // its one-shot lease; no V1 account secret enters this path.
+            await Assert.ThrowsAsync<CryptographicException>(() =>
+                accounts.BeginOwnDph2ClaimAsync(proof, fixture.Authority,
+                    verified, Bytes(16, 0xc1),
+                    verified.MonotonicSample + 1, 64));
+            await Assert.ThrowsAsync<CryptographicException>(() =>
+                accounts.BeginOwnDph2ClaimAsync(forwardProof,
+                    fixture.Authority, secondVerified,
+                    Bytes(16, 0xc1), secondVerified.MonotonicSample + 1, 64));
+            if (OperatingSystem.IsWindows())
+            {
+                using var bobPrekeys = await secondAccounts
+                    .OpenLocalPreKeyAuthoringAuthorityAsync();
+                var bobDirectory = ApplicationCoreVerifier.StartDmd1Lineage(
+                    secondVerified.CurrentCheckpoint!.Directory).Next;
+                using var bobOffering = bobPrekeys.AuthorOneTime(
+                    new Dpk2AuthoringContext(bobDirectory, 1, 1, 1,
+                        1_700_000_400, 1_700_000_400, 1_700_086_800));
+                var verifiedOffering = MessagingWireVerification.VerifyDpk2(
+                    bobOffering.ExactDpk2.Span,
+                    new CurrentDid2Dpk2Callbacks(secondVerified));
+                using var started = await accounts.BeginOwnDph2ClaimAsync(
+                    proof, fixture.Authority, firstAtLatest,
+                    Bytes(16, 0xc1), firstAtLatest.MonotonicSample + 1, 64);
+                using var prepared = await accounts.CompleteOwnDph2ClaimAsync(
+                    started, verifiedOffering, proof, fixture.Authority,
+                    firstAtLatest, Bytes(16, 0xc1),
+                    firstAtLatest.MonotonicSample + 1, 64);
+                Assert.Equal(started.ClaimOperationId.ToArray(),
+                    prepared.ClaimOperationId.ToArray());
+                Assert.Equal(verifiedOffering.ResponderAccountId.ToArray(),
+                    prepared.ResponderAccountId.ToArray());
+                await Assert.ThrowsAsync<CryptographicException>(() =>
+                    accounts.CompleteOwnDph2ClaimAsync(started,
+                        verifiedOffering, proof, fixture.Authority,
+                        firstAtLatest, Bytes(16, 0xc1),
+                        firstAtLatest.MonotonicSample + 1, 64));
+            }
 
             // Alice can discover Bob from the exact DID2 alone. The returned
             // binding and checkpoint must be authenticated by the proof,
@@ -890,6 +934,34 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             return ValueTask.FromResult(new ContactResolveTrustedTimeContext(
                 Bytes(16, 0xc1), 4_000, 1_700_000_400, 5));
         }
+    }
+
+    private sealed class CurrentDid2Dpk2Callbacks(
+        VerifiedDeepIdV2DirectoryFreshness currentPeer)
+        : IDpk2VerificationCallbacks
+    {
+        public Dpk2ResolvedDevice ResolveActiveDevice(Dpk2Record offering)
+        {
+            var identity = currentPeer.CurrentCheckpoint!.Binding.Identity;
+            var device = identity.ActiveDevices.Single(candidate =>
+                candidate.Certificate.DeviceId.Span.SequenceEqual(
+                    offering.ResponderDeviceId.Span));
+            if (!identity.Account.DeepAccountIdHash.Span.SequenceEqual(
+                    offering.ResponderAccountId.Span) ||
+                !identity.Account.Certificate.NetworkId.Span.SequenceEqual(
+                    offering.NetworkId.Span))
+                throw new CryptographicException(
+                    "The DPK2 offering is outside the current DID2 peer.");
+            return new Dpk2ResolvedDevice(
+                device.Certificate.DeviceEd25519PublicKey.Span,
+                device.Certificate.DeviceX25519PublicKey.Span);
+        }
+
+        public bool VerifyEd25519(ReadOnlyMemory<byte> publicKey,
+            ReadOnlyMemory<byte> signatureInput,
+            ReadOnlyMemory<byte> signature) =>
+            PublicKeyAuth.VerifyDetached(signature.ToArray(),
+                signatureInput.ToArray(), publicKey.ToArray());
     }
 
     private sealed class IncreasingMonotonicClock : IOnionMonotonicClock
