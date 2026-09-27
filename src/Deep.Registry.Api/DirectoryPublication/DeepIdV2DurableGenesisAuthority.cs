@@ -105,6 +105,79 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
                 "Production DID2 current head cannot cover a new proof.");
     }
 
+    /// <summary>
+    /// Advances an expiring DID2 head without changing its tree or current
+    /// values. The only time input is the protected monotonic authority; the
+    /// independent latest-head floor is advanced before local ADA2 replacement.
+    /// </summary>
+    internal async ValueTask<bool> RenewHeadIfDueAsync(ulong leadSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (latestHeadFloor is null || leadSeconds is < 60 or > 3_600 ||
+            leadSeconds >= headValiditySeconds)
+            throw new InvalidOperationException(
+                "DID2 head renewal requires an independent floor and a bounded lead interval.");
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var trusted = await trustedTimeSource.ReadAsync(cancellationToken)
+                .ConfigureAwait(false);
+            trusted.Validate();
+            var lower = trusted.ObservedUnixTime - trusted.UncertaintySeconds;
+            var upper = checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds);
+            var authority = networkAuthoritySource.Read();
+            if (!Fixed(authority.NetworkId.Span, networkId) ||
+                lower < authority.NotBefore || upper >= authority.ExpiresAt)
+                throw new CryptographicException(
+                    "DID2 renewal authority does not cover protected time.");
+
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            using var store = new DeepIdV2DirectoryStateStore(statePath,
+                integrityKey, networkId, bootstrapSource, authority, verifier,
+                deploymentProfileId, latestHeadFloor);
+            using var lease = store.Open(cancellationToken);
+            var prior = await lease.ReadAsync(upper, cancellationToken)
+                .ConfigureAwait(false);
+            if (prior.CurrentHead.Head.ValidUntil >
+                checked(upper + leadSeconds))
+                return false;
+
+            var validUntil = Math.Min(checked(lower + headValiditySeconds),
+                authority.ExpiresAt);
+            if (validUntil <= checked(upper + leadSeconds))
+                throw new CryptographicException(
+                    "DID2 signed authority cannot cover the renewal interval.");
+            var signers = await witnessCustody.GetHeadSignersAsync(authority,
+                cancellationToken).ConfigureAwait(false);
+            var authored = await DeepIdV2DirectoryHeadAuthor.AdvanceAsync(
+                authority, prior.CurrentHead,
+                new DeepIdV2DirectoryHeadMutationRequest(
+                    prior.Transitions, prior.CurrentCheckpoints, [], lower,
+                    validUntil, Math.Max((ushort)2,
+                        prior.CurrentHead.Head.MinimumReader)),
+                signers, cancellationToken).ConfigureAwait(false);
+            if (authored.ProtectedHead.TreeSize != prior.CurrentHead.TreeSize ||
+                !Fixed(authored.ProtectedHead.AppendLogMerkleRoot.Span,
+                    prior.CurrentHead.AppendLogMerkleRoot.Span) ||
+                !Fixed(authored.ProtectedHead.CurrentValueMapRoot.Span,
+                    prior.CurrentHead.CurrentValueMapRoot.Span))
+                throw new CryptographicException(
+                    "DID2 head renewal changed directory content.");
+            var rows = new DeepIdV2DirectoryStateRows(
+                prior.Heads.Select(head => new DeepIdV2DirectoryHeadRow(
+                        head.ExactAdh1, head.CoreHash))
+                    .Append(new DeepIdV2DirectoryHeadRow(authored.ExactAdh1,
+                        authored.CoreHash)).ToArray(),
+                prior.Transitions, prior.AdmissionRows);
+            _ = await lease.WriteAsync(rows, upper, cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
     public async ValueTask<DeepIdV2GenesisAdmissionReceipt> AdmitAsync(
         DeepIdV2GenesisAdmissionWireRequest request,
         CancellationToken cancellationToken = default)

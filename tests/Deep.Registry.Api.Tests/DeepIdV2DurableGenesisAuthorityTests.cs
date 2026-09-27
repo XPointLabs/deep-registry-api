@@ -272,6 +272,36 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                         Bytes(32, 0xb7), Bytes(16, 0xb8), 4_103,
                         first.DirectoryLeafKey.Span)));
             Assert.True(floor.RequireCount >= 3);
+            floor.RejectReads = true;
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await authority.RenewHeadIfDueAsync(300));
+            floor.RejectReads = false;
+            timeSource.UnixTime = 0;
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await authority.RenewHeadIfDueAsync(300));
+            timeSource.UnixTime = 1_700_000_400;
+            Assert.False(await authority.RenewHeadIfDueAsync(300));
+            Assert.Equal(1, floor.AdvanceCount);
+            timeSource.UnixTime = firstHead.ValidUntil - 200;
+            Assert.True(await authority.RenewHeadIfDueAsync(300));
+            Assert.Equal(2, floor.AdvanceCount);
+            await authority.RequireReadyAsync();
+            Assert.False(await authority.RenewHeadIfDueAsync(300));
+            using (var renewedStore = new DeepIdV2DirectoryStateStore(
+                       statePath, key, fixture.Network, bootstrap,
+                       networkSource.Read(), verifier, 1, floor))
+            using (var renewedLease = renewedStore.Open())
+            {
+                var renewed = await renewedLease.ReadAsync(
+                    timeSource.UnixTime + 5);
+                Assert.Equal(2UL, renewed.CurrentHead.LogGeneration);
+                Assert.Equal(1UL, renewed.CurrentHead.TreeSize);
+                Assert.Single(renewed.AdmissionRows);
+                Assert.Equal(firstHead.CurrentValueMapRoot.ToArray(),
+                    renewed.CurrentHead.Head.CurrentValueMapRoot.ToArray());
+                Assert.Equal(firstHead.AppendLogMerkleRoot.ToArray(),
+                    renewed.CurrentHead.Head.AppendLogMerkleRoot.ToArray());
+            }
             await File.WriteAllBytesAsync(statePath, genesisProtectedState);
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await authority.AdmitAsync(request));

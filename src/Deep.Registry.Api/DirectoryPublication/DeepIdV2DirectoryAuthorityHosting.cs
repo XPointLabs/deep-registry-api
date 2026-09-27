@@ -28,10 +28,14 @@ internal sealed class DeepIdV2DirectoryAuthorityOptions
     public string ProofRequestLedgerIntegrityKeyPath { get; set; } = string.Empty;
     public ushort DeploymentProfileId { get; set; } = 1;
     public ulong HeadValiditySeconds { get; set; } = 3_600;
+    public bool HeadRenewalEnabled { get; set; }
+    public ulong HeadRenewalLeadSeconds { get; set; } = 300;
+    public uint HeadRenewalIntervalSeconds { get; set; } = 60;
 }
 
 internal readonly record struct DeepIdV2DirectoryAuthorityHostingState(
-    bool Enabled, bool ProofEnabled);
+    bool Enabled, bool ProofEnabled, bool HeadRenewalEnabled = false,
+    ulong HeadRenewalLeadSeconds = 300);
 
 internal static class DeepIdV2DirectoryAuthorityHostingExtensions
 {
@@ -47,11 +51,23 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
+        DeepIdV2EnvironmentKeyGuard.RequireUniqueProcessKeys();
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         if (options.ProofEnabled && !options.Enabled)
             throw new InvalidOperationException(
                 "DID2 proof publication requires DID2 admission in the same authority.");
+        if (options.HeadRenewalEnabled &&
+            (!options.Enabled || !options.ProofEnabled ||
+             string.IsNullOrWhiteSpace(
+                 options.LatestHeadFloorPostgreSqlConnectionString) ||
+             options.HeadRenewalLeadSeconds is < 60 or > 3_600 ||
+             options.HeadRenewalLeadSeconds >= options.HeadValiditySeconds ||
+             options.HeadRenewalIntervalSeconds is < 10 or > 300 ||
+             options.HeadRenewalIntervalSeconds * 2 >=
+                 options.HeadRenewalLeadSeconds))
+            throw new InvalidOperationException(
+                "DID2 automatic head renewal requires proof publication and bounded lead/interval settings.");
         if (!options.Enabled) return default;
         if (environment is null)
             throw new InvalidOperationException(
@@ -92,6 +108,14 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         services.TryAddSingleton<IDeepIdV2GenesisAuthority>(provider =>
             provider.GetRequiredService<DeepIdV2DurableGenesisAuthority>());
         services.TryAddSingleton<DeepIdV2IssuanceAdmissionGate>();
+        if (options.HeadRenewalEnabled)
+            services.AddHostedService(provider =>
+                new DeepIdV2DirectoryHeadRenewalWorker(
+                    provider.GetRequiredService<DeepIdV2DurableGenesisAuthority>(),
+                    options.HeadRenewalLeadSeconds,
+                    TimeSpan.FromSeconds(options.HeadRenewalIntervalSeconds),
+                    provider.GetRequiredService<
+                        ILogger<DeepIdV2DirectoryHeadRenewalWorker>>()));
         if (options.ProofEnabled)
         {
             if (options.ForwardCheckpointPaths.Count > 0)
@@ -132,7 +156,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             });
         }
         return new DeepIdV2DirectoryAuthorityHostingState(true,
-            options.ProofEnabled);
+            options.ProofEnabled, options.HeadRenewalEnabled,
+            options.HeadRenewalLeadSeconds);
     }
 
     internal static void MapDeepIdV2DirectoryAuthorityEndpoint(

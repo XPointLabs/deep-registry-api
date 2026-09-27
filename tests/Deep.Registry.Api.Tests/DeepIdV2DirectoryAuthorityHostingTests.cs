@@ -13,6 +13,34 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2DirectoryAuthorityHostingTests
 {
+    [Theory]
+    [InlineData("one", "one")]
+    [InlineData("one", "two")]
+    public void DuplicateRawDid2EnvironmentKeyIsNeverAnOverride(
+        string first, string second)
+    {
+        var raw = System.Text.Encoding.UTF8.GetBytes(
+            $"DeepIdV2DirectoryAuthority__StatePath={first}\0" +
+            $"Other=DeepIdV2DirectoryAuthority__StatePath=ignored\0" +
+            $"DeepIdV2DirectoryAuthority__StatePath={second}\0");
+        using var input = new MemoryStream(raw);
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            DeepIdV2EnvironmentKeyGuard.RequireUniqueKeys(input));
+        Assert.Contains("repeated", error.Message,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DistinctRawDid2EnvironmentKeysAreAccepted()
+    {
+        var raw = System.Text.Encoding.UTF8.GetBytes(
+            "DeepIdV2DirectoryAuthority__StatePath=one\0" +
+            "DeepIdV2DirectoryAuthority__ProofEnabled=true\0" +
+            "Other=DeepIdV2DirectoryAuthority__StatePath=ignored\0");
+        using var input = new MemoryStream(raw);
+        DeepIdV2EnvironmentKeyGuard.RequireUniqueKeys(input);
+    }
+
     [Fact]
     public void LegacyAndDid2AdmissionCannotBeEnabledTogether()
     {
@@ -156,6 +184,37 @@ public sealed class DeepIdV2DirectoryAuthorityHostingTests
             new ServiceCollection().AddDeepIdV2DirectoryAuthority(
                 configuration, new FixedEnvironment("UAT")));
         Assert.Contains("requires DID2 admission", error.Message,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false, false, 300, 60)]
+    [InlineData(true, false, 300, 60)]
+    [InlineData(true, true, 30, 10)]
+    [InlineData(true, true, 300, 180)]
+    [InlineData(true, true, 3_600, 60)]
+    public void AutomaticDid2HeadRenewalRejectsUnsafeConfiguration(
+        bool enabled, bool proofEnabled, ulong lead, uint interval)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DeepIdV2DirectoryAuthority:Enabled"] =
+                    enabled.ToString(),
+                ["DeepIdV2DirectoryAuthority:ProofEnabled"] =
+                    proofEnabled.ToString(),
+                ["DeepIdV2DirectoryAuthority:HeadRenewalEnabled"] = "true",
+                ["DeepIdV2DirectoryAuthority:LatestHeadFloorPostgreSqlConnectionString"] =
+                    "Host=floor.example",
+                ["DeepIdV2DirectoryAuthority:HeadRenewalLeadSeconds"] =
+                    lead.ToString(),
+                ["DeepIdV2DirectoryAuthority:HeadRenewalIntervalSeconds"] =
+                    interval.ToString()
+            }).Build();
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            new ServiceCollection().AddDeepIdV2DirectoryAuthority(
+                configuration, new FixedEnvironment("UAT")));
+        Assert.Contains("automatic head renewal", error.Message,
             StringComparison.OrdinalIgnoreCase);
     }
 

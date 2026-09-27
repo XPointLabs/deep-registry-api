@@ -121,9 +121,12 @@ var app = builder.Build();
 #if DEEP_PROTOCOL_DIRECTORY_V1
 if (app.Environment.IsProduction() && deepIdV2DirectoryAuthority.Enabled)
 {
-    await app.Services.GetRequiredService<
-            Deep.Registry.Api.DirectoryPublication.DeepIdV2DurableGenesisAuthority>()
-        .RequireReadyAsync();
+    var did2Authority = app.Services.GetRequiredService<
+        Deep.Registry.Api.DirectoryPublication.DeepIdV2DurableGenesisAuthority>();
+    if (deepIdV2DirectoryAuthority.HeadRenewalEnabled)
+        await did2Authority.RenewHeadIfDueAsync(
+            deepIdV2DirectoryAuthority.HeadRenewalLeadSeconds);
+    await did2Authority.RequireReadyAsync();
     _ = app.Services.GetRequiredService<
         Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryProofIssuer>();
 }

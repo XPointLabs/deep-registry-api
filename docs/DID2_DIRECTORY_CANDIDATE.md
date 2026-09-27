@@ -17,6 +17,8 @@ The `DeepIdV2DirectoryAuthority` configuration requires:
 | `StatePath` / `IntegrityKeyPath` | Separate absolute paths for ADA2 and its nonzero 32-byte HMAC key |
 | `DeploymentProfileId` | Nonzero DID2 deployment profile; currently 1 |
 | `HeadValiditySeconds` | 300–86400 seconds; default 3600 |
+| `HeadRenewalEnabled` | Optional protected-time head renewal; default `false`; requires admission, proof and external floor |
+| `HeadRenewalLeadSeconds` / `HeadRenewalIntervalSeconds` | Default 300/60 seconds; the poll interval must be less than half the lead |
 | `ProofEnabled` | Optional UAT `DPQ2` proof endpoint; required for production; default `false` |
 | `ProductionCutoverAttested` | Operator attestation after independent floor topology, restore drill and client E2E; default `false` |
 | `CurrentXnv1Path` | Exact signed current XNV1 supplied by the authority owner |
@@ -73,6 +75,21 @@ floor, and constructs the proof issuer with its protected nonce ledger; an
 outage or mismatch aborts startup. UAT may explicitly set
 `DeepIdV2DirectoryAuthority:Enabled=true` and keep
 `AccountDirectoryAuthority:Enabled=false`.
+
+When explicitly enabled, head renewal re-reads the protected monotonic
+trusted-time anchor, the complete ADA2 journal and independent PostgreSQL
+floor before signing a content-preserving successor. Startup attempts the
+same renewal before the readiness barrier, then a hosted worker checks at the
+bounded interval. A successful renewal preserves tree size and both map/log
+roots and advances the external floor before replacing local ADA2. Missing,
+stale or reset trusted time, insufficient witness custody, expired network
+authority and floor failures all remain fail-closed. This feature does not
+provision or rotate a trusted-time anchor, and must not be presented as a
+substitute for the required independent time-source and recovery evidence.
+On Linux, startup rejects repeated raw `DeepIdV2DirectoryAuthority__*`
+environment names even when their values are identical: .NET configuration
+would otherwise hide which override won. Compose one effective value per
+setting before starting a new container; do not rely on duplicate `-e` flags.
 
 Do not enable this candidate in production yet. The PostgreSQL latest-head
 floor is deployed separately from Registry ADA2 and contains the exact signed
