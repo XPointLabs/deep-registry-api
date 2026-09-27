@@ -90,6 +90,11 @@ On Linux, startup rejects repeated raw `DeepIdV2DirectoryAuthority__*`
 environment names even when their values are identical: .NET configuration
 would otherwise hide which override won. Compose one effective value per
 setting before starting a new container; do not rely on duplicate `-e` flags.
+Docker can normalize repeated `Config.Env` names before creating the process,
+so this startup guard alone cannot detect duplicates in the container
+definition. Before promotion, inspect the exact candidate with the
+`deep-devops/scripts/check-did2-registry-container-env.mjs` host-side
+preflight; it checks Docker `Config.Env` without reporting values.
 
 Do not enable this candidate in production yet. The PostgreSQL latest-head
 floor is deployed separately from Registry ADA2 and contains the exact signed
