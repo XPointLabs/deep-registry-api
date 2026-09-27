@@ -226,14 +226,14 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                     1_700_086_800);
                 if (OperatingSystem.IsWindows())
                 {
-                    using var offering = prekeys.AuthorOneTime(context);
+                    using var offering = prekeys.AuthorOneTimeV2(context);
                     Assert.Equal(prekeys.DeviceId.ToArray(),
                         offering.Record.ResponderDeviceId.ToArray());
                     Assert.Equal(32, offering.ExactDpk2Hash.Length);
                 }
                 else
                     Assert.Throws<PlatformNotSupportedException>(() =>
-                        prekeys.AuthorOneTime(context));
+                        prekeys.AuthorOneTimeV2(context));
             }
             Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
                 (await protectedFloor.RestoreAsync(fixture.Authority, default))
@@ -469,42 +469,49 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 fixture.Authority, 1, 2);
             var currentBob = await peerProof.FetchByDid2Async(secondDid,
                 fixture.Authority, 1, 2);
+            var operationSample = Math.Max(currentAlice.MonotonicSample,
+                currentBob.MonotonicSample) + 1;
             await Assert.ThrowsAsync<CryptographicException>(() =>
                 accounts.BeginOwnDph2ClaimAsync(peerProof, fixture.Authority,
                     verified, Bytes(16, 0xc1),
-                    verified.MonotonicSample + 1, 64));
+                    operationSample, 64));
             await Assert.ThrowsAsync<CryptographicException>(() =>
                 accounts.BeginOwnDph2ClaimAsync(peerProof,
                     fixture.Authority, currentBob,
-                    Bytes(16, 0xc1), currentBob.MonotonicSample + 1, 64));
+                    Bytes(16, 0xc1), operationSample, 64));
             if (OperatingSystem.IsWindows())
             {
                 using var bobPrekeys = await secondAccounts
                     .OpenLocalPreKeyAuthoringAuthorityAsync();
                 var bobDirectory = ApplicationCoreVerifier.StartDmd1Lineage(
                     secondVerified.CurrentCheckpoint!.Directory).Next;
-                using var bobOffering = bobPrekeys.AuthorOneTime(
+                using var bobOffering = bobPrekeys.AuthorOneTimeV2(
                     new Dpk2AuthoringContext(bobDirectory, 1, 1, 1,
                         1_700_000_400, 1_700_000_400, 1_700_086_800));
                 using var started = await accounts.BeginOwnDph2ClaimAsync(
                     peerProof, fixture.Authority, currentAlice,
-                    Bytes(16, 0xc1), currentAlice.MonotonicSample + 1, 64);
+                    Bytes(16, 0xc1), operationSample, 64);
                 await Assert.ThrowsAsync<CryptographicException>(() =>
                     accounts.CompleteOwnDph2ClaimAsync(started,
                         bobOffering.ExactDpk2, peerProof, fixture.Authority,
                         currentAlice, currentAlice, Bytes(16, 0xc1),
-                        currentAlice.MonotonicSample + 1, 64));
+                        operationSample, 64));
                 var tamperedDpk2 = bobOffering.ExactDpk2.ToArray();
                 tamperedDpk2[^1] ^= 1;
                 await Assert.ThrowsAsync<MessagingWireFormatException>(() =>
                     accounts.CompleteOwnDph2ClaimAsync(started,
+                        Dpk2Codec.Encode(bobOffering.Record), peerProof,
+                        fixture.Authority, currentAlice, currentBob,
+                        Bytes(16, 0xc1), operationSample, 64));
+                await Assert.ThrowsAsync<MessagingWireFormatException>(() =>
+                    accounts.CompleteOwnDph2ClaimAsync(started,
                         tamperedDpk2, peerProof, fixture.Authority,
                         currentAlice, currentBob, Bytes(16, 0xc1),
-                        currentAlice.MonotonicSample + 1, 64));
+                        operationSample, 64));
                 using var prepared = await accounts.CompleteOwnDph2ClaimAsync(
                     started, bobOffering.ExactDpk2, peerProof,
                     fixture.Authority, currentAlice, currentBob,
-                    Bytes(16, 0xc1), currentAlice.MonotonicSample + 1, 64);
+                    Bytes(16, 0xc1), operationSample, 64);
                 Assert.Equal(started.ClaimOperationId.ToArray(),
                     prepared.ClaimOperationId.ToArray());
                 Assert.Equal(bobOffering.Record.ResponderAccountId.ToArray(),
@@ -513,7 +520,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                     accounts.CompleteOwnDph2ClaimAsync(started,
                         bobOffering.ExactDpk2, peerProof, fixture.Authority,
                         currentAlice, currentBob, Bytes(16, 0xc1),
-                        currentAlice.MonotonicSample + 1, 64));
+                        operationSample, 64));
                 Assert.Contains("no longer available", replay.Message,
                     StringComparison.Ordinal);
             }
