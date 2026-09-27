@@ -509,11 +509,13 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                     prepared.ClaimOperationId.ToArray());
                 Assert.Equal(bobOffering.Record.ResponderAccountId.ToArray(),
                     prepared.ResponderAccountId.ToArray());
-                await Assert.ThrowsAsync<CryptographicException>(() =>
+                var replay = await Assert.ThrowsAsync<InvalidOperationException>(() =>
                     accounts.CompleteOwnDph2ClaimAsync(started,
                         bobOffering.ExactDpk2, peerProof, fixture.Authority,
                         currentAlice, currentBob, Bytes(16, 0xc1),
                         currentAlice.MonotonicSample + 1, 64));
+                Assert.Contains("no longer available", replay.Message,
+                    StringComparison.Ordinal);
             }
 
             // The imported root checkpoint targets head 1. After another
