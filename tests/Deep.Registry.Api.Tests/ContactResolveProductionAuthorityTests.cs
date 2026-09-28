@@ -375,6 +375,94 @@ public sealed class ContactResolveProductionAuthorityTests
     }
 
     [Fact]
+    public async Task ExplicitTimeRefinementNarrowsTheAdvancedIntervalWithoutRollback()
+    {
+        using var world = AuthorityWorld.Create();
+        var original = world.ProvisionTime(1_700_000_120, 1_700_004_000,
+            uncertainty: 30, sample: 1_000);
+        // At sample 1100 the old interval is [190,250]. The independently
+        // observed [192,208] is a subset even though its center is lower.
+        var refined = world.ProvisionTime(1_700_000_200, 1_700_004_000,
+            uncertainty: 8, sample: 1_100, expectedHash: original, refine: true);
+        Assert.NotEqual(original, refined);
+        using var source = world.TimeSource(() => 1_105);
+        var current = await source.ReadAsync(default);
+        Assert.Equal(1_700_000_205UL, current.ObservedUnixTime);
+        Assert.Equal(8U, current.UncertaintySeconds);
+        var unchanged = File.ReadAllBytes(world.TimeStatePath);
+        Assert.Throws<CryptographicException>(() => world.ProvisionTime(
+            1_700_000_200, 1_700_004_000, uncertainty: 8, sample: 1_100,
+            expectedHash: original, refine: true));
+        Assert.Equal(unchanged, File.ReadAllBytes(world.TimeStatePath));
+    }
+
+    [Theory]
+    [InlineData(1_700_000_200UL, 8U, 1_100UL, false)] // Default path still rejects center rollback.
+    [InlineData(1_700_000_197UL, 8U, 1_100UL, true)] // Lower bound would move backwards.
+    [InlineData(1_700_000_243UL, 8U, 1_100UL, true)] // Upper bound would widen.
+    [InlineData(1_700_000_220UL, 30U, 1_100UL, true)] // Not strictly narrower.
+    [InlineData(1_700_000_120UL, 8U, 999UL, true)] // Monotonic reset cannot refine.
+    public void TimeRefinementRejectsUnboundedCorrectionWithoutMutation(
+        ulong observed, uint uncertainty, ulong sample, bool refine)
+    {
+        using var world = AuthorityWorld.Create();
+        var original = world.ProvisionTime(1_700_000_120, 1_700_004_000,
+            uncertainty: 30, sample: 1_000);
+        var unchanged = File.ReadAllBytes(world.TimeStatePath);
+        Assert.Throws<CryptographicException>(() => world.ProvisionTime(observed,
+            1_700_004_000, uncertainty, sample, original, refine));
+        Assert.Equal(unchanged, File.ReadAllBytes(world.TimeStatePath));
+    }
+
+    [Fact]
+    public async Task OperatorRefinementRequiresExplicitTrueAndAnExistingCas()
+    {
+        using var world = AuthorityWorld.Create();
+        foreach (var extra in new[] { "true", "false", "TRUE" })
+        {
+            var result = await ContactResolveOperatorCommand.TryRunAsync(
+                ["contact-resolve-authority", "provision-time", "--observed-unix-time", "1700000100",
+                 "--valid-until-unix", "1700000400", "--uncertainty-seconds", "8",
+                 "--refine-current-interval", extra], world.Configuration);
+            Assert.Equal(2, result);
+            Assert.False(File.Exists(world.TimeStatePath));
+        }
+    }
+
+    [Fact]
+    public async Task OperatorExplicitRefinementPreservesAuthenticatedStateAndRestart()
+    {
+        using var world = AuthorityWorld.Create();
+        var sample = ProtectedMonotonicContactResolveTrustedTimeSource.ReadPlatformMonotonicSeconds();
+        var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var original = world.ProvisionTime(now + 20, now + 3_600,
+            uncertainty: 30, sample: sample);
+        var result = await ContactResolveOperatorCommand.TryRunAsync(
+            ["contact-resolve-authority", "provision-time", "--observed-unix-time", now.ToString(),
+             "--valid-until-unix", (now + 3_600).ToString(), "--uncertainty-seconds", "5",
+             "--expected-state-sha256", Convert.ToHexString(original),
+             "--refine-current-interval", "true"], world.Configuration);
+        Assert.Equal(0, result);
+        using var source = world.TimeSource(ProtectedMonotonicContactResolveTrustedTimeSource.ReadPlatformMonotonicSeconds);
+        var context = await source.ReadAsync(default);
+        Assert.Equal(5U, context.UncertaintySeconds);
+        Assert.True(context.ObservedUnixTime >= now);
+        Assert.NotEqual(original, SHA256.HashData(File.ReadAllBytes(world.TimeStatePath)));
+    }
+
+    [Fact]
+    public void RefinementOverflowRejectsBeforeProtectedStateMutation()
+    {
+        using var world = AuthorityWorld.Create();
+        var hash = world.ProvisionTime(1_700_000_120, 1_700_004_000,
+            uncertainty: 30, sample: 1_000);
+        var original = File.ReadAllBytes(world.TimeStatePath);
+        Assert.Throws<ArgumentException>(() => world.ProvisionTime(
+            ulong.MaxValue - 3, ulong.MaxValue, 8, 1_100, hash, refine: true));
+        Assert.Equal(original, File.ReadAllBytes(world.TimeStatePath));
+    }
+
+    [Fact]
     public async Task OperatorTimeProvisioningCreatesOnlyProtectedConfiguredState()
     {
         using var world = AuthorityWorld.Create();
@@ -516,10 +604,11 @@ public sealed class ContactResolveProductionAuthorityTests
             ulong validUntil,
             uint uncertainty = 2,
             ulong sample = 1_000,
-            byte[]? expectedHash = null) =>
+            byte[]? expectedHash = null,
+            bool refine = false) =>
             ProtectedMonotonicContactResolveTrustedTimeSource.Provision(
                 TimeStatePath, Network, timeKey, observed, validUntil, uncertainty,
-                expectedHash ?? [], sample, BootId);
+                expectedHash ?? [], sample, BootId, refine);
 
         internal ProtectedMonotonicContactResolveTrustedTimeSource TimeSource(
             Func<ulong> sample) => new(TimeStatePath, Network, timeKey, sample);

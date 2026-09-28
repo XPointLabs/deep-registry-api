@@ -98,7 +98,8 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
         uint uncertaintySeconds,
         ReadOnlySpan<byte> expectedCurrentStateSha256,
         ulong monotonicSample,
-        ReadOnlySpan<byte> serverBootId)
+        ReadOnlySpan<byte> serverBootId,
+        bool refineCurrentInterval = false)
     {
         if (string.IsNullOrWhiteSpace(statePath))
             throw new ArgumentException("A trusted-time state path is required.", nameof(statePath));
@@ -107,6 +108,7 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
         var exactBoot = RequiredNonZero(serverBootId, 16, nameof(serverBootId));
         if (observedUnixTime == 0 || uncertaintySeconds is < 1 or > 30 ||
             observedUnixTime <= uncertaintySeconds ||
+            observedUnixTime > ulong.MaxValue - uncertaintySeconds ||
             validUntilUnixTime <= observedUnixTime + uncertaintySeconds)
             throw new ArgumentException("The trusted-time provisioning interval is invalid.");
         if (!expectedCurrentStateSha256.IsEmpty &&
@@ -115,6 +117,8 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
             throw new ArgumentException(
                 "The expected trusted-time state hash must be exactly 32 non-zero bytes.",
                 nameof(expectedCurrentStateSha256));
+        if (refineCurrentInterval && expectedCurrentStateSha256.IsEmpty)
+            throw new ArgumentException("Refining trusted time requires the exact current protected-state hash.");
 
         var fullPath = Path.GetFullPath(statePath);
         RejectReparseIfPresent(fullPath);
@@ -144,17 +148,38 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
                     CryptographicOperations.ZeroMemory(actualHash);
                 }
                 var previous = Decode(previousEncoded, exactNetwork, exactKey);
-                if (monotonicSample >= previous.AnchorMonotonicSample)
+                if (refineCurrentInterval)
                 {
-                    var previousNow = checked(
-                        previous.ObservedUnixTime + monotonicSample - previous.AnchorMonotonicSample);
-                    if (observedUnixTime < previousNow)
-                        throw new CryptographicException(
-                            "The replacement trusted-time anchor would move time backwards.");
+                    // Only an explicit custody observation may narrow an
+                    // advanced protected interval. Its representative center
+                    // may decrease, but neither rollback floor nor upper bound
+                    // may widen. A backwards sample cannot authorize this;
+                    // operator custody must independently exclude a host reboot.
+                    if (monotonicSample < previous.AnchorMonotonicSample ||
+                        uncertaintySeconds >= previous.UncertaintySeconds)
+                        throw new CryptographicException("Trusted-time refinement is not a narrower same-clock observation.");
+                    var previousNow = checked(previous.ObservedUnixTime +
+                        monotonicSample - previous.AnchorMonotonicSample);
+                    if (observedUnixTime - uncertaintySeconds <
+                            previousNow - previous.UncertaintySeconds ||
+                        checked(observedUnixTime + uncertaintySeconds) >
+                            checked(previousNow + previous.UncertaintySeconds))
+                        throw new CryptographicException("Trusted-time refinement is outside the advanced protected interval.");
                 }
-                if (observedUnixTime < previous.ObservedUnixTime)
-                    throw new CryptographicException(
-                        "The replacement trusted-time anchor is older than protected state.");
+                else
+                {
+                    if (monotonicSample >= previous.AnchorMonotonicSample)
+                    {
+                        var previousNow = checked(
+                            previous.ObservedUnixTime + monotonicSample - previous.AnchorMonotonicSample);
+                        if (observedUnixTime < previousNow)
+                            throw new CryptographicException(
+                                "The replacement trusted-time anchor would move time backwards.");
+                    }
+                    if (observedUnixTime < previous.ObservedUnixTime)
+                        throw new CryptographicException(
+                            "The replacement trusted-time anchor is older than protected state.");
+                }
                 generation = checked(previous.Generation + 1);
                 predecessorHash = SHA256.HashData(previousEncoded);
             }

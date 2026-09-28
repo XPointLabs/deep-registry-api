@@ -26,6 +26,19 @@ The `DeepIdV2DirectoryAuthority` configuration requires:
 
 First configure protected trusted time and threshold witness custody under
 `ContactResolveProductionAuthority`, and verify their network and key files.
+An operator's uncertainty must fit the signed XNA1 maximum and leave a usable
+nonce-proof lifetime; a ready head alone does not prove this. After independently
+checking UTC and confirming no host reboot, `contact-resolve-authority provision-time`
+can narrow an existing anchor with `--refine-current-interval true`,
+`--expected-state-sha256` and the usual observed/valid-until/uncertainty options.
+Unknown flag values reject. The command retains authenticated generation and
+predecessor custody and refuses a backwards monotonic sample, equal/wider
+uncertainty, observations outside the advanced interval and stale CAS before
+mutation. It never resets ADA2, floors or nonce ledgers. The bounded rule and its
+reboot non-claim are owned by
+[the trusted-time specification](../../docs/architecture/ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md).
+Do not reduce uncertainty merely to pass readiness or infer time from a request.
+
 Use only a newly signed V2 empty head (`minimumReader >= 2`, V2 empty-map
 root); never copy ADA1 into ADA2. With the exact XNA1/DTS1 genesis paths and
 independent XNA1 core-hash pin configured, V1 admission disabled, and an empty

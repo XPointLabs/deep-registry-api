@@ -51,7 +51,10 @@ internal static class ContactResolveOperatorCommand
     {
         RequireExactOptions(values,
             required: ["observed-unix-time", "valid-until-unix", "uncertainty-seconds"],
-            optional: ["expected-state-sha256"]);
+            optional: ["expected-state-sha256", "refine-current-interval"]);
+        var refine = values.TryGetValue("refine-current-interval", out var refinement);
+        if (refine && !string.Equals(refinement, "true", StringComparison.Ordinal))
+            throw new ArgumentException("Trusted-time refinement must be explicitly true.");
         var options = ContactResolveProductionAuthorityServiceCollectionExtensions
             .ReadRequiredOptions(configuration);
         var network = DirectoryPublicationHostingExtensions.Hex(
@@ -73,7 +76,7 @@ internal static class ContactResolveOperatorCommand
                 U32(values["uncertainty-seconds"], "uncertainty seconds"),
                 expected,
                 ProtectedMonotonicContactResolveTrustedTimeSource.ReadPlatformMonotonicSeconds(),
-                bootId);
+                bootId, refineCurrentInterval: refine);
             try
             {
                 Console.Out.WriteLine($"ContactResolve trusted-time state ready: {Convert.ToHexString(hash)}");
