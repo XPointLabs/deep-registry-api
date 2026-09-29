@@ -149,6 +149,46 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         this.deploymentProfileId = deploymentProfileId;
     }
 
+    /// <summary>
+    /// Checks the actual proof issuance context without touching the nonce
+    /// ledger, invoking a signer, changing ADA2 or advancing the external floor.
+    /// </summary>
+    internal async ValueTask RequireReadyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (latestHeadFloor is null)
+            throw new InvalidOperationException(
+                "DID2 proof readiness requires an independent latest-head floor.");
+        var trusted = await trustedTimeSource.ReadAsync(cancellationToken)
+            .ConfigureAwait(false);
+        trusted.Validate();
+        var upper = checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds);
+        var authority = networkAuthoritySource.Read();
+        var epoch = AccountDirectoryDtt1IssuanceEpoch.Derive(authority,
+            trusted.ObservedUnixTime, trusted.UncertaintySeconds);
+        using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+        using var store = new DeepIdV2DirectoryStateStore(statePath,
+            integrityKey, networkId, bootstrapSource, authority,
+            verifier, deploymentProfileId, latestHeadFloor);
+        using var lease = store.Open(cancellationToken);
+        var restored = await lease.ReadAsync(upper, cancellationToken)
+            .ConfigureAwait(false);
+        var view = await currentViewSource.ReadExactXnv1Async(cancellationToken)
+            .ConfigureAwait(false);
+        var expiresAt = ProofExpiry(trusted, epoch, authority,
+            restored.CurrentHead, upper);
+        // Nonce/boot bytes are only grammar inputs to a pure validation call.
+        // This is not a live challenge and must never be signed or issued.
+        var request = new AccountDirectoryProofAuthoringRequest(networkId,
+            Enumerable.Repeat((byte)1, 32).ToArray(), trusted.ServerBootId.Span,
+            trusted.ServerMonotonicSample, restored.CurrentHead.ExactAdh1.Span,
+            view.Span, trusted.ObservedUnixTime, trusted.UncertaintySeconds,
+            trusted.ObservedUnixTime, expiresAt, epoch, supportedReader: 2);
+        AccountDirectoryProofAuthor.RequireIssuanceReady(authority,
+            restored.CurrentHead, request);
+    }
+
     internal async ValueTask<AuthoredDeepIdV2DirectoryProofPackage> IssueAsync(
         DeepIdV2DirectoryProofRequest request,
         CancellationToken cancellationToken = default)
@@ -198,19 +238,8 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             : null;
         var exactXnv1 = await currentViewSource.ReadExactXnv1Async(
             cancellationToken).ConfigureAwait(false);
-        var latestProofExpiry = trusted.ObservedUnixTime > ulong.MaxValue - 30
-            ? ulong.MaxValue : trusted.ObservedUnixTime + 30;
-        var expiresAt = new[]
-        {
-            latestProofExpiry,
-            epoch.ValidUntil,
-            authority.ExpiresAt,
-            authority.Dts1ExpiresAt,
-            restored.CurrentHead.Head.ValidUntil - 1
-        }.Min();
-        if (expiresAt <= upper)
-            throw new CryptographicException(
-                "DID2 proof has no usable nonce-bound lifetime.");
+        var expiresAt = ProofExpiry(trusted, epoch, authority,
+            restored.CurrentHead, upper);
         var authorRequest = new AccountDirectoryProofAuthoringRequest(
             networkId, request.Nonce.Span, request.BootId.Span,
             request.ClientMonotonicSendSample,
@@ -239,6 +268,21 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var issued = await IssueAsync(new DeepIdV2DirectoryProofRequest(wire),
             cancellationToken).ConfigureAwait(false);
         return DeepIdV2DirectoryProofWireCodec.EncodeResponse(wire, issued);
+    }
+
+    private static ulong ProofExpiry(ContactResolveTrustedTimeContext trusted,
+        AccountDirectoryDtt1IssuanceEpoch epoch,
+        Deep.Protocol.XPointNetworkV1.VerifiedXPointNetworkAuthority authority,
+        AccountDirectoryProtectedLkg currentHead, ulong upper)
+    {
+        var latest = trusted.ObservedUnixTime > ulong.MaxValue - 30
+            ? ulong.MaxValue : trusted.ObservedUnixTime + 30;
+        var expiresAt = new[] { latest, epoch.ValidUntil, authority.ExpiresAt,
+            authority.Dts1ExpiresAt, currentHead.Head.ValidUntil - 1 }.Min();
+        if (expiresAt <= upper)
+            throw new CryptographicException(
+                "DID2 proof has no usable nonce-bound lifetime.");
+        return expiresAt;
     }
 
     private static AccountDirectoryProtectedLkg? ResolveCallerFloor(

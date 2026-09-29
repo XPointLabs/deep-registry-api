@@ -187,6 +187,14 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             var liveRequest = new DeepIdV2DirectoryProofRequest(
                 fixture.Network, Bytes(32, 0xb3), Bytes(16, 0xb4),
                 4_101, first.DirectoryLeafKey.Span);
+            var beforeReadiness = await File.ReadAllBytesAsync(statePath);
+            var beforeReadinessAdvances = floor.AdvanceCount;
+            Assert.False(Directory.Exists(Path.Combine(root, "did2-proof-nonces")));
+            for (var probe = 0; probe < 20; probe++)
+                await proofIssuer.RequireReadyAsync();
+            Assert.Equal(beforeReadiness, await File.ReadAllBytesAsync(statePath));
+            Assert.Equal(beforeReadinessAdvances, floor.AdvanceCount);
+            Assert.False(Directory.Exists(Path.Combine(root, "did2-proof-nonces")));
             var liveProof = await proofIssuer.IssueAsync(liveRequest);
             Assert.Equal(first.ExactAdh1.ToArray(),
                 liveProof.ExactAdh1.ToArray());
@@ -218,6 +226,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             var httpBuilder = WebApplication.CreateBuilder();
             httpBuilder.WebHost.UseTestServer();
             httpBuilder.Services.AddSingleton(proofIssuer);
+            httpBuilder.Services.AddSingleton(authority);
             httpBuilder.Services.AddSingleton(TimeProvider.System);
             httpBuilder.Services.AddSingleton<DeepIdV2IssuanceAdmissionGate>();
             await using (var app = httpBuilder.Build())
@@ -226,6 +235,22 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                     new DeepIdV2DirectoryAuthorityHostingState(true, true));
                 await app.StartAsync();
                 using var client = app.GetTestClient();
+                using (var ready = await client.GetAsync(
+                           DeepIdV2DirectoryAuthorityHostingExtensions.ReadinessEndpointPath))
+                    Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+                var exactView = await File.ReadAllBytesAsync(viewPath);
+                var forgedView = exactView.ToArray();
+                forgedView[^1] ^= 1;
+                await File.WriteAllBytesAsync(viewPath, forgedView);
+                // Directory readiness alone remains green; proof readiness must not.
+                await authority.RequireReadyAsync();
+                using (var unavailable = await client.GetAsync(
+                           DeepIdV2DirectoryAuthorityHostingExtensions.ReadinessEndpointPath))
+                    Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+                await File.WriteAllBytesAsync(viewPath, exactView);
+                using (var recovered = await client.GetAsync(
+                           DeepIdV2DirectoryAuthorityHostingExtensions.ReadinessEndpointPath))
+                    Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
                 using var content = new ByteArrayContent(httpRequest);
                 content.Headers.ContentType = new MediaTypeHeaderValue(
                     DeepIdV2DirectoryProofWireCodec.RequestMediaType);

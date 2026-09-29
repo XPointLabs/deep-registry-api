@@ -81,19 +81,25 @@ write. It does not enable the HTTP route. In production the admission endpoint
 requires `ProductionCutoverAttested=true`, `ProofEnabled=true` and one remote
 PostgreSQL floor endpoint configured with `SSL Mode=VerifyFull` and an absolute
 local root-certificate path. This flag is an operator attestation, not proof
-of independent backup/restore topology or the physical client gate. Before
-mapping any production HTTP route, startup also verifies trusted time, the
-signed authority chain, the complete ADA2 journal and its exact external
-floor, and constructs the proof issuer with its protected nonce ledger; an
-outage or mismatch aborts startup. UAT may explicitly set
+of independent backup/restore topology or the physical client gate. Startup
+validates configuration and constructs authority/proof custody, but a transient
+external-floor outage or unavailable time does not terminate the host before
+its recovery worker starts. `/health/live` may return 200 while DID2 readiness
+returns 503. Readiness verifies trusted time, signed authority, the complete
+ADA2 journal, its exact external floor and (when proof issuance is enabled)
+the canonical signed current XNV1 and its complete issuance-time window using
+the Protocol authoring boundary. It never consumes a nonce or writes state.
+Actual admission and proof requests independently perform their required
+checks; readiness is not authorization. Corruption, rollback and forks remain
+closed, not repaired by retry. UAT may explicitly set
 `DeepIdV2DirectoryAuthority:Enabled=true` and keep
 `AccountDirectoryAuthority:Enabled=false`.
 
 When explicitly enabled, head renewal re-reads the protected monotonic
 trusted-time anchor, the complete ADA2 journal and independent PostgreSQL
-floor before signing a content-preserving successor. Startup attempts the
-same renewal before the readiness barrier, then a hosted worker checks at the
-bounded interval. A successful renewal preserves tree size and both map/log
+floor before signing a content-preserving successor. The hosted worker attempts
+renewal on activation and then checks at the bounded interval, including after
+dependency outages and timeouts. A successful renewal preserves tree size and both map/log
 roots and advances the external floor before replacing local ADA2. Missing,
 stale or reset trusted time, insufficient witness custody, expired network
 authority and floor failures all remain fail-closed. This feature does not
@@ -112,8 +118,11 @@ preflight; it checks Docker `Config.Env` without reporting values.
 Do not enable this candidate in production yet. The PostgreSQL latest-head
 floor is deployed separately from Registry ADA2 and contains the exact signed
 empty head. Its logical dump restored that row byte-for-byte in a temporary
-isolated database. Production startup outage/old-ADA2 rejection and complete
-role recovery have not been demonstrated. V2 current proof publication, client
+isolated database. Host/DI regression tests cover repeated floor outages and
+process recreation with exact retained ADA2; they substitute the database
+transport and are not real PostgreSQL/TLS or Docker recovery evidence.
+Old-ADA2 rejection and complete real-topology role recovery remain separate
+gates. V2 current proof publication, client
 cutover and physical Android↔Windows E2E are also open gates. The client must
 never trust the admission receipt alone as a fresh directory or contact proof.
 

@@ -175,6 +175,9 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             {
                 await authority.RequireReadyAsync(cancellationToken)
                     .ConfigureAwait(false);
+                if (state.ProofEnabled)
+                    await app.Services.GetRequiredService<DeepIdV2DirectoryProofIssuer>()
+                        .RequireReadyAsync(cancellationToken).ConfigureAwait(false);
                 return Results.Ok(new { ok = true });
             }
             catch (OperationCanceledException) when (
@@ -185,10 +188,11 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             catch (Exception exception) when (exception is
                 CryptographicException or InvalidDataException or IOException or
                 InvalidOperationException or PlatformNotSupportedException or
-                UnauthorizedAccessException or NpgsqlException)
+                UnauthorizedAccessException or NpgsqlException or TimeoutException or
+                FormatException or OverflowException or ArgumentException)
             {
-                logger.LogError(exception,
-                    "DID2 directory authority is not ready.");
+                logger.LogWarning("DID2 directory authority is not ready ({Reason}).",
+                    exception.GetType().Name);
                 return Results.Json(new { code = "did2-authority-unavailable" },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }

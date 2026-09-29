@@ -124,12 +124,11 @@ var app = builder.Build();
 #if DEEP_PROTOCOL_DIRECTORY_V1
 if (app.Environment.IsProduction() && deepIdV2DirectoryAuthority.Enabled)
 {
-    var did2Authority = app.Services.GetRequiredService<
+    // Validate composition eagerly, but do not turn a temporary floor/time
+    // outage into a process exit before the renewal worker can start. Every
+    // DID2 operation still validates its own authority; readiness stays 503.
+    _ = app.Services.GetRequiredService<
         Deep.Registry.Api.DirectoryPublication.DeepIdV2DurableGenesisAuthority>();
-    if (deepIdV2DirectoryAuthority.HeadRenewalEnabled)
-        await did2Authority.RenewHeadIfDueAsync(
-            deepIdV2DirectoryAuthority.HeadRenewalLeadSeconds);
-    await did2Authority.RequireReadyAsync();
     _ = app.Services.GetRequiredService<
         Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryProofIssuer>();
 }

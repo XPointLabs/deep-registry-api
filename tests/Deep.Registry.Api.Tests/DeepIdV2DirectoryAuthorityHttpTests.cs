@@ -24,6 +24,78 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2DirectoryAuthorityHttpTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProductionHostSurvivesFloorOutageAndRecoversReadinessWithoutReset(bool timeout)
+    {
+        if (!(OperatingSystem.IsWindows() ||
+              (OperatingSystem.IsLinux() &&
+               System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
+               System.Runtime.InteropServices.Architecture.X64)))
+            return;
+        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        var root = Path.Combine(Path.GetTempPath(), "deep-did2-recovery", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var paths = await ProvisionAsync(root, fixture);
+            var viewPath = Path.Combine(root, "current.xnv1");
+            var proofKey = Path.Combine(root, "proof.key");
+            await File.WriteAllBytesAsync(viewPath, fixture.Snapshot.ExactCurrentXnv1.ToArray());
+            await File.WriteAllBytesAsync(proofKey, Bytes(32, 0x6b));
+            var before = await File.ReadAllBytesAsync(paths.StatePath);
+            var floor = new RecoverableTestFloor(new AccountDirectoryProtectedLkg(paths.Head))
+                { TimeoutFailure = timeout };
+            // Production configuration is validated. Only the database transport
+            // is replaced: this is host/DI evidence, not a real PostgreSQL/TLS gate.
+            var connection = new NpgsqlConnectionStringBuilder
+            {
+                Host = "floor.example", SslMode = SslMode.VerifyFull,
+                RootCertificate = paths.HeadPath
+            }.ConnectionString;
+            for (var restart = 0; restart < 2; restart++)
+            {
+                floor.Unavailable = true;
+                await using var factory = new WebApplicationFactory<Program>()
+                    .WithWebHostBuilder(builder =>
+                    {
+                        builder.UseEnvironment("Production");
+                        Configure(builder, paths, fixture.Network, null, connection);
+                        builder.UseSetting("DeepIdV2DirectoryAuthority:ProductionCutoverAttested", "true");
+                        builder.UseSetting("DeepIdV2DirectoryAuthority:ProofEnabled", "true");
+                        builder.UseSetting("DeepIdV2DirectoryAuthority:HeadRenewalEnabled", "true");
+                        builder.UseSetting("DeepIdV2DirectoryAuthority:CurrentXnv1Path", viewPath);
+                        builder.UseSetting("DeepIdV2DirectoryAuthority:ProofRequestLedgerRootPath",
+                            Path.Combine(root, "proof-nonces"));
+                        builder.UseSetting("DeepIdV2DirectoryAuthority:ProofRequestLedgerIntegrityKeyPath", proofKey);
+                        builder.ConfigureServices(services =>
+                        {
+                            services.RemoveAll<IDeepIdV2DirectoryLatestHeadFloor>();
+                            services.AddSingleton<IDeepIdV2DirectoryLatestHeadFloor>(floor);
+                        });
+                    });
+                using var client = factory.CreateClient();
+                for (var outage = 0; outage < 3; outage++)
+                {
+                    floor.Unavailable = true;
+                    using (var live = await client.GetAsync("/health/live"))
+                        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+                    using (var unavailable = await client.GetAsync(
+                               DeepIdV2DirectoryAuthorityHostingExtensions.ReadinessEndpointPath))
+                        Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+                    floor.Unavailable = false;
+                    using (var ready = await client.GetAsync(
+                               DeepIdV2DirectoryAuthorityHostingExtensions.ReadinessEndpointPath))
+                        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+                }
+                Assert.Equal(before, await File.ReadAllBytesAsync(paths.StatePath));
+                Assert.False(Directory.Exists(Path.Combine(root, "proof-nonces")));
+            }
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Fact]
     public async Task ExternalRegistryAcceptsAndProvesFreshDid2GenesisWhenConfigured()
     {
@@ -189,8 +261,9 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 HttpServiceEndpointPolicy.Production);
             using var admission = new DeepIdV2GenesisAdmissionClient(
                 admissionTransport);
-            using var proofHttp = factory.CreateClient();
-            proofHttp.BaseAddress = new Uri("https://registry.example/");
+            using var recoveryTransport = new ProofOutageHandler(factory.Server.CreateHandler());
+            using var proofHttp = new HttpClient(recoveryTransport)
+                { BaseAddress = new Uri("https://registry.example/") };
             using var proofTransport = new HttpServiceRequestTransport(
                 proofHttp,
                 DeepIdV2DirectoryProofClient.CreateTransportOptions(
@@ -238,6 +311,33 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             Assert.Equal(verified.NextProtectedLkg.CoreHash.ToArray(),
                 (await protectedFloor.RestoreAsync(fixture.Authority, default))
                 .CoreHash.ToArray());
+            // Real local PQ verification and SQLCipher custody; only the
+            // network fault is injected. This is not physical device evidence.
+            var retainedHead = verified.NextProtectedLkg.ExactAdh1.ToArray();
+            foreach (var failure in new[] { 1, 2 })
+            {
+                recoveryTransport.Failure = failure;
+                if (failure == 1)
+                {
+                    var unavailable = await Assert.ThrowsAsync<DeepIdV2DirectoryProofUnavailableException>(
+                        async () => await proof.FetchOwnGenesisAsync(
+                            verified.CurrentCheckpoint!.Binding, fixture.Authority, 1, 2));
+                    Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+                    Assert.Equal(TimeSpan.FromSeconds(10), unavailable.RetryAfter);
+                }
+                else
+                    await Assert.ThrowsAsync<TimeoutException>(async () =>
+                        await proof.FetchOwnGenesisAsync(verified.CurrentCheckpoint!.Binding,
+                            fixture.Authority, 1, 2));
+                Assert.Equal(retainedHead, (await protectedFloor.RestoreAsync(fixture.Authority, default))
+                    .ExactAdh1.ToArray());
+                Assert.Equal(created.PermanentId, (await accounts.GetCurrentAsync())!.PermanentId);
+                recoveryTransport.Failure = 0;
+                var recovered = await proof.FetchOwnGenesisAsync(verified.CurrentCheckpoint!.Binding,
+                    fixture.Authority, 1, 2);
+                Assert.Equal(retainedHead, recovered.NextProtectedLkg.ExactAdh1.ToArray());
+                Assert.NotEqual(verified.ExactDtt1.ToArray(), recovered.ExactDtt1.ToArray());
+            }
             var reopened = new DeepIdV2AccountService(secureStorage,
                 clientRoot, fixture.Network, 1,
                 new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(
@@ -283,7 +383,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var secondProof = new DeepIdV2DirectoryProofClient(
                 secondProofTransport, new IncreasingMonotonicClock(),
                 secondVerifier, secondFloor);
-            await Assert.ThrowsAsync<IOException>(async () =>
+            await Assert.ThrowsAsync<DeepIdV2DirectoryProofUnavailableException>(async () =>
                 await secondAccounts.AdmitAndVerifyGenesisAsync(
                     secondAdmission, secondProof, fixture.Authority));
             var secondProtected = await secondFloor.RestoreAsync(
@@ -948,6 +1048,51 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
         string Witness2Path,
         string TimeStatePath, string LedgerRootPath,
         byte[] Head, byte[] HeadPin, byte[] NetworkPin);
+
+    private sealed class RecoverableTestFloor(AccountDirectoryProtectedLkg expected) :
+        IDeepIdV2DirectoryLatestHeadFloor
+    {
+        internal volatile bool Unavailable;
+        internal bool TimeoutFailure { get; init; }
+
+        public ValueTask RequireCurrentAsync(AccountDirectoryProtectedLkg currentHead,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Unavailable)
+            {
+                if (TimeoutFailure) throw new TimeoutException("The test floor is temporarily unavailable.");
+                throw new IOException("The test floor is temporarily unavailable.");
+            }
+            if (!currentHead.ExactAdh1.Span.SequenceEqual(expected.ExactAdh1.Span))
+                throw new CryptographicException("The test floor refuses rollback or an unexpected head.");
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask AdvanceAsync(AccountDirectoryProtectedLkg expectedHead,
+            AccountDirectoryProtectedLkg nextHead, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Readiness must not advance the independent floor.");
+    }
+
+    private sealed class ProofOutageHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        internal int Failure { get; set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Failure == 2) throw new TimeoutException("The test proof transport is unavailable.");
+            if (Failure == 1)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    { RequestMessage = request };
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(10));
+                return Task.FromResult(response);
+            }
+            return base.SendAsync(request, cancellationToken);
+        }
+    }
 
     private sealed class FixedTimeSource :
         IContactResolveTrustedTimeContextSource

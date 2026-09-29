@@ -54,7 +54,7 @@ internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
             catch (Exception exception) when (exception is
                 CryptographicException or InvalidDataException or IOException or
                 InvalidOperationException or UnauthorizedAccessException or
-                NpgsqlException or PlatformNotSupportedException)
+                NpgsqlException or PlatformNotSupportedException or TimeoutException)
             {
                 // Do not put paths, identifiers or custody details in logs.
                 logger.LogError("DID2 directory head renewal failed closed ({Reason}).",
