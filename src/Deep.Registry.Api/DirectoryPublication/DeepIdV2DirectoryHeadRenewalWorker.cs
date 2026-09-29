@@ -37,6 +37,7 @@ internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
     {
         await Task.Yield();
         using var timer = new PeriodicTimer(interval);
+        var unavailable = false;
         do
         {
             try
@@ -45,6 +46,9 @@ internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
                         stoppingToken).ConfigureAwait(false))
                     logger.LogInformation(
                         "The protected DID2 directory head was renewed.");
+                if (unavailable)
+                    logger.LogInformation("Protected DID2 directory head renewal authority recovered.");
+                unavailable = false;
             }
             catch (OperationCanceledException) when (
                 stoppingToken.IsCancellationRequested)
@@ -58,7 +62,8 @@ internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
                 OperationCanceledException)
             {
                 // Do not put paths, identifiers or custody details in logs.
-                logger.LogError("DID2 directory head renewal failed closed ({Reason}).",
+                unavailable = true;
+                logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory head renewal failed closed ({Reason}).",
                     exception.GetType().Name);
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken)

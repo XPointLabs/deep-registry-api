@@ -17,6 +17,13 @@ retained lower state is not a freshness anchor. Acquisition/floor failures
 make proof readiness unavailable without resetting state. Missing/corrupt
 startup custody is a fatal configuration error, not a transient network failure.
 
+Startup reacquisition and transient independent-floor/time unavailability are
+logged as warnings and still return readiness/proof 503. Invalid cryptographic,
+custody or configuration state remains Error severity. The head-renewal worker
+logs recovery after the next successful protected-authority check. Logs expose
+only the exception type, never its message, source identifiers or custody paths;
+changing severity does not change authority checks, retry budgets or status codes.
+
 `/api/v2/account-directory/history` distributes source-bound DHQ2/DHR2 pages
 from the authenticated journal under the independent PostgreSQL floor. It is
 read-only and is never a freshness capability. Unknown historical sources
