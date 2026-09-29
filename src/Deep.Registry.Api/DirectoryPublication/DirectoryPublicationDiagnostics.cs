@@ -16,5 +16,20 @@ internal static class DirectoryPublicationDiagnostics
         NpgsqlException { IsTransient: true } => LogLevel.Warning,
         _ => LogLevel.Error,
     };
+
+    // Closed diagnostic vocabulary only: never return arbitrary exception
+    // messages, inner exceptions, paths or protocol/request bytes. Severity
+    // and all verification/HTTP outcomes remain independent of this label.
+    internal static string UnavailableReason(Exception error) => error.Message switch
+    {
+        "Production DID2 authority does not cover the trusted-time interval." => "authority-time-coverage",
+        "Production DID2 current head cannot cover a new proof." => "head-time-coverage",
+        "DID2 proof has no usable nonce-bound lifetime." => "proof-lifetime",
+        "The trusted interval cannot identify a DTT1 issuance epoch." => "epoch-interval",
+        "The trusted interval crosses an issuance-epoch or DTS1 policy boundary." => "epoch-boundary",
+        "DID2 renewal authority does not cover protected time." => "renewal-authority-time",
+        "DID2 signed authority cannot cover the renewal interval." => "renewal-lifetime",
+        _ => "unclassified",
+    };
 }
 #endif

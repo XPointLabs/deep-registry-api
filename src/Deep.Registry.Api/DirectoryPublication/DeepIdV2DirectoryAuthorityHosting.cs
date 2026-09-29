@@ -193,8 +193,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 FormatException or OverflowException or ArgumentException or
                 OperationCanceledException)
             {
-                logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory authority is not ready ({Reason}).",
-                    exception.GetType().Name);
+                logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory authority is not ready ({Category}; {Reason}).",
+                    exception.GetType().Name, DirectoryPublicationDiagnostics.UnavailableReason(exception));
                 return Results.Json(new { code = "did2-authority-unavailable" },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
@@ -252,7 +252,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         catch (Exception exception) when (exception is CryptographicException or IOException or InvalidOperationException or
             PlatformNotSupportedException or UnauthorizedAccessException or NpgsqlException or TimeoutException or OperationCanceledException)
         {
-            logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 history authority unavailable ({Reason}).", exception.GetType().Name);
+            logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 history authority unavailable ({Category}; {Reason}).", exception.GetType().Name, DirectoryPublicationDiagnostics.UnavailableReason(exception));
             context.Response.Headers.RetryAfter = "5";
             return Failure(503, "history-authority-unavailable");
         }
@@ -321,7 +321,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             UnauthorizedAccessException or AccountDirectoryProofAuthoringException or
             NpgsqlException)
         {
-            logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory proof authority is unavailable ({Reason}).",exception.GetType().Name);
+            logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory proof authority is unavailable ({Category}; {Reason}).",exception.GetType().Name, DirectoryPublicationDiagnostics.UnavailableReason(exception));
             return Failure(StatusCodes.Status503ServiceUnavailable,
                 "proof-authority-unavailable");
         }
@@ -402,7 +402,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             InvalidOperationException or PlatformNotSupportedException or
             UnauthorizedAccessException or NpgsqlException)
         {
-            logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory authority is unavailable ({Reason}).",exception.GetType().Name);
+            logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory authority is unavailable ({Category}; {Reason}).",exception.GetType().Name, DirectoryPublicationDiagnostics.UnavailableReason(exception));
             return Failure(StatusCodes.Status503ServiceUnavailable,
                 "authority-unavailable");
         }

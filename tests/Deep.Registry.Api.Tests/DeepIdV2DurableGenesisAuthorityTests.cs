@@ -326,7 +326,19 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                     renewed.CurrentHead.Head.CurrentValueMapRoot.ToArray());
                 Assert.Equal(firstHead.AppendLogMerkleRoot.ToArray(),
                     renewed.CurrentHead.Head.AppendLogMerkleRoot.ToArray());
+                // A long outage may leave authentic retained history expired.
+                // It must fail live readiness, then recover only by authoring
+                // a fresh threshold-signed successor under current trusted time.
+                timeSource.UnixTime = renewed.CurrentHead.Head.ValidUntil + 10;
             }
+            var expired = await Assert.ThrowsAsync<CryptographicException>(
+                async () => await authority.RequireReadyAsync());
+            Assert.Equal("head-time-coverage",
+                DirectoryPublicationDiagnostics.UnavailableReason(expired));
+            Assert.True(await authority.RenewHeadIfDueAsync(300));
+            Assert.Equal(3, floor.AdvanceCount);
+            await authority.RequireReadyAsync();
+            Assert.False(await authority.RenewHeadIfDueAsync(300));
             await File.WriteAllBytesAsync(statePath, genesisProtectedState);
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await authority.AdmitAsync(request));

@@ -32,6 +32,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
     public async Task ProductionHostSurvivesFloorOutageAndRecoversReadinessWithoutReset(int failureKind)
     {
         if (!(OperatingSystem.IsWindows() ||
@@ -96,6 +97,18 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 Assert.False(worker.ExecuteTask.IsCompleted);
                 Assert.False(factory.Services.GetRequiredService<IHostApplicationLifetime>()
                     .ApplicationStopping.IsCancellationRequested);
+                if (failureKind != 0)
+                {
+                    // Known transient dependencies retry without a readiness
+                    // request, restart or the normal 60s tick. Bare IO errors
+                    // are intentionally NOT classified as safe transient loss.
+                    var failedAttempts = floor.Attempts;
+                    floor.Unavailable = false;
+                    waited.Restart();
+                    while (floor.Attempts == failedAttempts && waited.Elapsed < TimeSpan.FromSeconds(10))
+                        await Task.Delay(10);
+                    Assert.True(floor.Attempts > failedAttempts);
+                }
                 for (var outage = 0; outage < 3; outage++)
                 {
                     floor.Unavailable = true;
@@ -1087,6 +1100,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             {
                 if (FailureKind == 1) throw new TimeoutException("The test floor is temporarily unavailable.");
                 if (FailureKind == 2) throw new OperationCanceledException("The test dependency canceled independently.");
+                if (FailureKind == 3) throw new NpgsqlException("The test transport is temporarily unavailable.", new IOException());
                 throw new IOException("The test floor is temporarily unavailable.");
             }
             if (!currentHead.ExactAdh1.Span.SequenceEqual(expected.ExactAdh1.Span))

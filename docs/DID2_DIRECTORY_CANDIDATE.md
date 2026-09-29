@@ -20,9 +20,15 @@ startup custody is a fatal configuration error, not a transient network failure.
 Startup reacquisition and transient independent-floor/time unavailability are
 logged as warnings and still return readiness/proof 503. Invalid cryptographic,
 custody or configuration state remains Error severity. The head-renewal worker
-logs recovery after the next successful protected-authority check. Logs expose
-only the exception type, never its message, source identifiers or custody paths;
-changing severity does not change authority checks, retry budgets or status codes.
+logs recovery after the next successful protected-authority check. Known transient
+NTS/floor loss retries after 5/10/20/40 seconds, capped at the configured maintenance
+interval; successful checks restore the normal cadence. Invalid crypto/custody/
+configuration keeps the regular cadence. This avoids waiting the full normal
+interval after startup dependencies return; every retry still verifies fresh time,
+the complete journal, signatures and the independent floor before renewal.
+Logs expose the exception type and a closed static reason code (otherwise
+`unclassified`), never arbitrary messages, source identifiers or custody paths.
+Diagnostic labels do not change authority checks or HTTP status codes.
 
 `/api/v2/account-directory/history` distributes source-bound DHQ2/DHR2 pages
 from the authenticated journal under the independent PostgreSQL floor. It is
