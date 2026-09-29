@@ -270,6 +270,33 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         return DeepIdV2DirectoryProofWireCodec.EncodeResponse(wire, issued);
     }
 
+    internal async ValueTask<byte[]> ReadHistoryAsync(ReadOnlyMemory<byte> exactRequest,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        DeepIdV2DirectoryHistoryWireCodec.ValidateRequest(exactRequest.Span);
+        if (latestHeadFloor is null)
+            throw new InvalidOperationException("Historical distribution requires an independent latest-head floor.");
+        var trusted = await trustedTimeSource.ReadAsync(cancellationToken).ConfigureAwait(false);
+        trusted.Validate();
+        var authority = networkAuthoritySource.Read();
+        using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+        using var store = new DeepIdV2DirectoryStateStore(statePath, integrityKey,
+            networkId, bootstrapSource, authority, verifier, deploymentProfileId, latestHeadFloor);
+        using var lease = store.Open(cancellationToken);
+        var restored = await lease.ReadAsync(checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds),
+            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(authority,
+                exactRequest, restored.Heads, restored.Transitions);
+        }
+        catch (ArgumentException exception) when (exception.ParamName == "exactRequest")
+        {
+            throw new ContactResolveDirectoryTargetNotFoundException();
+        }
+    }
+
     private static ulong ProofExpiry(ContactResolveTrustedTimeContext trusted,
         AccountDirectoryDtt1IssuanceEpoch epoch,
         Deep.Protocol.XPointNetworkV1.VerifiedXPointNetworkAuthority authority,

@@ -1,4 +1,5 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
+using System.Buffers.Binary;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
@@ -22,6 +23,7 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
             var headPath = Path.Combine(root, "genesis.adh1");
             var statePath = Path.Combine(root, "authority.ada2");
             var keyPath = Path.Combine(root, "authority.key");
+            var timeFloorPath = Path.Combine(root, "nts-floor.state");
             var witnessSeedPaths = Enumerable.Range(0, 2)
                 .Select(index => Path.Combine(root,
                     $"witness-{index + 1}.seed"))
@@ -50,7 +52,10 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
                     ["DeepIdV2DirectoryAuthority:StatePath"] = statePath,
                     ["DeepIdV2DirectoryAuthority:IntegrityKeyPath"] = keyPath,
                     ["ContactResolveProductionAuthority:NetworkIdHex"] =
-                        Convert.ToHexString(fixture.Network)
+                        Convert.ToHexString(fixture.Network),
+                    ["ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled"] = "true",
+                    ["ContactResolveProductionAuthority:NtsLowerFloorPath"] = timeFloorPath,
+                    ["ContactResolveProductionAuthority:TrustedTimeIntegrityKeyPath"] = keyPath
             };
             for (var index = 0; index < witnessSeedPaths.Length; index++)
             {
@@ -103,6 +108,11 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
             Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(
                 ["did2-directory", "provision-state"], config));
             var encoded = await File.ReadAllBytesAsync(statePath);
+            var timeFloor = await File.ReadAllBytesAsync(timeFloorPath);
+            var initialTime = DirectoryPublicationProtectedFile.Verify(timeFloor,key);
+            Assert.Equal("NTF1"u8.ToArray(),initialTime[..4].ToArray());
+            Assert.Equal(fixture.Authority.NotBefore,
+                BinaryPrimitives.ReadUInt64BigEndian(initialTime[30..]));
             Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
                 ["did2-directory", "refresh-current-head",
                     "1700000500", "1700004100"], config));
@@ -118,6 +128,11 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
                 ["did2-directory", "provision-state"], config));
             Assert.Equal(encoded, await File.ReadAllBytesAsync(statePath));
             var tamperedHead = head.ToArray();
+            File.Delete(timeFloorPath);
+            Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(
+                ["did2-directory", "provision-state"], config));
+            Assert.False(File.Exists(timeFloorPath));
+            Assert.Equal(encoded, await File.ReadAllBytesAsync(statePath));
             tamperedHead[^1] ^= 1;
             await File.WriteAllBytesAsync(headPath, tamperedHead);
             Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(

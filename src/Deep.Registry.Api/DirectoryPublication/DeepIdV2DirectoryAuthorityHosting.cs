@@ -44,6 +44,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
     internal const string ProofEndpointPath =
         "/api/v2/account-directory/proofs";
     internal const string ReadinessEndpointPath = "/health/did2/ready";
+    internal const string HistoryEndpointPath = "/api/v2/account-directory/history";
 
     internal static DeepIdV2DirectoryAuthorityHostingState
         AddDeepIdV2DirectoryAuthority(this IServiceCollection services,
@@ -202,9 +203,60 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             .WithMetadata(new RequestSizeLimitAttribute(
                 DeepIdV2GenesisAdmissionWireCodec.MaximumRequestLength));
         if (state.ProofEnabled)
+        {
             app.MapPost(ProofEndpointPath, HandleProofAsync)
                 .WithMetadata(new RequestSizeLimitAttribute(
                     DeepIdV2DirectoryProofWireCodec.RequestLength));
+            app.MapPost(HistoryEndpointPath, HandleHistoryAsync)
+                .WithMetadata(new RequestSizeLimitAttribute(
+                    DeepIdV2DirectoryHistoryWireCodec.RequestLength));
+        }
+    }
+
+    private static async Task<IResult> HandleHistoryAsync(HttpContext context,
+        DeepIdV2DirectoryProofIssuer issuer, DeepIdV2IssuanceAdmissionGate admission,
+        ILogger<DeepIdV2DirectoryProofIssuer> logger, CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        if (!context.Request.IsHttps || context.Request.QueryString.HasValue ||
+            !string.Equals(context.Request.Path.Value, HistoryEndpointPath, StringComparison.Ordinal))
+            return Failure(400, "history-endpoint-invalid");
+        var decision = admission.TryAcquire(context.Connection.RemoteIpAddress);
+        if (!decision.IsAccepted)
+        {
+            context.Response.Headers.RetryAfter = decision.RetryAfterSeconds.ToString(
+                System.Globalization.CultureInfo.InvariantCulture);
+            return Failure(429, "history-rate-limited");
+        }
+        if (!string.Equals(context.Request.ContentType,
+                DeepIdV2DirectoryHistoryWireCodec.RequestMediaType, StringComparison.OrdinalIgnoreCase))
+            return Failure(415, "unsupported-media-type");
+        if (context.Request.ContentLength is null) return Failure(411, "content-length-required");
+        if (context.Request.ContentLength != DeepIdV2DirectoryHistoryWireCodec.RequestLength)
+            return Failure(413, "history-request-length-invalid");
+        var bytes = new byte[DeepIdV2DirectoryHistoryWireCodec.RequestLength];
+        try
+        {
+            await context.Request.Body.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+            var trailing = new byte[1];
+            if (await context.Request.Body.ReadAsync(trailing,cancellationToken).ConfigureAwait(false) != 0)
+                return Failure(400,"history-request-invalid");
+            DeepIdV2DirectoryHistoryWireCodec.ValidateRequest(bytes);
+            return Results.Bytes(await issuer.ReadHistoryAsync(bytes, cancellationToken).ConfigureAwait(false),
+                DeepIdV2DirectoryHistoryWireCodec.ResponseMediaType);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (ContactResolveDirectoryTargetNotFoundException) { return Failure(409, "history-source-conflict"); }
+        catch (Exception exception) when (exception is ArgumentException or FormatException or EndOfStreamException)
+        { return Failure(400, "history-request-invalid"); }
+        catch (Exception exception) when (exception is CryptographicException or IOException or InvalidOperationException or
+            PlatformNotSupportedException or UnauthorizedAccessException or NpgsqlException or TimeoutException or OperationCanceledException)
+        {
+            logger.LogWarning("DID2 history authority unavailable ({Reason}).", exception.GetType().Name);
+            context.Response.Headers.RetryAfter = "5";
+            return Failure(503, "history-authority-unavailable");
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     private static async Task<IResult> HandleProofAsync(HttpContext context,
@@ -269,8 +321,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             UnauthorizedAccessException or AccountDirectoryProofAuthoringException or
             NpgsqlException)
         {
-            logger.LogError(exception,
-                "DID2 directory proof authority is unavailable.");
+            logger.LogError("DID2 directory proof authority is unavailable ({Reason}).",exception.GetType().Name);
             return Failure(StatusCodes.Status503ServiceUnavailable,
                 "proof-authority-unavailable");
         }
@@ -351,8 +402,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
             InvalidOperationException or PlatformNotSupportedException or
             UnauthorizedAccessException or NpgsqlException)
         {
-            logger.LogError(exception,
-                "DID2 directory authority is unavailable.");
+            logger.LogError("DID2 directory authority is unavailable ({Reason}).",exception.GetType().Name);
             return Failure(StatusCodes.Status503ServiceUnavailable,
                 "authority-unavailable");
         }

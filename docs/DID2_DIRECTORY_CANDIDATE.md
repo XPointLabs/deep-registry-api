@@ -1,5 +1,31 @@
 # DID2 Registry admission candidate
 
+## Automatic time and historical distribution (2026-09-29)
+
+`ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled` selects the
+owned persistent NTS observer, whose absolute executable path is supplied by
+`NtsObserverExecutablePath`. `NtsLowerFloorPath` is a separate durable,
+integrity-protected lower rollback floor,
+explicitly provisioned file: `did2-directory provision-state` creates its
+initial signed-policy lower bound with CreateNew, alongside first-time ADA2
+custody. That lower bound is not current time. Missing or corrupt floor on
+startup/acquisition rejects, never resets; restore the retained file rather
+than rerunning provisioning on an initialized directory. Signed DTS1 sources, TLS/SPKI,
+authenticated NTP packets, independent source-family quorum and bounded
+monotonic age must all verify. Every process boot reacquires upper time;
+retained lower state is not a freshness anchor. Acquisition/floor failures
+make proof readiness unavailable without resetting state. Missing/corrupt
+startup custody is a fatal configuration error, not a transient network failure.
+
+`/api/v2/account-directory/history` distributes source-bound DHQ2/DHR2 pages
+from the authenticated journal under the independent PostgreSQL floor. It is
+read-only and is never a freshness capability. Unknown historical sources
+return 409; dependency unavailability returns 503 with bounded scheduling
+metadata. See the single normative owner
+[DR-0014](../../docs/survival-program/decisions/DR-0014-directory-historical-catchup.md).
+The real development topology and required explicit first-time floor
+provisioning are in [Deep DEV](../../deep-devops/docs/DEEP_DEV.md).
+
 This is a development/UAT path, not a production release approval. The
 `/api/v2/account-directory/genesis-admissions` route is disabled by default.
 It accepts only DGA1 V2, verifies the exact DID2/DAB2 ML-DSA and classical

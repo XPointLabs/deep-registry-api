@@ -597,6 +597,20 @@ internal static class DeepIdV2DirectoryOperatorCommand
         var genesis = new DeepIdV2DirectoryBootstrapSource(
             options.GenesisHeadPath, headPin).Read(authority);
         var statePath = Path.GetFullPath(options.StatePath);
+        var timeOptions = configuration.GetSection("ContactResolveProductionAuthority")
+            .Get<ContactResolveProductionAuthorityOptions>() ?? new();
+        if (timeOptions.AutomaticTrustedTimeEnabled &&
+            (!Path.IsPathFullyQualified(timeOptions.NtsLowerFloorPath) ||
+             !Path.IsPathFullyQualified(timeOptions.TrustedTimeIntegrityKeyPath) ||
+             allPaths.Select(Path.GetFullPath).Contains(Path.GetFullPath(timeOptions.NtsLowerFloorPath), pathComparer) ||
+             File.Exists(timeOptions.NtsLowerFloorPath)))
+            throw new InvalidDataException("Initial NTS floor must be distinct, absolute and absent.");
+        // Validate online time custody before creating either initial state.
+        if (timeOptions.AutomaticTrustedTimeEnabled)
+        {
+            var validatedKey = DirectoryPublicationProtectedFile.ReadKey(timeOptions.TrustedTimeIntegrityKeyPath);
+            CryptographicOperations.ZeroMemory(validatedKey);
+        }
         var key = DirectoryPublicationProtectedFile.ReadKey(
             options.IntegrityKeyPath);
         try
@@ -624,6 +638,16 @@ internal static class DeepIdV2DirectoryOperatorCommand
                     stream.Flush(true);
                 }
                 File.Move(stagingPath, statePath, overwrite: false);
+                if (timeOptions.AutomaticTrustedTimeEnabled)
+                {
+                    var timeKey = DirectoryPublicationProtectedFile.ReadKey(timeOptions.TrustedTimeIntegrityKeyPath);
+                    try
+                    {
+                        AutomaticNtsTrustedTimeSource.ProvisionFloor(timeOptions.NtsLowerFloorPath,
+                            network, timeKey, authority.NotBefore, cancellationToken);
+                    }
+                    finally { CryptographicOperations.ZeroMemory(timeKey); }
+                }
                 Console.Out.WriteLine(
                     $"DID2 ADA2 state provisioned: {Convert.ToHexString(SHA256.HashData(protectedState))}");
             }

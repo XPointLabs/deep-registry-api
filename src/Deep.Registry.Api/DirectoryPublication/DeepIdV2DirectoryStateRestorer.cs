@@ -108,20 +108,11 @@ internal static class DeepIdV2DirectoryStateRestorer
         if (heads[^1].TreeSize != (ulong)rows.Transitions.Count)
             throw new InvalidDataException(
                 "ADA2 final head does not commit the complete V2 journal.");
-        foreach (var head in heads)
-        {
-            if (head.TreeSize > (ulong)rows.Transitions.Count)
-                throw new InvalidDataException(
-                    "ADA2 intermediate head exceeds the verified V2 journal.");
-            var prefix = checked((int)head.TreeSize);
-            var prefixCheckpoints = checkpoints.Take(prefix).ToArray();
-            var query = prefixCheckpoints.Length == 0
-                ? Enumerable.Repeat((byte)1, 32).ToArray()
-                : prefixCheckpoints[0].Checkpoint.DirectoryLeafKey.ToArray();
-            _ = DeepIdV2DirectoryProofMaterialAuthor.Create(head,
-                rows.Transitions.Take(prefix).ToArray(), prefixCheckpoints,
-                query);
-        }
+        // Check every signed intermediate prefix in one replay; constructing a
+        // complete query proof for every prefix made each restore cubic in the
+        // directory size and starved real proof/time refresh on modest journals.
+        DeepIdV2DirectoryProofMaterialAuthor.ValidateCompleteJournalHistory(
+            heads,rows.Transitions,checkpoints);
         return new DeepIdV2RestoredAuthorityState(heads, rows.Transitions,
             rows.Admissions, checkpoints);
     }

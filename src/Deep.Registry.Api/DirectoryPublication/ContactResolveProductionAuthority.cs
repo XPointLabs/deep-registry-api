@@ -15,6 +15,9 @@ internal sealed class ContactResolveProductionAuthorityOptions
     public string NetworkIdHex { get; set; } = string.Empty;
     public string TrustedTimeStatePath { get; set; } = string.Empty;
     public string TrustedTimeIntegrityKeyPath { get; set; } = string.Empty;
+    public bool AutomaticTrustedTimeEnabled { get; set; }
+    public string NtsObserverExecutablePath { get; set; } = string.Empty;
+    public string NtsLowerFloorPath { get; set; } = string.Empty;
     public string RequestLedgerRootPath { get; set; } = string.Empty;
     public string RequestLedgerIntegrityKeyPath { get; set; } = string.Empty;
     public int RequestLedgerCapacity { get; set; } = 65_536;
@@ -578,7 +581,31 @@ internal static class ContactResolveProductionAuthorityServiceCollectionExtensio
         // read-only and prevents a partial configuration from reaching request-time mutation.
         ValidateProtectedInputs(options, network);
 
-        services.TryAddSingleton<IContactResolveTrustedTimeContextSource>(_ =>
+        if (options.AutomaticTrustedTimeEnabled)
+        {
+            if (!configuration.GetValue<bool>("DeepIdV2DirectoryAuthority:Enabled") ||
+                string.IsNullOrWhiteSpace(options.NtsObserverExecutablePath) ||
+                string.IsNullOrWhiteSpace(options.NtsLowerFloorPath) ||
+                string.Equals(Path.GetFullPath(options.NtsLowerFloorPath),
+                    Path.GetFullPath(options.TrustedTimeStatePath), PathComparison))
+                throw new InvalidOperationException("Automatic NTS needs verified DID2 authority, an observer executable and an independent lower-floor path.");
+            services.TryAddSingleton(provider =>
+            {
+                var key = DirectoryPublicationProtectedFile.ReadKey(options.TrustedTimeIntegrityKeyPath);
+                try
+                {
+                    return new AutomaticNtsTrustedTimeSource(
+                        provider.GetRequiredService<DeepIdV2XPointAuthoritySource>(),
+                        options.NtsObserverExecutablePath, options.NtsLowerFloorPath, network, key,
+                        provider.GetRequiredService<ILogger<AutomaticNtsTrustedTimeSource>>());
+                }
+                finally { CryptographicOperations.ZeroMemory(key); }
+            });
+            services.TryAddSingleton<IContactResolveTrustedTimeContextSource>(provider =>
+                provider.GetRequiredService<AutomaticNtsTrustedTimeSource>());
+            services.AddHostedService(provider => provider.GetRequiredService<AutomaticNtsTrustedTimeSource>());
+        }
+        else services.TryAddSingleton<IContactResolveTrustedTimeContextSource>(_ =>
         {
             var key = DirectoryPublicationProtectedFile.ReadKey(options.TrustedTimeIntegrityKeyPath);
             try
@@ -672,6 +699,8 @@ internal static class ContactResolveProductionAuthorityServiceCollectionExtensio
             options.TrustedTimeStatePath,
             options.TrustedTimeIntegrityKeyPath,
             options.RequestLedgerIntegrityKeyPath,
+            options.AutomaticTrustedTimeEnabled ? options.NtsLowerFloorPath : string.Empty,
+            options.AutomaticTrustedTimeEnabled ? options.NtsObserverExecutablePath : string.Empty,
             configuration["ContactResolveDirectoryArtifacts:IntegrityKeyPath"] ?? string.Empty,
         }.Where(static value => !string.IsNullOrWhiteSpace(value))
          .Select(Path.GetFullPath)

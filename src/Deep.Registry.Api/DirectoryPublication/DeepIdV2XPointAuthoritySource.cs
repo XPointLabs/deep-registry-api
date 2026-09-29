@@ -1,6 +1,7 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Security.Cryptography;
 using Deep.Protocol.XPointNetworkV1;
+using Deep.Protocol.AccountDirectoryV1;
 
 namespace Deep.Registry.Api.DirectoryPublication;
 
@@ -40,7 +41,9 @@ internal sealed class DeepIdV2XPointAuthoritySource
         genesisCoreHash = genesisAuthorityCoreHash.ToArray();
     }
 
-    internal VerifiedXPointNetworkAuthority Read()
+    internal VerifiedXPointNetworkAuthority Read() => ReadWithTimePolicy().Authority;
+
+    internal (VerifiedXPointNetworkAuthority Authority, AccountDirectoryDts1 Policy) ReadWithTimePolicy()
     {
         var authorities = authorityPaths.Select(ReadExact).ToArray();
         var policies = timePolicyPaths.Select(ReadExact).ToArray();
@@ -54,7 +57,7 @@ internal sealed class DeepIdV2XPointAuthoritySource
                     verified.NetworkId.Span, networkId))
                 throw new CryptographicException(
                     "DID2 authority lineage changed networks.");
-            return verified;
+            return (verified, AccountDirectoryDts1Codec.Decode(policies[^1]));
         }
         finally
         {

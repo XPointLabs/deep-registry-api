@@ -25,6 +25,9 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2DirectoryAuthorityHttpTests
 {
+    private static HttpServiceRequestTransport History(HttpClient client) => new(client,
+        DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions(client.BaseAddress!.AbsoluteUri),
+        HttpServiceEndpointPolicy.Production);
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -172,7 +175,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var verifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             using var proof = new DeepIdV2DirectoryProofClient(proofTransport,
-                new ExternalMonotonicClock(), verifier, protectedFloor);
+                History(proofHttp), new ExternalMonotonicClock(), verifier, protectedFloor);
             var verified = await accounts.AdmitAndVerifyGenesisAsync(admission,
                 proof, authority);
             Assert.NotNull(verified.CurrentCheckpoint);
@@ -289,7 +292,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var verifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             using var proof = new DeepIdV2DirectoryProofClient(
-                proofTransport, new IncreasingMonotonicClock(), verifier,
+                proofTransport, History(proofHttp), new IncreasingMonotonicClock(), verifier,
                 protectedFloor);
             var verified = await accounts.AdmitAndVerifyGenesisAsync(
                 admission, proof, fixture.Authority);
@@ -398,7 +401,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var secondVerifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             using var secondProof = new DeepIdV2DirectoryProofClient(
-                secondProofTransport, new IncreasingMonotonicClock(),
+                secondProofTransport, History(secondProofHttp), new IncreasingMonotonicClock(),
                 secondVerifier, secondFloor);
             await Assert.ThrowsAsync<DeepIdV2DirectoryProofUnavailableException>(async () =>
                 await secondAccounts.AdmitAndVerifyGenesisAsync(
@@ -533,7 +536,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var forwardVerifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             using var forwardProof = new DeepIdV2DirectoryProofClient(
-                forwardProofTransport, new IncreasingMonotonicClock(),
+                forwardProofTransport, History(forwardProofHttp), new IncreasingMonotonicClock(),
                 forwardVerifier, secondFloor);
             var secondVerified = await secondAccounts.AdmitAndVerifyGenesisAsync(
                 forwardAdmission, forwardProof, fixture.Authority);
@@ -556,7 +559,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var peerVerifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             using var peerProof = new DeepIdV2DirectoryProofClient(
-                peerProofTransport, new IncreasingMonotonicClock(),
+                peerProofTransport, History(peerProofHttp), new IncreasingMonotonicClock(),
                 peerVerifier, protectedFloor);
             var discovered = await peerProof.FetchByDid2Async(secondDid,
                 fixture.Authority, 1, 2);
@@ -666,7 +669,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             using var thirdVerifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             using var thirdProof = new DeepIdV2DirectoryProofClient(
-                thirdProofTransport, new IncreasingMonotonicClock(),
+                thirdProofTransport, History(thirdProofHttp), new IncreasingMonotonicClock(),
                 thirdVerifier, thirdFloor);
             var thirdVerified = await thirdAccounts.AdmitAndVerifyGenesisAsync(
                 forwardAdmission, thirdProof, fixture.Authority);
