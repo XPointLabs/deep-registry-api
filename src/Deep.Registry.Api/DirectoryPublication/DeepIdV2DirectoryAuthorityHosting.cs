@@ -189,7 +189,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 CryptographicException or InvalidDataException or IOException or
                 InvalidOperationException or PlatformNotSupportedException or
                 UnauthorizedAccessException or NpgsqlException or TimeoutException or
-                FormatException or OverflowException or ArgumentException)
+                FormatException or OverflowException or ArgumentException or
+                OperationCanceledException)
             {
                 logger.LogWarning("DID2 directory authority is not ready ({Reason}).",
                     exception.GetType().Name);

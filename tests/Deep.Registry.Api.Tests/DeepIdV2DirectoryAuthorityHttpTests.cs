@@ -18,6 +18,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Npgsql;
 
 namespace Deep.Registry.Api.Tests;
@@ -25,9 +26,10 @@ namespace Deep.Registry.Api.Tests;
 public sealed class DeepIdV2DirectoryAuthorityHttpTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ProductionHostSurvivesFloorOutageAndRecoversReadinessWithoutReset(bool timeout)
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task ProductionHostSurvivesFloorOutageAndRecoversReadinessWithoutReset(int failureKind)
     {
         if (!(OperatingSystem.IsWindows() ||
               (OperatingSystem.IsLinux() &&
@@ -46,7 +48,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             await File.WriteAllBytesAsync(proofKey, Bytes(32, 0x6b));
             var before = await File.ReadAllBytesAsync(paths.StatePath);
             var floor = new RecoverableTestFloor(new AccountDirectoryProtectedLkg(paths.Head))
-                { TimeoutFailure = timeout };
+                { FailureKind = failureKind };
             // Production configuration is validated. Only the database transport
             // is replaced: this is host/DI evidence, not a real PostgreSQL/TLS gate.
             var connection = new NpgsqlConnectionStringBuilder
@@ -56,6 +58,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             }.ConnectionString;
             for (var restart = 0; restart < 2; restart++)
             {
+                floor.ResetAttempts();
                 floor.Unavailable = true;
                 await using var factory = new WebApplicationFactory<Program>()
                     .WithWebHostBuilder(builder =>
@@ -76,6 +79,20 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                         });
                     });
                 using var client = factory.CreateClient();
+                var worker = factory.Services.GetServices<IHostedService>()
+                    .OfType<DeepIdV2DirectoryHeadRenewalWorker>().Single();
+                var waited = Stopwatch.StartNew();
+                while (floor.Attempts == 0 && waited.Elapsed < TimeSpan.FromSeconds(5))
+                    await Task.Delay(10);
+                Assert.True(floor.Attempts > 0);
+                // The first background attempt must really reach the failed
+                // dependency. TestServer liveness alone cannot prove the worker
+                // survived or that ApplicationStopping was not requested.
+                await Task.Delay(50);
+                Assert.NotNull(worker.ExecuteTask);
+                Assert.False(worker.ExecuteTask.IsCompleted);
+                Assert.False(factory.Services.GetRequiredService<IHostApplicationLifetime>()
+                    .ApplicationStopping.IsCancellationRequested);
                 for (var outage = 0; outage < 3; outage++)
                 {
                     floor.Unavailable = true;
@@ -1053,15 +1070,20 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
         IDeepIdV2DirectoryLatestHeadFloor
     {
         internal volatile bool Unavailable;
-        internal bool TimeoutFailure { get; init; }
+        internal int FailureKind { get; init; }
+        private int attempts;
+        internal int Attempts => Volatile.Read(ref attempts);
+        internal void ResetAttempts() => Interlocked.Exchange(ref attempts, 0);
 
         public ValueTask RequireCurrentAsync(AccountDirectoryProtectedLkg currentHead,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref attempts);
             if (Unavailable)
             {
-                if (TimeoutFailure) throw new TimeoutException("The test floor is temporarily unavailable.");
+                if (FailureKind == 1) throw new TimeoutException("The test floor is temporarily unavailable.");
+                if (FailureKind == 2) throw new OperationCanceledException("The test dependency canceled independently.");
                 throw new IOException("The test floor is temporarily unavailable.");
             }
             if (!currentHead.ExactAdh1.Span.SequenceEqual(expected.ExactAdh1.Span))

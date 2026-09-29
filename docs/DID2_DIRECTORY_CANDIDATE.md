@@ -99,8 +99,11 @@ When explicitly enabled, head renewal re-reads the protected monotonic
 trusted-time anchor, the complete ADA2 journal and independent PostgreSQL
 floor before signing a content-preserving successor. The hosted worker attempts
 renewal on activation and then checks at the bounded interval, including after
-dependency outages and timeouts. A successful renewal preserves tree size and both map/log
-roots and advances the external floor before replacing local ADA2. Missing,
+dependency outages, timeouts and dependency-owned cancellation while the host
+token is not canceled. Host shutdown still cancels promptly. Readiness treats
+that dependency-owned cancellation as unavailable, not a fresh capability.
+A successful renewal preserves tree size and both map/log roots and advances
+the external floor before replacing local ADA2. Missing,
 stale or reset trusted time, insufficient witness custody, expired network
 authority and floor failures all remain fail-closed. This feature does not
 provision or rotate a trusted-time anchor, and must not be presented as a
