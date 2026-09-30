@@ -73,25 +73,35 @@ jobs:
           ref: ${{ github.ref_name }}
           token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
           path: deep-protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/deep-devops
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
+          path: deep-devops
       - name: Record protocol revision
         id: protocol
-        run: echo "sha=$(git -C deep-protocol rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git -C deep-protocol rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "devops_sha=$(git -C deep-devops rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
+          password: ${{ secrets.XPOINTLABS_CI_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: ./deep-registry-api
           file: ./deep-registry-api/Dockerfile
           build-contexts: |
             deep_protocol=./deep-protocol
+            deep_devops=./deep-devops
           platforms: linux/amd64
           push: true
           build-args: |
             DEEP_PROTOCOL_REVISION=${{ steps.protocol.outputs.sha }}
+            DEEP_DEVOPS_REVISION=${{ steps.protocol.outputs.devops_sha }}
           tags: ghcr.io/xpointlabs/deep-registry-api:rc-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/XPointLabs/deep-registry-api

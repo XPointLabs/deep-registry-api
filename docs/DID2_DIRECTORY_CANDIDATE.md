@@ -2,6 +2,21 @@
 
 ## Automatic time and historical distribution (2026-09-29)
 
+The candidate Registry Dockerfile packages the reviewed DevOps NTS observer
+at `/usr/local/bin/deep-nts-observer` for the actual `TARGETARCH` (amd64 or
+arm64), using the pinned Go builder, locked modules and observer unit tests.
+Build with both named contexts, `deep_protocol` and `deep_devops`, and record
+both exact revisions in `DEEP_PROTOCOL_REVISION`/`DEEP_DEVOPS_REVISION` labels.
+The candidate publishers do this from their checked-out source graph; no
+prebuilt local helper is copied. The helper is an operational process, not a
+new dependency in Protocol's exact-three .NET assembly graph.
+
+Image presence does not activate automatic time, create an NTS floor or
+restore proof readiness. Upgrading an existing manual-anchor deployment must
+preserve its authority, ADA2, independent head floor, nonce ledger and custody.
+Do not rerun `provision-state` on initialized ADA2 to obtain a missing NTS
+floor, and do not change signed policy or trust OS/HTTP time to pass readiness.
+
 `ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled` selects the
 owned persistent NTS observer, whose absolute executable path is supplied by
 `NtsObserverExecutablePath`. `NtsLowerFloorPath` is a separate durable,
