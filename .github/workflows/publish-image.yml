@@ -53,7 +53,8 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          # Match the existing candidate publisher's package credential.
+          password: ${{ secrets.XPOINTLABS_CI_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: ./deep-registry-api

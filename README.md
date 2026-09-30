@@ -5,6 +5,14 @@ transport metadata. XPoint stake/reward semantics and active node membership
 remain delegated to the staking contracts/backend; this service stores
 registration extension fields that are not part of the Deep-native protocol contracts.
 
+## Candidate image publication
+
+The manual **Publish registry image** workflow uses the existing repository
+secret `XPOINTLABS_CI_TOKEN` for GHCR login, matching the push-triggered candidate
+publisher. That credential needs package access and `write:packages`; checkout
+success is not evidence of package write access. The manual workflow publishes
+only its explicit candidate tag, not `latest` or a GitHub Release.
+
 ## Agent Specs
 
 - Start with [`AGENTS.md`](AGENTS.md) before changing registry lifecycle, projections, reconciliation, or API shape.
