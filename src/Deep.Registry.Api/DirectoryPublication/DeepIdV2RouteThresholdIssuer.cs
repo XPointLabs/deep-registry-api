@@ -56,6 +56,14 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                 null, time, ct).ConfigureAwait(false);
             await DeepIdV2ContactRouteVerifier.VerifyAdvertisementAsync(recipient,
                 network, authority, request.ExactXra1, time, ct).ConfigureAwait(false);
+            VerifiedDeepIdV2ContactRoutePredecessor? predecessor = null;
+            if (request.HasPredecessor)
+            {
+                predecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, network, authority,
+                    request.ExactPredecessorXir1V2, request.ExactPredecessorRouteClosure, time, ct).ConfigureAwait(false);
+                await DeepIdV2ContactRouteVerifier.VerifyAdvertisementSuccessorAsync(recipient, network, authority,
+                    predecessor, request.ExactXra1, time, ct).ConfigureAwait(false);
+            }
 
             var encoded = await journal.GetOrIssueAsync(request, async token =>
             {
@@ -71,9 +79,11 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                     network.MaximumRecordExpiryUnixSeconds,
                     current.Authorization.Record.ExpiresAtUnixSeconds }.Min();
                 var signers = await custody.GetRouteSignersAsync(authority, token).ConfigureAwait(false);
-                var candidate = await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(current,
+                var candidate = predecessor is null ? await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(current,
                     network, authority, request.ExactXra1, signers, issued, expires,
-                    time, token).ConfigureAwait(false);
+                    time, token).ConfigureAwait(false) :
+                    await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(current, network, authority,
+                        predecessor, request.ExactXra1, signers, expires, time, token).ConfigureAwait(false);
                 await RequireSourcesCurrentAsync(freshness, frame, raw.ExactViewChain[^1], authority, token).ConfigureAwait(false);
                 return ContactRouteAuthorityWireCodec.EncodeResponse(request,
                     new ContactRouteAuthorityWireResponse(request.NetworkId.Span,

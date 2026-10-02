@@ -105,13 +105,13 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
     private async ValueTask<(long Count, long Maximum)> LockNetworkAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand("SELECT entry_count, maximum_entries, response_envelope_version, generation_fence_version " +
+        await using var command = new NpgsqlCommand("SELECT entry_count, maximum_entries, response_envelope_version, generation_fence_version, request_envelope_version " +
             "FROM deep_did2_route_journal_network WHERE network_id = $1 FOR UPDATE", connection, transaction);
         Add(command, network);
         NpgsqlDataReader opened;
         try { opened = await command.ExecuteReaderAsync(ct).ConfigureAwait(false); }
         catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UndefinedColumn)
-        { throw new InvalidDataException("Route journal response/lineage provisioning is incomplete.", error); }
+        { throw new InvalidDataException("Route journal response/lineage/request provisioning is incomplete.", error); }
         await using var reader = opened;
         if (!await reader.ReadAsync(ct).ConfigureAwait(false))
             throw new InvalidDataException("Route journal network is not provisioned.");
@@ -120,6 +120,8 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
             throw new InvalidDataException("Route journal response generation is not provisioned.");
         if (reader.GetInt16(3) != 1)
             throw new InvalidDataException("Route journal lineage fencing is not provisioned.");
+        if (reader.GetInt16(4) != ContactRouteAuthorityWireCodec.RequestVersion)
+            throw new InvalidDataException("Route journal request generation is not provisioned.");
         if (maximum is < 1 or > 1_048_576 || count < 0 || count > maximum)
             throw new InvalidDataException("Route journal capacity is corrupt.");
         return (count, maximum);
@@ -128,7 +130,7 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
     private async ValueTask RequireGenerationAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         byte[] lookup, byte[] lineage, byte[] generation, byte[] expected, CancellationToken ct)
     {
-        // Canonical request V2: lookup at zero-based 56; XRA starts at 601,
+        // Canonical request V3 preserves the prefix: lookup at zero-based 56; XRA starts at 601,
         // its fixed field 2 at 44 and field 3 at 84. SQL bytea offsets are 1-based.
         // The operator's unique expression index covers existing exact rows too;
         // no runtime backfill, old-response reader or caller-provided generation key.
@@ -158,7 +160,7 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
         var request = reader.GetFieldValue<byte[]>(0);
         var response = reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1);
-        if (request.Length != ContactRouteAuthorityWireCodec.RequestBytes ||
+        if (request.Length is < ContactRouteAuthorityWireCodec.MinimumRequestBytes or > ContactRouteAuthorityWireCodec.MaximumRequestBytes ||
             response is not null && (response.Length < ContactRouteAuthorityWireCodec.MinimumResponseBytes ||
                 response.Length > ContactRouteAuthorityWireCodec.MaximumResponseBytes))
             throw new InvalidDataException("Route journal row is malformed.");

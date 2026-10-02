@@ -6,18 +6,20 @@ CREATE TABLE deep_did2_route_journal_network (
     maximum_entries bigint NOT NULL CHECK (maximum_entries BETWEEN 1 AND 1048576),
     response_envelope_version smallint NOT NULL DEFAULT 3 CHECK (response_envelope_version = 3),
     generation_fence_version smallint NOT NULL DEFAULT 1 CHECK (generation_fence_version = 1),
+    request_envelope_version smallint NOT NULL DEFAULT 3 CHECK (request_envelope_version = 3),
     CHECK (entry_count <= maximum_entries)
 );
 CREATE TABLE deep_did2_route_threshold_journal (
     network_id bytea NOT NULL REFERENCES deep_did2_route_journal_network(network_id),
     request_nonce bytea NOT NULL CHECK (octet_length(request_nonce) = 32),
-    exact_request bytea NOT NULL CHECK (octet_length(exact_request) = 1151),
+    -- Retired opaque requests remain auditable; no runtime V2 reader.
+    exact_request bytea NOT NULL CHECK (octet_length(exact_request) BETWEEN 1151 AND 25065),
     -- The lower storage bound preserves retired opaque audit rows; runtime
     -- accepts only current V3 responses, never an old V2 reader.
     exact_response bytea CHECK (octet_length(exact_response) BETWEEN 2151 AND 15179),
     PRIMARY KEY (network_id, request_nonce)
 );
--- Canonical request V2: account lookup, XRA1 field 2 (stable advertisement ID),
+-- Canonical request V3 preserves the V2 prefix: account lookup, XRA1 field 2 (stable advertisement ID),
 -- field 3 (unsigned generation bytes). PostgreSQL bytea offsets are 1-based.
 CREATE UNIQUE INDEX deep_did2_route_generation_winner ON deep_did2_route_threshold_journal
     (network_id, (substring(exact_request FROM 57 FOR 32)),

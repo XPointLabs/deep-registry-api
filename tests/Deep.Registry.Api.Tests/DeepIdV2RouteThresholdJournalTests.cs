@@ -1,6 +1,7 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Buffers.Binary;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 using Deep.Registry.Api.DirectoryPublication;
 using Npgsql;
 
@@ -104,7 +105,9 @@ public sealed class DeepIdV2RouteThresholdJournalTests
             await setup.OpenAsync();
             var sql = await File.ReadAllTextAsync(sqlPath);
             if (upgradeExisting) sql = sql.Replace("    response_envelope_version smallint NOT NULL DEFAULT 3 CHECK (response_envelope_version = 3),", "")
-                .Replace("BETWEEN 2151 AND 15179", "BETWEEN 2151 AND 11079");
+                .Replace("    request_envelope_version smallint NOT NULL DEFAULT 3 CHECK (request_envelope_version = 3),", "")
+                .Replace("BETWEEN 2151 AND 15179", "BETWEEN 2151 AND 11079")
+                .Replace("octet_length(exact_request) BETWEEN 1151 AND 25065", "octet_length(exact_request) = 1151");
             await using (var ddl = new NpgsqlCommand(sql, setup))
                 await ddl.ExecuteNonQueryAsync();
             if (upgradeExisting)
@@ -137,7 +140,10 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 await Assert.ThrowsAsync<InvalidDataException>(async () => await journal.GetOrIssueAsync(request, Issue, default));
                 Assert.Equal(0, calls);
                 var retired = WithLineage(request, 0x60, 0xc1);
-                var retiredRequest = ContactRouteAuthorityWireCodec.EncodeRequest(retired);
+                // Opaque retired audit bytes, never a positive V2 reader.
+                var retiredRequest = ContactRouteAuthorityWireCodec.EncodeRequest(retired)[..ContactRouteAuthorityWireCodec.RequestPrefixBytes];
+                BinaryPrimitives.WriteUInt16BigEndian(retiredRequest, 2);
+                BinaryPrimitives.WriteUInt32BigEndian(retiredRequest.AsSpan(4), checked((uint)retiredRequest.Length));
                 var current = ContactRouteAuthorityWireCodec.EncodeResponse(retired,
                     new(network, retired.RequestNonce.Span, records.Pms, records.Xrc, records.Xss,
                         ContactRouteAuthorityHttpTests.IssuanceHead(network)));
@@ -163,6 +169,10 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 Assert.Equal(0, calls);
                 var fence = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-generation-fence.sql"));
                 await using (var ddl = new NpgsqlCommand(fence, setup)) await ddl.ExecuteNonQueryAsync();
+                await Assert.ThrowsAsync<InvalidDataException>(async () => await journal.GetOrIssueAsync(request, Issue, default));
+                Assert.Equal(0, calls);
+                var requestUpgrade = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-successor-request.sql"));
+                await using (var ddl = new NpgsqlCommand(requestUpgrade, setup)) await ddl.ExecuteNonQueryAsync();
                 await using (var retained = new NpgsqlCommand("SELECT exact_request, exact_response FROM deep_did2_route_threshold_journal WHERE request_nonce=$1", setup))
                 {
                     retained.Parameters.Add(new() { Value = retired.RequestNonce.ToArray() });
@@ -170,7 +180,7 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                     Assert.Equal(retiredRequest, reader.GetFieldValue<byte[]>(0)); Assert.Equal(retiredResponse, reader.GetFieldValue<byte[]>(1));
                 }
                 var rejected = await Record.ExceptionAsync(async () => await journal.GetOrIssueAsync(retired, Issue, default));
-                Assert.True(rejected is InvalidDataException or FormatException);
+                Assert.True(rejected is ContactRouteAuthorityRejectedException);
                 Assert.Equal(0, calls);
                 await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network", setup);
                 Assert.Equal(1L, await count.ExecuteScalarAsync());
@@ -232,7 +242,8 @@ public sealed class DeepIdV2RouteThresholdJournalTests
     private static ContactRouteAuthorityWireRequest WithNonce(ContactRouteAuthorityWireRequest request, byte value) =>
         new(request.NetworkId.Span, Enumerable.Repeat(value, 32).ToArray(),
             request.DirectoryLookupKey.Span, request.MinimumAdh1Generation,
-            request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span, request.ExactXra1.Span);
+            request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span, request.ExactXra1.Span,
+            request.ExactPredecessorXir1V2.Span, request.ExactPredecessorRouteClosure.Span);
 
     private static ContactRouteAuthorityWireRequest WithLineage(ContactRouteAuthorityWireRequest request, byte seed, byte nonce) =>
         WithNonce(ContactRouteAuthorityHttpTests.Request(request.NetworkId.ToArray(),
@@ -245,9 +256,19 @@ public sealed class DeepIdV2RouteThresholdJournalTests
         var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, generation);
         fields[2] = bytes; fields[3] = Enumerable.Repeat((byte)0x71, 32).ToArray();
         var xra = ContactCodecValidation.AuthorRecord("XRA1", fields);
+        var artifacts = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(request.NetworkId.ToArray(), 0x50);
+        var prior = ContactCodec.Decode("XRA1", artifacts.Xra);
+        var dcaReference = new byte[38]; "DCA1"u8.CopyTo(dcaReference);
+        BinaryPrimitives.WriteUInt16BigEndian(dcaReference.AsSpan(4), 2); dcaReference.AsSpan(6).Fill(0x81);
+        var invite = DeepIdV2InviteRendezvousCodec.AuthorForValidation([
+            request.NetworkId, Enumerable.Repeat((byte)0x82, 32).ToArray(), new byte[8], new byte[32],
+            prior.Field(5), prior.Field(6), prior.Field(10), prior.Field(11), new byte[] { 1 }, new byte[4],
+            new byte[] { 0, 1 }, prior.Field(9), prior.Field(12), prior.Field(13), prior.Field(15), dcaReference,
+            Enumerable.Repeat((byte)0x83, 64).ToArray(), ContactCodec.ArtifactReference("XRA1", prior).CanonicalBytes]);
         return WithNonce(new(request.NetworkId.Span, request.RequestNonce.Span,
             request.DirectoryLookupKey.Span, request.MinimumAdh1Generation,
-            request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span, xra.CanonicalBytes.Span), nonce);
+            request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span, xra.CanonicalBytes.Span,
+            invite.CanonicalBytes.Span, artifacts.Closure), nonce);
     }
 }
 #endif

@@ -183,7 +183,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                     Assert.NotNull(owned);
                     owned.Use(bytes =>
                     {
-                        Assert.Equal((byte)6, bytes[0]);
+                        Assert.Equal((byte)7, bytes[0]);
                         Assert.Equal(crashMode == 1 ? (byte)1 : (byte)2,
                             bytes[ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32]);
                         return true;
@@ -365,9 +365,93 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             { pending.Parameters.Add(new() { Value = changedViewRequest.RequestNonce.ToArray() }); Assert.Equal(true, await pending.ExecuteScalarAsync()); }
             await File.WriteAllBytesAsync(viewPath, operational.ExactXnv1.ToArray());
             Assert.NotEmpty((await restarted.IssueAsync(changedViewRequest, default)).ExactXrc1.ToArray());
+
+            // Connected DR77 renewal: a genuinely device-signed short route
+            // expires, then the same PQ account independently proves current
+            // authority and carries its exact authenticated history over HTTP.
+            // This fixture does NOT claim protected successor adoption/device E2E.
+            var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var initial = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            var currentCheckpoint = initial.Proof.CurrentCheckpoint!;
+            var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
+                currentCheckpoint.Binding, currentCheckpoint.Directory);
+            var recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(initial.Proof, dca, clock.Boot, clock.Sample);
+            using var device = await new ProtectedDeepIdV2GenesisDeviceSecretsStore(storage, network,
+                currentCheckpoint.Directory.Record.DeepAccountId.Span).ReadVerifiedAsync(
+                    currentCheckpoint.Binding.Identity.ActiveDevices.Single(), default);
+            var routeTime = new OnionTrustedTimeAuthority(clock);
+            var expiry = initial.Proof.TrustedUpperUnixSeconds + 20;
+            var shortAdvertisement = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementAsync(recipient, initial.Network,
+                initial.Authority, device!, 100, Bytes(32, 0x91), Bytes(32, 0x92), PublicKey(0x93),
+                initial.Proof.TrustedLowerUnixSeconds, expiry, routeTime);
+            var shortRequest = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0x94), initial.Proof.QueriedDirectoryLeafKey.Span,
+                initial.Proof.NextProtectedLkg.LogGeneration, initial.Proof.NextProtectedLkg.CoreHash.Span,
+                staged.ExactDca1.Span, shortAdvertisement.CanonicalBytes.Span);
+            var shortResponse = await issuer.IssueAsync(shortRequest, default);
+            var shortIssuance = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, initial.Network,
+                initial.Authority, shortRequest, Threshold(shortResponse), shortResponse.ExactIssuanceAdh1, routeTime);
+            var shortRoute = await DeepIdV2ContactRouteAuthor.CompleteRetainedGenesisAsync(recipient, initial.Network,
+                initial.Authority, device!, shortIssuance, 2, routeTime);
+            clock.Sample += 40; clock.UnixTime += 40;
+            var renewed = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(renewed.Proof, dca, clock.Boot, clock.Sample);
+            await Assert.ThrowsAsync<CryptographicException>(async () => await shortRoute.EnsureCurrentAsync());
+            var predecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, renewed.Network,
+                renewed.Authority, shortRoute.ExactXir1V2, shortRoute.ExactRouteClosure, routeTime);
+            var successorAdvertisement = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(recipient, renewed.Network,
+                renewed.Authority, device!, shortAdvertisement.CanonicalBytes, Bytes(32, 0x95), Bytes(32, 0x96),
+                PublicKey(0x97), renewed.Proof.TrustedUpperUnixSeconds + 40, routeTime);
+            var successorRequest = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0x98), renewed.Proof.QueriedDirectoryLeafKey.Span,
+                renewed.Proof.NextProtectedLkg.LogGeneration, renewed.Proof.NextProtectedLkg.CoreHash.Span,
+                staged.ExactDca1.Span, successorAdvertisement.CanonicalBytes.Span,
+                predecessor.ExactXir1V2.Span, predecessor.ExactRouteClosure.Span);
+            var exactSuccessor = ContactRouteAuthorityWireCodec.EncodeRequest(successorRequest);
+            Assert.True(exactSuccessor.Length > ContactRouteAuthorityWireCodec.MinimumRequestBytes);
+            var beforeHostile = countedCustody.Calls;
+            // A parsed full predecessor with one forged issuer signature must
+            // fail before durable reservation or custody callbacks.
+            var forgedInvite = predecessor.ExactXir1V2.ToArray();
+            var cursor = 12;
+            while (System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(forgedInvite.AsSpan(cursor)) != 17)
+                cursor += 8 + checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(forgedInvite.AsSpan(cursor + 4)));
+            forgedInvite[cursor + 8] ^= 1;
+            var forgedRequest = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0x99), successorRequest.DirectoryLookupKey.Span,
+                successorRequest.MinimumAdh1Generation, successorRequest.MinimumAdh1CoreHash.Span, staged.ExactDca1.Span,
+                successorAdvertisement.CanonicalBytes.Span, forgedInvite, predecessor.ExactRouteClosure.Span);
+            await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () => await issuer.IssueAsync(forgedRequest, default));
+            Assert.Equal(beforeHostile, countedCustody.Calls);
+            await using (var missing = new NpgsqlCommand("SELECT count(*) FROM deep_did2_route_threshold_journal WHERE request_nonce=$1", db))
+            { missing.Parameters.Add(new() { Value = forgedRequest.RequestNonce.ToArray() }); Assert.Equal(0L, await missing.ExecuteScalarAsync()); }
+
+            admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
+            var successorExchange = new RouteHttpExchange(client) { LoseFirstResponse = true };
+            await Assert.ThrowsAsync<IOException>(async () => await successorExchange.FetchAsync(successorRequest, recipient,
+                renewed.Network, renewed.Authority, routeTime, null!, default));
+            var winner = await successorExchange.FetchAsync(successorRequest, recipient, renewed.Network,
+                renewed.Authority, routeTime, null!, default);
+            Assert.Equal(exactSuccessor, ContactRouteAuthorityWireCodec.EncodeRequest(successorExchange.Request!));
+            var issuance = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, renewed.Network,
+                renewed.Authority, successorRequest, Threshold(winner), winner.ExactIssuanceAdh1, routeTime);
+            var successorRoute = await DeepIdV2ContactRouteAuthor.CompleteRetainedSuccessorAsync(recipient, renewed.Network,
+                renewed.Authority, device!, predecessor, issuance, 2, routeTime);
+            await successorRoute.EnsureCurrentAsync();
+            Assert.Equal(1UL, System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(successorRoute.Route.Route.Field(3).Span));
+            Assert.Equal(shortRoute.Route.Route.CoreHash.ToArray(), successorRoute.Route.Route.Field(4).ToArray());
+            Assert.Equal(shortRoute.Route.Route.Field(10).ToArray(), successorRoute.Route.Route.Field(10).ToArray());
+            Assert.Equal(shortRoute.Invite.Field(2).ToArray(), successorRoute.Invite.Field(2).ToArray());
+            Assert.Equal(beforeHostile + 1, countedCustody.Calls);
+            var competingSuccessor = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0x9a), successorRequest.DirectoryLookupKey.Span,
+                successorRequest.MinimumAdh1Generation, successorRequest.MinimumAdh1CoreHash.Span, successorRequest.ExactDca1.Span,
+                successorRequest.ExactXra1.Span, predecessor.ExactXir1V2.Span, predecessor.ExactRouteClosure.Span);
+            await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () => await restarted.IssueAsync(competingSuccessor, default));
+            Assert.Equal(beforeHostile + 1, countedCustody.Calls);
+
             clock.UnixTime = 1_600; clock.Sample = 600;
             await Assert.ThrowsAnyAsync<CryptographicException>(async () => await restarted.IssueAsync(exchange.Request!, default));
             await Assert.ThrowsAnyAsync<CryptographicException>(async () => await publicationRestart.IssueAsync(publicationExchange.Request!, default));
+
+            static ParsedDeepIdV2RouteThreshold Threshold(ContactRouteAuthorityWireResponse response) =>
+                new(response.ExactPms2.Span, response.ExactXrc1.Span, response.ExactXss1.Span);
         }
         finally
         {

@@ -98,7 +98,7 @@ internal static class ContactRouteAuthorityHostingExtensions
                 CancellationToken cancellationToken) =>
                 HandleAsync(context, issuer, admission, state, cancellationToken))
             .WithMetadata(new RequestSizeLimitAttribute(
-                ContactRouteAuthorityWireCodec.RequestBytes));
+                ContactRouteAuthorityWireCodec.MaximumRequestBytes));
     }
 
     private static async Task<IResult> HandleAsync(
@@ -133,12 +133,12 @@ internal static class ContactRouteAuthorityHostingExtensions
             return Empty(context.Response, StatusCodes.Status415UnsupportedMediaType);
         if (context.Request.ContentLength is null)
             return Empty(context.Response, StatusCodes.Status411LengthRequired);
-        if (context.Request.ContentLength > ContactRouteAuthorityWireCodec.RequestBytes)
+        if (context.Request.ContentLength > ContactRouteAuthorityWireCodec.MaximumRequestBytes)
             return Empty(context.Response, StatusCodes.Status413PayloadTooLarge);
-        if (context.Request.ContentLength != ContactRouteAuthorityWireCodec.RequestBytes)
+        if (context.Request.ContentLength < ContactRouteAuthorityWireCodec.MinimumRequestBytes)
             return Empty(context.Response, StatusCodes.Status400BadRequest);
         var encoded = GC.AllocateUninitializedArray<byte>(
-            ContactRouteAuthorityWireCodec.RequestBytes);
+            checked((int)context.Request.ContentLength.Value));
         try
         {
             await context.Request.Body.ReadExactlyAsync(encoded, ct)

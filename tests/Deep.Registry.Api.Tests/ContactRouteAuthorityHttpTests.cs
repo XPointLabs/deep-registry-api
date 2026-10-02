@@ -32,7 +32,7 @@ public sealed class ContactRouteAuthorityHttpTests
         var response = new ContactRouteAuthorityWireResponse(network, request.RequestNonce.Span,
             artifacts.Pms, artifacts.Xrc, artifacts.Xss, head);
         var exact = ContactRouteAuthorityWireCodec.EncodeResponse(request, response);
-        Assert.Equal(2, BinaryPrimitives.ReadUInt16BigEndian(ContactRouteAuthorityWireCodec.EncodeRequest(request)));
+        Assert.Equal(3, BinaryPrimitives.ReadUInt16BigEndian(ContactRouteAuthorityWireCodec.EncodeRequest(request)));
         Assert.Equal(3, BinaryPrimitives.ReadUInt16BigEndian(exact));
         Assert.Equal(head, ContactRouteAuthorityWireCodec.DecodeResponse(request, exact).ExactIssuanceAdh1.ToArray());
         Array.Clear(head);
@@ -132,7 +132,7 @@ public sealed class ContactRouteAuthorityHttpTests
     public void ActualNodeSignatureBindsBothTargetsAndExactWindow(ContactCoordinationTarget target)
     {
         var network = Bytes(16, 0x11);
-        var body = Bytes(target == ContactCoordinationTarget.Route ? ContactRouteAuthorityWireCodec.RequestBytes :
+        var body = Bytes(target == ContactCoordinationTarget.Route ? ContactRouteAuthorityWireCodec.MinimumRequestBytes :
             ContactPublicationAuthorityWireCodec.MinimumRequestBytes, 0x22);
         var now = DateTimeOffset.FromUnixTimeMilliseconds(1_000_000);
         using var message = new HttpRequestMessage();
@@ -156,6 +156,10 @@ public sealed class ContactRouteAuthorityHttpTests
     [InlineData("old-path", 404)]
     [InlineData("media", 415)]
     [InlineData("v1", 400)]
+    [InlineData("v2", 400)]
+    [InlineData("old-media", 415)]
+    [InlineData("prior-size", 400)]
+    [InlineData("missing-prior", 400)]
     [InlineData("flags", 400)]
     [InlineData("oversize", 413)]
     [InlineData("trailing", 400)]
@@ -173,15 +177,20 @@ public sealed class ContactRouteAuthorityHttpTests
         if (mutation == "query") uri += "?extra=1";
         if (mutation == "old-path") uri = uri.Replace("/v2/", "/v1/", StringComparison.Ordinal);
         if (mutation == "v1") bytes[1] = 1;
+        if (mutation == "v2") bytes[1] = 2;
+        if (mutation == "prior-size") bytes.AsSpan(ContactRouteAuthorityWireCodec.RequestPrefixBytes, 4).Fill(255);
+        if (mutation == "missing-prior") { bytes[692] = 1; bytes.AsSpan(701, 32).Fill(1); }
         if (mutation == "flags") bytes[3] = 1;
-        if (mutation == "oversize" || mutation == "trailing") bytes = [.. bytes, 1];
+        if (mutation == "oversize") bytes = new byte[ContactRouteAuthorityWireCodec.MaximumRequestBytes + 1];
+        if (mutation == "trailing") bytes = [.. bytes, 1];
         if (mutation == "old-dca") bytes[128 + 5] = 1;
         using var message = new HttpRequestMessage(HttpMethod.Post, uri) { Content = new ByteArrayContent(bytes) };
         message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(mutation == "media" ?
-            "application/octet-stream" : ContactRouteAuthorityWireCodec.RequestMediaType);
-        if (mutation == "trailing") message.Content.Headers.ContentLength = ContactRouteAuthorityWireCodec.RequestBytes;
+            "application/octet-stream" : mutation == "old-media" ?
+            "application/vnd.deep.contact-route-authority-request.v2+octet-stream" : ContactRouteAuthorityWireCodec.RequestMediaType);
+        if (mutation == "trailing") message.Content.Headers.ContentLength = ContactRouteAuthorityWireCodec.MinimumRequestBytes;
         PeerAuthenticationFixture.Authenticate(message, network, ContactCoordinationTarget.Route,
-            bytes.Length == ContactRouteAuthorityWireCodec.RequestBytes ? bytes : bytes[..ContactRouteAuthorityWireCodec.RequestBytes]);
+            bytes.Length <= ContactRouteAuthorityWireCodec.MaximumRequestBytes && mutation != "trailing" ? bytes : bytes[..ContactRouteAuthorityWireCodec.MinimumRequestBytes]);
         using var response = await host.Client.SendAsync(message);
         Assert.Equal(expectedStatus, (int)response.StatusCode);
         Assert.Equal(0, issuer.CallCount);

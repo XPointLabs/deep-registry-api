@@ -4,7 +4,7 @@ Normative owner: [DR-0036](../../docs/survival-program/decisions/DR-0036-did2-ro
 and [ContactResolver 3.1](../../docs/architecture/CONTACT-RESOLVER-V1.md).
 
 The internal terminal is `/api/v2/contact-route-authority` over HTTPS with exact
-request V2 and response V3 under [DR75](../../docs/survival-program/decisions/DR-0075-did2-issued-head-response-custody.md).
+request V3 and response V3 under [DR77](../../docs/survival-program/decisions/DR-0077-did2-route-successor-coordination.md).
 `/api/v1/contact-route-authority` is removed. It is a private
 witness-coordination boundary, not a steady-state contact resolver or public
 mailbox-grant endpoint. Shipping clients still require XPoint/OHTTP coordination;
@@ -60,8 +60,8 @@ The canonical request's account lookup, stable XRA1 ID and unsigned generation
 select one permanent exact reservation, independently of the coordination nonce.
 Another nonce or changed request for that generation rejects before signing and
 without increasing capacity, including after a signing failure or restart. This
-does not authorize a nonzero-generation request: authenticated predecessor and
-current-context successor verification remain separate activation requirements.
+does not itself authorize a nonzero-generation request: the issuer independently
+authenticates the exact predecessor and current successor before reservation.
 
 Existing DR75 journals require the once-only provisioning transaction
 [`sql/did2-route-threshold-generation-fence.sql`](sql/did2-route-threshold-generation-fence.sql)
@@ -72,7 +72,12 @@ or rewriting history. Competing existing generation reservations abort the
 transaction: investigate and decide explicitly; do not delete rows or silently
 choose one. Only successful provisioning installs `generation_fence_version=1`;
 runtime rejects its absence before any signing callback and performs no DDL.
-Fresh installations use the updated base schema, not either upgrade script.
+Existing provision then requires the once-only
+[`sql/did2-route-threshold-successor-request.sql`](sql/did2-route-threshold-successor-request.sql)
+transaction for DR77 request bounds and the mandatory request marker. Preserve
+all exact history, counts and floors; old requests remain opaque audit-only.
+Runtime rejects an absent marker before callbacks. Fresh installations use the
+updated base schema, not the once-only upgrade scripts.
 
 The Shared consumer retains the entire original request before dispatch under
 [DR-0073](../../docs/survival-program/decisions/DR-0073-did2-exact-route-request-custody.md).
@@ -83,6 +88,12 @@ from independently current proof/network/time before completion and publication.
 The current client journal requires explicit reset of incompatible disposable
 QA state at activation, not production floor or registered-key reset. Source
 integration tests do not establish matched production/device activation.
+The connected local renewal lane expires a genuinely signed route, verifies
+its history under fresh same-account authority, issues the successor over
+TestServer HTTP and completes exact retained issuance after a lost response.
+It rejects a forged predecessor before reservation/custody and another nonce
+for the same generation before signing. Protected successor adoption is still
+required separately; this lane does not establish physical recovery.
 The real-account fixture uses DR70's pending signed network view, independent
 ADA2-backed DID2 proof and subsequent topology completion; it no longer calls
 the removed legacy one-stage operational author.
