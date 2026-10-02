@@ -4,7 +4,8 @@ Normative owner: [DR-0036](../../docs/survival-program/decisions/DR-0036-did2-ro
 and [ContactResolver 3.1](../../docs/architecture/CONTACT-RESOLVER-V1.md).
 
 The internal terminal is `/api/v2/contact-route-authority` over HTTPS with exact
-V2 binary envelopes. `/api/v1/contact-route-authority` is removed. It is a private
+request V2 and response V3 under [DR75](../../docs/survival-program/decisions/DR-0075-did2-issued-head-response-custody.md).
+`/api/v1/contact-route-authority` is removed. It is a private
 witness-coordination boundary, not a steady-state contact resolver or public
 mailbox-grant endpoint. Shipping clients still require XPoint/OHTTP coordination;
 no public direct HTTP fallback is activated by this candidate.
@@ -34,6 +35,17 @@ UPDATE(exact_response) on the journal; request/network/nonce/capacity columns
 must be immutable to the runtime role;
 never grant DDL, DELETE or TRUNCATE. Do not recreate an empty row after loss.
 
+For an existing DR36 journal, first stop coordination dispatch and back up its
+exact tables together with the independent latest-head floor. A provisioning
+role runs [`sql/did2-route-threshold-issued-head-upgrade.sql`](sql/did2-route-threshold-issued-head-upgrade.sql)
+once, before activating matched Registry/XNode/client artifacts. The transaction
+retains every old row, reservation, capacity and exact byte; it does not reset
+floors or node keys. Old response envelopes remain audit-only and fail current
+decoding. Runtime cannot perform DDL and rejects missing generation provision
+before signing. Do not rerun this once-only script or replace a retired winner
+under the same nonce. Rollback binaries and database evidence must be paired;
+never manufacture a newer signed head for an older winner.
+
 Keep journal and independently maintained latest-head floor in the same
 restoration policy. Back up exact durable winners and reservations; do not
 restore an older journal while preserving a newer issued state elsewhere.
@@ -44,10 +56,13 @@ Stale/expired winners reject and are not renewed under their old nonce.
 
 The Shared consumer retains the entire original request before dispatch under
 [DR-0073](../../docs/survival-program/decisions/DR-0073-did2-exact-route-request-custody.md).
-Its connected test exchange now forwards that retained request, never rebuilding
-the minimum from a newer proof. Registry wire, permanent reservation/winner
-schema and production runtime are unchanged. Exact replay alone does not waive
-DR42's current-anchor threshold adoption/completion gate in the client.
+Its connected exchange forwards that retained request, never rebuilding the
+minimum from a newer proof. DR75 retains the actual signed issuance head inside
+the server winner and protected client custody. DR74 authenticates it separately
+from independently current proof/network/time before completion and publication.
+The current client journal requires explicit reset of incompatible disposable
+QA state at activation, not production floor or registered-key reset. Source
+integration tests do not establish matched production/device activation.
 The real-account fixture uses DR70's pending signed network view, independent
 ADA2-backed DID2 proof and subsequent topology completion; it no longer calls
 the removed legacy one-stage operational author.

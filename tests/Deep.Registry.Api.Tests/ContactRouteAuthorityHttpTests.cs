@@ -3,6 +3,8 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Buffers.Binary;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ContactV2;
 using Sodium;
 using Deep.Protocol.ApplicationCore;
@@ -19,6 +21,47 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class ContactRouteAuthorityHttpTests
 {
+    [Fact]
+    public void IssuedHeadResponseIsV3OnlyBoundedAndDefensivelyOwned()
+    {
+        var network = Bytes(16, 0x11);
+        var artifacts = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x21);
+        var request = Request(network, artifacts.Xra);
+        var head = IssuanceHead(network);
+        Assert.Equal(ContactRouteAuthorityWireCodec.MinimumIssuanceAdh1Bytes, head.Length);
+        var response = new ContactRouteAuthorityWireResponse(network, request.RequestNonce.Span,
+            artifacts.Pms, artifacts.Xrc, artifacts.Xss, head);
+        var exact = ContactRouteAuthorityWireCodec.EncodeResponse(request, response);
+        Assert.Equal(2, BinaryPrimitives.ReadUInt16BigEndian(ContactRouteAuthorityWireCodec.EncodeRequest(request)));
+        Assert.Equal(3, BinaryPrimitives.ReadUInt16BigEndian(exact));
+        Assert.Equal(head, ContactRouteAuthorityWireCodec.DecodeResponse(request, exact).ExactIssuanceAdh1.ToArray());
+        Array.Clear(head);
+        Assert.Equal(IssuanceHead(network), response.ExactIssuanceAdh1.ToArray());
+        var escaped = response.ExactIssuanceAdh1.ToArray(); Array.Clear(escaped);
+        Assert.Equal(IssuanceHead(network), response.ExactIssuanceAdh1.ToArray());
+        foreach (var mutation in new[] { "v2", "missing", "trailing", "hostile", "oversize", "network", "nonce" })
+        {
+            var damaged = exact.ToArray();
+            if (mutation == "v2") BinaryPrimitives.WriteUInt16BigEndian(damaged, 2);
+            if (mutation == "missing") damaged = damaged[..(damaged.Length - 4 - IssuanceHead(network).Length)];
+            if (mutation == "trailing") damaged = damaged.Append((byte)0).ToArray();
+            if (mutation == "oversize") damaged = new byte[ContactRouteAuthorityWireCodec.MaximumResponseBytes + 1];
+            var offset = 56;
+            if (mutation is "hostile" or "network")
+            {
+                for (var i = 0; i < 3; i++) offset += 4 + checked((int)BinaryPrimitives.ReadUInt32BigEndian(damaged.AsSpan(offset)));
+                if (mutation == "hostile") BinaryPrimitives.WriteUInt32BigEndian(damaged.AsSpan(offset), uint.MaxValue);
+                else damaged[offset + 4 + 20] ^= 1; // ADH1 field1 network
+            }
+            if (mutation == "nonce") damaged[24] ^= 1;
+            if (mutation is "missing" or "trailing") BinaryPrimitives.WriteUInt32BigEndian(damaged.AsSpan(4), checked((uint)damaged.Length));
+            var error = Record.Exception(() => ContactRouteAuthorityWireCodec.DecodeResponse(request, damaged));
+            Assert.True(error is FormatException or CryptographicException or ArgumentException, mutation);
+        }
+        Assert.Throws<ArgumentException>(() => new ContactRouteAuthorityWireResponse(network, request.RequestNonce.Span,
+            artifacts.Pms, artifacts.Xrc, artifacts.Xss, new byte[4097]));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -287,8 +330,19 @@ public sealed class ContactRouteAuthorityHttpTests
             CallCount++;
             return ValueTask.FromResult(new ContactRouteAuthorityWireResponse(
                 request.NetworkId.Span, request.RequestNonce.Span,
-                artifacts.Pms, artifacts.Xrc, artifacts.Xss));
+                artifacts.Pms, artifacts.Xrc, artifacts.Xss, IssuanceHead(request.NetworkId.Span)));
         }
+    }
+
+    // Canonical transport shape only; fake signatures do not grant authority.
+    internal static byte[] IssuanceHead(ReadOnlySpan<byte> network)
+    {
+        var reference = new byte[38]; "XNA1"u8.CopyTo(reference);
+        BinaryPrimitives.WriteUInt16BigEndian(reference.AsSpan(4), 1);
+        Bytes(32, 0x81).CopyTo(reference, 6);
+        return AccountDirectoryAdh1Codec.Encode(new(network, 0, new byte[32], 0,
+            Bytes(32, 0x82), Bytes(32, 0x83), reference, Bytes(32, 0x84), 20, 90, 2,
+            [new AccountDirectoryAdh1WitnessEntry(Bytes(32, 0x85), Bytes(64, 0x86))]));
     }
 
     private sealed class MustNotCallPublicationIssuer : IContactPublicationThresholdIssuer

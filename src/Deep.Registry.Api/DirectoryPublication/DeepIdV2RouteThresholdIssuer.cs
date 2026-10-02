@@ -78,14 +78,15 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                 return ContactRouteAuthorityWireCodec.EncodeResponse(request,
                     new ContactRouteAuthorityWireResponse(request.NetworkId.Span,
                         request.RequestNonce.Span, candidate.Selection.CanonicalBytes.Span,
-                        candidate.LiveRoute.CanonicalBytes.Span, candidate.Successor.CanonicalBytes.Span));
+                        candidate.LiveRoute.CanonicalBytes.Span, candidate.Successor.CanonicalBytes.Span,
+                        freshness.ExactAdh1.Span));
             }, ct).ConfigureAwait(false);
 
             var winner = ContactRouteAuthorityWireCodec.DecodeResponse(request, encoded.Span);
-            await DeepIdV2ContactRouteVerifier.VerifyThresholdAsync(recipient, network,
-                authority, request.ExactXra1, new ParsedDeepIdV2RouteThreshold(
+            _ = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, network,
+                authority, request, new ParsedDeepIdV2RouteThreshold(
                     winner.ExactPms2.Span, winner.ExactXrc1.Span, winner.ExactXss1.Span),
-                time, ct).ConfigureAwait(false);
+                winner.ExactIssuanceAdh1, time, ct).ConfigureAwait(false);
             await RequireSourcesCurrentAsync(freshness, frame, raw.ExactViewChain[^1], authority, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             return winner;

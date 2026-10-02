@@ -4,13 +4,16 @@ CREATE TABLE deep_did2_route_journal_network (
     network_id bytea PRIMARY KEY CHECK (octet_length(network_id) = 16),
     entry_count bigint NOT NULL CHECK (entry_count >= 0),
     maximum_entries bigint NOT NULL CHECK (maximum_entries BETWEEN 1 AND 1048576),
+    response_envelope_version smallint NOT NULL DEFAULT 3 CHECK (response_envelope_version = 3),
     CHECK (entry_count <= maximum_entries)
 );
 CREATE TABLE deep_did2_route_threshold_journal (
     network_id bytea NOT NULL REFERENCES deep_did2_route_journal_network(network_id),
     request_nonce bytea NOT NULL CHECK (octet_length(request_nonce) = 32),
     exact_request bytea NOT NULL CHECK (octet_length(exact_request) = 1151),
-    exact_response bytea CHECK (octet_length(exact_response) BETWEEN 2151 AND 11079),
+    -- The lower storage bound preserves retired opaque audit rows; runtime
+    -- accepts only current V3 responses, never an old V2 reader.
+    exact_response bytea CHECK (octet_length(exact_response) BETWEEN 2151 AND 15179),
     PRIMARY KEY (network_id, request_nonce)
 );
 -- Operator inserts one network row with entry_count=0 and explicit capacity.

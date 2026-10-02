@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services.ContactV2;
@@ -24,8 +25,11 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2RouteThresholdIssuerTests
 {
-    [Fact]
-    public async Task ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(int crashMode)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -136,7 +140,8 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             using var distribution = new XPointNetworkClosureDistribution(new()
                 { NetworkIdHex = Convert.ToHexString(network), BundlePath = bundlePath });
             using var journal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
-            var issuer = new ProductionContactRouteThresholdIssuer(proofs, rootSource, distribution, custody, clock, journal);
+            var countedCustody = new CountingRouteCustody(custody);
+            var issuer = new ProductionContactRouteThresholdIssuer(proofs, rootSource, distribution, countedCustody, clock, journal);
             using var publicationJournal = new DeepIdV2PostgreSqlPublicationJournal(scoped, network);
             var publicationIssuer = new ProductionContactPublicationThresholdIssuer(proofs, rootSource, distribution, custody, clock, publicationJournal);
             var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
@@ -161,11 +166,72 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                 HttpServiceEndpointPolicy.Production));
             var source = new DeepIdV2ContactPathAuthoritySource(bootstrap.GenesisPin, accounts, proofClient, closure,
                 await accounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin), clock);
-            var exchange = new RouteHttpExchange(client);
+            var exchange = new RouteHttpExchange(client) { LoseFirstResponse = crashMode == 1 };
+            var intent = Bytes(32, 0xd1); var config = new Did2ContactRouteConfiguration(100, 2, Bytes(32, 0xd2));
+            if (crashMode != 0)
+            {
+                using (Did2ContactRouteTestHooks.Push(point =>
+                { if (crashMode == 2 && point == Did2ContactRouteFailpoint.AfterThreshold) throw new IOException("Crash after exact issuance custody."); }))
+                    await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactRouteAsync(intent, source, config, exchange));
+                var firstRequest = ContactRouteAuthorityWireCodec.EncodeRequest(exchange.Request!);
+                var firstResponse = exchange.Response!.ToArray();
+                var firstHead = ContactRouteAuthorityWireCodec.DecodeResponse(exchange.Request!, firstResponse).ExactIssuanceAdh1;
+                Assert.Equal(admitted.ExactAdh1.ToArray(), firstHead.ToArray());
+                Assert.Equal(1, countedCustody.Calls);
+                using (var owned = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, default))
+                {
+                    Assert.NotNull(owned);
+                    owned.Use(bytes =>
+                    {
+                        Assert.Equal((byte)6, bytes[0]);
+                        Assert.Equal(crashMode == 1 ? (byte)1 : (byte)2,
+                            bytes[ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32]);
+                        return true;
+                    });
+                }
+                // Real independent DID2 admission, ADA2 write and permanent
+                // PostgreSQL floor advance, not a synthetic fresh proof/head.
+                using var peerStorage = new InMemoryDeepSecureStorage();
+                var peerDirectory = Path.Combine(directory, "head-advance-peer");
+                Directory.CreateDirectory(peerDirectory);
+                var peerAccounts = new DeepIdV2AccountService(peerStorage, peerDirectory, network, 1,
+                    new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+                await peerAccounts.CreateAsync("Independent head advance QA");
+                var peerAdmission = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(await peerAccounts.PrepareGenesisAdmissionAsync());
+                var advanced = await admission.AdmitAsync(peerAdmission);
+                Assert.Equal(2UL, AccountDirectoryAdh1Codec.Decode(advanced.ExactAdh1.Span).LogGeneration);
+                var recoveredRoute = await accounts.EnsureOwnContactRouteAsync(intent, source, config, exchange);
+                await recoveredRoute.EnsureCurrentAsync();
+                Assert.Equal(2UL, recoveredRoute.Recipient.Freshness.NextProtectedLkg.LogGeneration);
+                Assert.Equal(firstRequest, ContactRouteAuthorityWireCodec.EncodeRequest(exchange.Request!));
+                Assert.Equal(firstResponse, exchange.Response);
+                Assert.Equal(1, countedCustody.Calls);
+                using var replayJournal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
+                var retainedReplay = new ProductionContactRouteThresholdIssuer(proofs, rootSource, distribution,
+                    new NeverSignRouteCustody(), clock, replayJournal);
+                Assert.Equal(firstResponse, ContactRouteAuthorityWireCodec.EncodeResponse(exchange.Request!,
+                    await retainedReplay.IssueAsync(exchange.Request!, default)));
+                if (crashMode == 1)
+                {
+                    // Retry used both slots. Begin a new scheduling window,
+                    // then consume one genuine authenticated exact route replay
+                    // so the publication admission assertions below stay exact.
+                    admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
+                    using var body = new ByteArrayContent(firstRequest);
+                    body.Headers.ContentType = MediaTypeHeaderValue.Parse(ContactRouteAuthorityWireCodec.RequestMediaType);
+                    using var message = new HttpRequestMessage(HttpMethod.Post, ContactRouteAuthorityHostingExtensions.EndpointPath) { Content = body };
+                    PeerAuthenticationFixture.Authenticate(message, network, ContactCoordinationTarget.Route, firstRequest,
+                        admissionTime.GetUtcNow().ToUnixTimeMilliseconds());
+                    using var replayResponse = await client.SendAsync(message);
+                    Assert.Equal(HttpStatusCode.OK, replayResponse.StatusCode);
+                    Assert.Equal(firstResponse, await replayResponse.Content.ReadAsByteArrayAsync());
+                    Assert.Equal(1, countedCustody.Calls);
+                }
+            }
             var route = await accounts.EnsureOwnContactRouteAsync(Bytes(32, 0xd1), source,
                 new(100, 2, Bytes(32, 0xd2)), exchange);
             await route.EnsureCurrentAsync();
-            Assert.Equal(admitted.ExactAdh1.ToArray(), route.Recipient.Freshness.ExactAdh1.ToArray());
+            Assert.Equal(crashMode == 0 ? 1UL : 2UL, route.Recipient.Freshness.NextProtectedLkg.LogGeneration);
             Assert.NotNull(exchange.Request); Assert.NotNull(exchange.Response);
             var publicationExchange = new PublicationHttpExchange(client, admissionTime) { LoseFirstResponse = true };
             await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactPublicationAsync(Bytes(32, 0xd1), source,
@@ -304,12 +370,15 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var networkRequest = request.RequestUri!.AbsolutePath == HttpDeepIdV2NetworkClosureArtifactSource.EndpointPath;
-            var response = networkRequest ? closure : await issuer.IssueWireAsync(
-                DeepIdV2DirectoryProofWireCodec.DecodeRequest(await request.Content!.ReadAsByteArrayAsync(ct)), ct);
+            var historyRequest = request.RequestUri.AbsolutePath == "/api/v2/account-directory/history";
+            var response = networkRequest ? closure : historyRequest
+                ? await issuer.ReadHistoryAsync(await request.Content!.ReadAsByteArrayAsync(ct), ct)
+                : await issuer.IssueWireAsync(DeepIdV2DirectoryProofWireCodec.DecodeRequest(await request.Content!.ReadAsByteArrayAsync(ct)), ct);
             var result = new HttpResponseMessage(HttpStatusCode.OK)
                 { Content = new ByteArrayContent(response), RequestMessage = request };
             result.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(networkRequest ?
-                XPointNetworkClosureWireCodec.ResponseMediaType : DeepIdV2DirectoryProofWireCodec.ResponseMediaType);
+                XPointNetworkClosureWireCodec.ResponseMediaType : historyRequest
+                    ? DeepIdV2DirectoryHistoryWireCodec.ResponseMediaType : DeepIdV2DirectoryProofWireCodec.ResponseMediaType);
             return result;
         }
     }
@@ -350,7 +419,8 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
     private sealed class RouteHttpExchange(HttpClient client) : IDid2ContactRouteThresholdSource
     {
         internal ContactRouteAuthorityWireRequest? Request; internal byte[]? Response;
-        public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
+        internal bool LoseFirstResponse;
+        public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
             DeepIdV2CurrentContactAuthorization auth, VerifiedOnionNetworkContext network,
             VerifiedXPointNetworkAuthority authority, OnionTrustedTimeAuthority time,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
@@ -365,9 +435,20 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             using var response = await client.SendAsync(message, ct);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Response = await response.Content.ReadAsByteArrayAsync(ct);
-            var parsed = ContactRouteAuthorityWireCodec.DecodeResponse(Request, Response);
-            return new(parsed.ExactPms2.Span, parsed.ExactXrc1.Span, parsed.ExactXss1.Span);
+            if (LoseFirstResponse) { LoseFirstResponse = false; throw new IOException("Lose signed route response before adoption."); }
+            return ContactRouteAuthorityWireCodec.DecodeResponse(Request, Response);
         }
+    }
+    private sealed class CountingRouteCustody(IContactRouteAuthorityWitnessCustody source) : IContactRouteAuthorityWitnessCustody
+    {
+        internal int Calls;
+        public ValueTask<IReadOnlyList<IContactRouteAuthorityWitnessSigner>> GetRouteSignersAsync(VerifiedXPointNetworkAuthority authority, CancellationToken ct)
+        { Calls++; return source.GetRouteSignersAsync(authority, ct); }
+    }
+    private sealed class NeverSignRouteCustody : IContactRouteAuthorityWitnessCustody
+    {
+        public ValueTask<IReadOnlyList<IContactRouteAuthorityWitnessSigner>> GetRouteSignersAsync(VerifiedXPointNetworkAuthority authority, CancellationToken ct) =>
+            throw new InvalidOperationException("Retained issuance replay must never sign again.");
     }
     private sealed class Clock : IContactResolveTrustedTimeContextSource, IOnionMonotonicClock
     {

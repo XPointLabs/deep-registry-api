@@ -1,4 +1,5 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
+using System.Buffers.Binary;
 using Deep.Protocol.ContactV1;
 using Deep.Registry.Api.DirectoryPublication;
 using Npgsql;
@@ -9,8 +10,10 @@ public sealed class DeepIdV2RouteThresholdJournalTests
 {
     // Actual PostgreSQL durability/concurrency, structural transport records.
     // These are NOT issued route authority or physical delivery evidence.
-    [Fact]
-    public async Task PermanentJournalSurvivesCallbackFailureConcurrentRetryRestartAndCapacity()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PermanentJournalSurvivesCallbackFailureConcurrentRetryRestartAndCapacity(bool upgradeExisting)
     {
         var connection = Environment.GetEnvironmentVariable("DEEP_TEST_DID2_ROUTE_POSTGRES");
         Assert.False(string.IsNullOrWhiteSpace(connection), "Set the isolated route-test PostgreSQL connection.");
@@ -26,14 +29,17 @@ public sealed class DeepIdV2RouteThresholdJournalTests
             var sqlPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-journal.sql");
             await using var setup = new NpgsqlConnection(scoped);
             await setup.OpenAsync();
-            await using (var ddl = new NpgsqlCommand(await File.ReadAllTextAsync(sqlPath), setup))
+            var sql = await File.ReadAllTextAsync(sqlPath);
+            if (upgradeExisting) sql = sql.Replace("    response_envelope_version smallint NOT NULL DEFAULT 3 CHECK (response_envelope_version = 3),", "")
+                .Replace("BETWEEN 2151 AND 15179", "BETWEEN 2151 AND 11079");
+            await using (var ddl = new NpgsqlCommand(sql, setup))
                 await ddl.ExecuteNonQueryAsync();
             var network = Enumerable.Repeat((byte)0x11, 16).ToArray();
             var records = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x50);
             var request = ContactRouteAuthorityHttpTests.Request(network, records.Xra);
             var response = ContactRouteAuthorityWireCodec.EncodeResponse(request,
                 new ContactRouteAuthorityWireResponse(network, request.RequestNonce.Span,
-                    records.Pms, records.Xrc, records.Xss));
+                    records.Pms, records.Xrc, records.Xss, ContactRouteAuthorityHttpTests.IssuanceHead(network)));
             using var journal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
             var calls = 0;
             ValueTask<byte[]> Issue(CancellationToken ct)
@@ -42,15 +48,55 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 await journal.GetOrIssueAsync(request, Issue, default));
             Assert.Equal(0, calls);
             await using (var provision = new NpgsqlCommand("INSERT INTO deep_did2_route_journal_network " +
-                             "(network_id, entry_count, maximum_entries) VALUES ($1, 0, 2)", setup))
+                             "(network_id, entry_count, maximum_entries) VALUES ($1, 0, $2)", setup))
             {
                 provision.Parameters.Add(new() { Value = network });
+                provision.Parameters.Add(new() { Value = upgradeExisting ? 3L : 2L });
                 await provision.ExecuteNonQueryAsync();
+            }
+            if (upgradeExisting)
+            {
+                // Old provision rejects before reservation/signature callbacks.
+                await Assert.ThrowsAsync<InvalidDataException>(async () => await journal.GetOrIssueAsync(request, Issue, default));
+                Assert.Equal(0, calls);
+                var retired = WithNonce(request, 0xc1);
+                var retiredRequest = ContactRouteAuthorityWireCodec.EncodeRequest(retired);
+                var current = ContactRouteAuthorityWireCodec.EncodeResponse(retired,
+                    new(network, retired.RequestNonce.Span, records.Pms, records.Xrc, records.Xss,
+                        ContactRouteAuthorityHttpTests.IssuanceHead(network)));
+                var retiredResponse = current[..(current.Length - 4 - ContactRouteAuthorityHttpTests.IssuanceHead(network).Length)];
+                BinaryPrimitives.WriteUInt16BigEndian(retiredResponse, 2);
+                BinaryPrimitives.WriteUInt32BigEndian(retiredResponse.AsSpan(4), checked((uint)retiredResponse.Length));
+                await using (var preserve = new NpgsqlCommand("INSERT INTO deep_did2_route_threshold_journal " +
+                    "(network_id, request_nonce, exact_request, exact_response) VALUES ($1,$2,$3,$4)", setup))
+                {
+                    foreach (var value in new[] { network, retired.RequestNonce.ToArray(), retiredRequest, retiredResponse })
+                        preserve.Parameters.Add(new() { Value = value });
+                    await preserve.ExecuteNonQueryAsync();
+                }
+                await using (var updateCount = new NpgsqlCommand("UPDATE deep_did2_route_journal_network SET entry_count=1 WHERE network_id=$1", setup))
+                {
+                    updateCount.Parameters.Add(new() { Value = network });
+                    Assert.Equal(1, await updateCount.ExecuteNonQueryAsync());
+                }
+                var upgrade = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-issued-head-upgrade.sql"));
+                await using (var ddl = new NpgsqlCommand(upgrade, setup)) await ddl.ExecuteNonQueryAsync();
+                await using (var retained = new NpgsqlCommand("SELECT exact_request, exact_response FROM deep_did2_route_threshold_journal WHERE request_nonce=$1", setup))
+                {
+                    retained.Parameters.Add(new() { Value = retired.RequestNonce.ToArray() });
+                    await using var reader = await retained.ExecuteReaderAsync(); Assert.True(await reader.ReadAsync());
+                    Assert.Equal(retiredRequest, reader.GetFieldValue<byte[]>(0)); Assert.Equal(retiredResponse, reader.GetFieldValue<byte[]>(1));
+                }
+                var rejected = await Record.ExceptionAsync(async () => await journal.GetOrIssueAsync(retired, Issue, default));
+                Assert.True(rejected is InvalidDataException or FormatException);
+                Assert.Equal(0, calls);
+                await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network", setup);
+                Assert.Equal(1L, await count.ExecuteScalarAsync());
             }
             await Assert.ThrowsAsync<IOException>(async () => await journal.GetOrIssueAsync(request,
                 _ => throw new IOException("Injected signing interruption."), default));
             await using (var reserved = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network", setup))
-                Assert.Equal(1L, await reserved.ExecuteScalarAsync());
+                Assert.Equal(upgradeExisting ? 2L : 1L, await reserved.ExecuteScalarAsync());
             var changed = new ContactRouteAuthorityWireRequest(network, request.RequestNonce.Span,
                 request.DirectoryLookupKey.Span, 1, request.MinimumAdh1CoreHash.Span,
                 request.ExactDca1.Span, request.ExactXra1.Span);
