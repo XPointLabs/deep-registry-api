@@ -15,6 +15,24 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: deep_ci
+          POSTGRES_PASSWORD: isolated_ci_only
+          POSTGRES_DB: deep_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U deep_ci -d deep_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_ci;Password=isolated_ci_only;Database=deep_ci
+      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_ci;Password=isolated_ci_only;Database=deep_ci
+      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_ci;Password=isolated_ci_only;Database=deep_ci
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,7 +68,7 @@ jobs:
           dotnet-version: 10.0.301
       - name: Test candidate
         working-directory: deep-registry-api
-        run: dotnet test --configuration Release -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
+        run: dotnet test --configuration Release -m:1 -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
       - name: Record protocol revision
         id: protocol
         shell: bash

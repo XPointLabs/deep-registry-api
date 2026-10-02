@@ -30,6 +30,9 @@ public sealed class DirectoryPublicationDiagnosticsTests
     }
 
     [Theory]
+    [InlineData("The protected trusted-time anchor is stale.", "manual-time-anchor-stale")]
+    [InlineData("The platform monotonic clock reset; trusted time requires a custody rotation.", "manual-time-clock-reset")]
+    [InlineData("The protected trusted-time anchor is stale. private suffix", "unclassified")]
     [InlineData("Production DID2 authority does not cover the trusted-time interval.", "authority-time-coverage")]
     [InlineData("Production DID2 current head cannot cover a new proof.", "head-time-coverage")]
     [InlineData("DID2 proof has no usable nonce-bound lifetime.", "proof-lifetime")]

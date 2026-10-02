@@ -17,6 +17,10 @@ Operator configuration:
 
 Only the current Protocol source-cutover supports enabling the feature. An older
 package build refuses enablement; it does not reinterpret an old proof package.
+Re-export the bundle from the retained signed ceremony inputs after DR-0052;
+the earlier incomplete candidate now returns 503. Upgrade clients and the
+public distributor together, without changing genesis pins or registered node
+keys. Do not run a compatibility converter against the old bundle.
 The route is `POST /api/v2/network/closure` over HTTPS. The configured known-proxy
 forwarded-scheme policy applies; untrusted forwarded headers do not grant HTTPS.
 There is no cleartext physical/UAT exception. Send the exact media type and

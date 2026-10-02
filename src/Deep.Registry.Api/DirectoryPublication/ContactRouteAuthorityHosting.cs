@@ -1,9 +1,7 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Security.Cryptography;
-using Deep.Protocol.AccountDirectoryV1;
-using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
-using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.ContactV2;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -26,239 +24,6 @@ internal interface IContactRouteThresholdIssuer
 internal sealed class ContactRouteAuthorityUnavailableException : IOException;
 internal sealed class ContactRouteAuthorityRejectedException : CryptographicException;
 
-internal sealed class ProductionContactRouteThresholdIssuer : IContactRouteThresholdIssuer
-{
-    private readonly IContactResolveCanonicalDirectorySnapshotSource snapshotSource;
-    private readonly IContactResolveDirectoryProofMaterialSource proofSource;
-    private readonly IContactResolveDtt1WitnessCustody directoryWitnessCustody;
-    private readonly IContactRouteAuthorityWitnessCustody routeWitnessCustody;
-    private readonly IContactResolveOneUseRequestLedger requestLedger;
-    private readonly IContactResolveTrustedTimeContextSource trustedTimeSource;
-
-    internal ProductionContactRouteThresholdIssuer(
-        IContactResolveCanonicalDirectorySnapshotSource snapshotSource,
-        IContactResolveDirectoryProofMaterialSource proofSource,
-        IContactResolveDtt1WitnessCustody directoryWitnessCustody,
-        IContactRouteAuthorityWitnessCustody routeWitnessCustody,
-        IContactResolveOneUseRequestLedger requestLedger,
-        IContactResolveTrustedTimeContextSource trustedTimeSource)
-    {
-        this.snapshotSource = snapshotSource ?? throw new ArgumentNullException(nameof(snapshotSource));
-        this.proofSource = proofSource ?? throw new ArgumentNullException(nameof(proofSource));
-        this.directoryWitnessCustody = directoryWitnessCustody ??
-            throw new ArgumentNullException(nameof(directoryWitnessCustody));
-        this.routeWitnessCustody = routeWitnessCustody ??
-            throw new ArgumentNullException(nameof(routeWitnessCustody));
-        this.requestLedger = requestLedger ?? throw new ArgumentNullException(nameof(requestLedger));
-        this.trustedTimeSource = trustedTimeSource ??
-            throw new ArgumentNullException(nameof(trustedTimeSource));
-    }
-
-    public async ValueTask<ContactRouteAuthorityWireResponse> IssueAsync(
-        ContactRouteAuthorityWireRequest request,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        cancellationToken.ThrowIfCancellationRequested();
-        try
-        {
-            var trusted = await trustedTimeSource.ReadAsync(cancellationToken).ConfigureAwait(false);
-            trusted.Validate();
-            var directoryRequest = new ContactResolveDirectoryPackageRequest(
-                request.NetworkId.ToArray(),
-                request.RequestNonce.ToArray(),
-                trusted.ServerBootId.ToArray(),
-                trusted.ServerMonotonicSample,
-                null,
-                null,
-                null,
-                request.DirectoryLookupKey.ToArray(),
-                request.MinimumAdh1Generation,
-                request.MinimumAdh1CoreHash.ToArray(),
-                requireCurrentValue: true);
-            var snapshot = await snapshotSource.ReadAsync(directoryRequest, cancellationToken)
-                .ConfigureAwait(false) ?? throw new ContactRouteAuthorityUnavailableException();
-            if (!Fixed(snapshot.NetworkId.Span, request.NetworkId.Span))
-                throw new ContactRouteAuthorityRejectedException();
-            var proof = await proofSource.ReadAsync(snapshot, directoryRequest, cancellationToken)
-                .ConfigureAwait(false) ?? throw new ContactRouteAuthorityUnavailableException();
-            if (proof.ResultKind != AccountDirectoryAdp1ResultKind.CurrentValue ||
-                !Fixed(proof.QueriedDirectoryLeafKey.Span, request.DirectoryLookupKey.Span) ||
-                proof.CurrentCheckpoint is not { } checkpoint)
-                throw new ContactRouteAuthorityRejectedException();
-
-            var parsedDca = ApplicationCoreCodec.DecodeDca1(request.ExactDca1.Span);
-            var verifiedDca = ApplicationCoreVerifier.VerifyDca1(
-                parsedDca, checkpoint.Binding, checkpoint.Directory);
-            if (checkpoint.IsDcaAuthorizationRevoked(parsedDca.AuthorizationId.Span))
-                throw new ContactRouteAuthorityRejectedException();
-            var recipientDevice = checkpoint.Directory.Identity.ActiveDevices.SingleOrDefault(
-                device => Fixed(
-                    device.Certificate.DeviceId.Span, parsedDca.PublisherDeviceId.Span)) ??
-                throw new ContactRouteAuthorityRejectedException();
-
-            var issuanceEpoch = AccountDirectoryDtt1IssuanceEpoch.Derive(
-                snapshot.Authority, trusted.ObservedUnixTime, trusted.UncertaintySeconds);
-            await requestLedger.ConsumeAsync(
-                directoryRequest, trusted, issuanceEpoch, cancellationToken).ConfigureAwait(false);
-            var directorySigners = await directoryWitnessCustody.GetSignersAsync(
-                snapshot.Authority, cancellationToken).ConfigureAwait(false);
-            var lower = trusted.ObservedUnixTime - trusted.UncertaintySeconds;
-            var upper = trusted.ObservedUnixTime + trusted.UncertaintySeconds;
-            var proofRequest = new AccountDirectoryProofAuthoringRequest(
-                request.NetworkId.Span,
-                request.RequestNonce.Span,
-                trusted.ServerBootId.Span,
-                trusted.ServerMonotonicSample,
-                snapshot.CurrentDirectoryHead.ExactAdh1.Span,
-                snapshot.ExactCurrentXnv1.Span,
-                trusted.ObservedUnixTime,
-                trusted.UncertaintySeconds,
-                lower,
-                upper,
-                issuanceEpoch,
-                snapshot.SupportedReader);
-            var authoredProof = await AccountDirectoryProofAuthor.IssueAsync(
-                snapshot.Authority,
-                snapshot.CurrentDirectoryHead,
-                proofRequest,
-                proof,
-                directorySigners,
-                cancellationToken).ConfigureAwait(false);
-            var freshness = AccountDirectoryCurrentProofVerifier.Verify(
-                snapshot.Authority,
-                authoredProof.ExactAdh1,
-                authoredProof.ExactDtt1,
-                authoredProof.ExactAdp1,
-                request.RequestNonce.Span,
-                request.DirectoryLookupKey.Span,
-                new AccountDirectoryMonotonicRequestWindow(
-                    trusted.ServerBootId.Span,
-                    trusted.ServerMonotonicSample,
-                    trusted.ServerMonotonicSample,
-                    trusted.ServerMonotonicSample),
-                proof.CallerProtectedLkg,
-                checkpoint,
-                snapshot.SupportedReader);
-            var currentDca = ApplicationCoreVerifier.RequireDca1CurrentlyAuthoritative(
-                verifiedDca, freshness.TrustedUpperUnixSeconds);
-            var monotonicClock = new FixedOnionMonotonicClock(
-                trusted.ServerBootId.Span, trusted.ServerMonotonicSample);
-            var trustedTimeAuthority = new OnionTrustedTimeAuthority(monotonicClock);
-            var currentNetwork = await OnionNetworkContextVerifier.VerifyAsync(
-                snapshot.Authority,
-                freshness,
-                snapshot.ExactOrderedXvp1Chain,
-                snapshot.ExactOrderedXnv1Chain,
-                snapshot.ExactOrderedXnh1Chain,
-                snapshot.ExactActiveXnd1,
-                snapshot.ExactOrderedPmt2Chain,
-                protectedPrevious: null,
-                trustedTimeAuthority,
-                cancellationToken).ConfigureAwait(false);
-            var proposal = await ContactNetworkAuthorityVerifier.VerifyProposalAsync(
-                snapshot.Authority,
-                currentNetwork,
-                freshness,
-                recipientDevice,
-                currentDca,
-                snapshot.ExactOrderedXnv1Chain[^1],
-                snapshot.ExactOrderedXnh1Chain[^1],
-                authoredProof.ExactAdh1,
-                snapshot.ExactOrderedPmt2Chain[^1],
-                trustedTimeAuthority,
-                cancellationToken).ConfigureAwait(false);
-            var advertisement = ContactRouteAdvertisementVerifier.VerifyExact(
-                proposal, request.ExactXra1);
-            var issuedAt = proposal.TrustedLowerUnixSeconds;
-            var advertisementExpires = System.Buffers.Binary.BinaryPrimitives
-                .ReadUInt64BigEndian(advertisement.Record.Field(13).Span);
-            var oneDay = issuedAt > ulong.MaxValue - 86_400
-                ? ulong.MaxValue
-                : issuedAt + 86_400;
-            var expiresAt = Math.Min(
-                Math.Min(proposal.ExpiresAtUnixSeconds, advertisementExpires), oneDay);
-            if (expiresAt <= proposal.TrustedUpperUnixSeconds)
-                throw new ContactRouteAuthorityRejectedException();
-            var routeSigners = await routeWitnessCustody.GetRouteSignersAsync(
-                snapshot.Authority, cancellationToken).ConfigureAwait(false);
-            var threshold = await ContactRouteThresholdAuthor.AuthorAsync(
-                new ContactRouteThresholdAuthoringRequest(
-                    proposal, advertisement, issuedAt, expiresAt),
-                routeSigners,
-                cancellationToken).ConfigureAwait(false);
-            return new ContactRouteAuthorityWireResponse(
-                request.NetworkId.Span,
-                request.RequestNonce.Span,
-                threshold.ExactPms2.Span,
-                threshold.ExactXrc1.Span,
-                threshold.ExactXss1.Span);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (ContactRouteAuthorityRejectedException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is
-            ContactResolveDirectoryTargetNotFoundException or
-            ContactNetworkAuthorityVerificationException or
-            ContactPublicationAuthoringException or
-            AccountDirectoryFreshnessVerificationException)
-        {
-            throw new ContactRouteAuthorityRejectedException();
-        }
-        catch (Exception exception) when (exception is ArgumentException or FormatException or
-            CryptographicException or OverflowException)
-        {
-            throw new ContactRouteAuthorityRejectedException();
-        }
-    }
-
-    internal static IContactRouteThresholdIssuer CreateFailClosed(IServiceProvider services)
-    {
-        ArgumentNullException.ThrowIfNull(services);
-        var probe = services.GetService<IServiceProviderIsService>();
-        if (probe is null ||
-            !probe.IsService(typeof(IContactResolveCanonicalDirectorySnapshotSource)) ||
-            !probe.IsService(typeof(IContactResolveDirectoryProofMaterialSource)) ||
-            !probe.IsService(typeof(IContactResolveDtt1WitnessCustody)) ||
-            !probe.IsService(typeof(IContactRouteAuthorityWitnessCustody)) ||
-            !probe.IsService(typeof(IContactResolveOneUseRequestLedger)) ||
-            !probe.IsService(typeof(IContactResolveTrustedTimeContextSource)))
-            return new UnavailableContactRouteThresholdIssuer();
-        return new ProductionContactRouteThresholdIssuer(
-            services.GetRequiredService<IContactResolveCanonicalDirectorySnapshotSource>(),
-            services.GetRequiredService<IContactResolveDirectoryProofMaterialSource>(),
-            services.GetRequiredService<IContactResolveDtt1WitnessCustody>(),
-            services.GetRequiredService<IContactRouteAuthorityWitnessCustody>(),
-            services.GetRequiredService<IContactResolveOneUseRequestLedger>(),
-            services.GetRequiredService<IContactResolveTrustedTimeContextSource>());
-    }
-
-    private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
-        left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
-
-    private sealed class FixedOnionMonotonicClock : IOnionMonotonicClock
-    {
-        private readonly byte[] bootId;
-        private readonly ulong sample;
-
-        internal FixedOnionMonotonicClock(ReadOnlySpan<byte> bootId, ulong sample)
-        {
-            this.bootId = bootId.ToArray();
-            this.sample = sample;
-        }
-
-        public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(new OnionMonotonicReading(bootId, sample));
-        }
-    }
-}
 
 internal sealed class UnavailableContactRouteThresholdIssuer : IContactRouteThresholdIssuer
 {
@@ -281,15 +46,16 @@ internal readonly struct ContactRouteAuthorityHostingState
 {
     private readonly byte[]? networkId;
 
-    internal ContactRouteAuthorityHostingState(ReadOnlySpan<byte> networkId) =>
-        this.networkId = networkId.ToArray();
+    internal ContactRouteAuthorityHostingState(ReadOnlySpan<byte> networkId, ContactCoordinationIngressAuthenticator access)
+    { this.networkId = networkId.ToArray(); Access = access ?? throw new ArgumentNullException(nameof(access)); }
 
     internal ReadOnlyMemory<byte> NetworkId => networkId?.ToArray() ?? [];
+    internal ContactCoordinationIngressAuthenticator? Access { get; }
 }
 
 internal static class ContactRouteAuthorityHostingExtensions
 {
-    internal const string EndpointPath = "/api/v1/contact-route-authority";
+    internal const string EndpointPath = "/api/v2/contact-route-authority";
 
     internal static ContactRouteAuthorityHostingState AddContactRouteAuthority(
         this IServiceCollection services,
@@ -308,7 +74,16 @@ internal static class ContactRouteAuthorityHostingExtensions
             .ReadRequiredOptions(configuration);
         var network = DirectoryPublicationHostingExtensions.Hex(
             authority.NetworkIdHex, 16, "ContactRouteAuthority network ID");
-        return new ContactRouteAuthorityHostingState(network);
+        var did2 = configuration.GetSection("DeepIdV2DirectoryAuthority")
+            .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        if (!did2.Enabled || !did2.ProofEnabled ||
+            !string.Equals(did2.NetworkIdHex, authority.NetworkIdHex, StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(did2.LatestHeadFloorPostgreSqlConnectionString))
+            throw new InvalidOperationException("DID2 route authority requires current proof and independent floor/journal configuration.");
+        services.TryAddSingleton<IDeepIdV2RouteThresholdJournal>(_ =>
+            new DeepIdV2PostgreSqlRouteThresholdJournal(
+                did2.LatestHeadFloorPostgreSqlConnectionString, network));
+        return new ContactRouteAuthorityHostingState(network, ContactCoordinationIngressAuthenticator.FromConfiguration(configuration));
     }
 
     internal static void MapContactRouteAuthorityEndpoint(
@@ -334,6 +109,17 @@ internal static class ContactRouteAuthorityHostingExtensions
         CancellationToken cancellationToken)
     {
         SetNoStore(context.Response);
+        if (!context.Request.IsHttps || context.Request.Path != EndpointPath ||
+            context.Request.QueryString.HasValue)
+            return Empty(context.Response, StatusCodes.Status400BadRequest);
+        if (state.NetworkId.IsEmpty || state.Access is null)
+            return Empty(context.Response, StatusCodes.Status503ServiceUnavailable);
+        var time = context.RequestServices.GetRequiredService<TimeProvider>();
+        var peer = state.Access.ReadAdmittedHeaders(context.Request, time.GetUtcNow());
+        if (peer is null) return Empty(context.Response, StatusCodes.Status401Unauthorized);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        var ct = timeout.Token;
         var decision = admission.TryAcquire(context.Connection.RemoteIpAddress);
         if (!decision.IsAccepted)
         {
@@ -355,8 +141,12 @@ internal static class ContactRouteAuthorityHostingExtensions
             ContactRouteAuthorityWireCodec.RequestBytes);
         try
         {
-            await context.Request.Body.ReadExactlyAsync(encoded, cancellationToken)
+            await context.Request.Body.ReadExactlyAsync(encoded, ct)
                 .ConfigureAwait(false);
+            if (await context.Request.Body.ReadAsync(new byte[1], ct).ConfigureAwait(false) != 0)
+                return Empty(context.Response, StatusCodes.Status400BadRequest);
+            if (!ContactCoordinationPeerAuthentication.Verify(peer, state.NetworkId.Span, ContactCoordinationTarget.Route, encoded, time.GetUtcNow()))
+                return Empty(context.Response, StatusCodes.Status401Unauthorized);
             var request = ContactRouteAuthorityWireCodec.DecodeRequest(encoded);
             if (state.NetworkId.IsEmpty)
                 return Empty(context.Response, StatusCodes.Status503ServiceUnavailable);
@@ -365,7 +155,7 @@ internal static class ContactRouteAuthorityHostingExtensions
                 return Empty(context.Response, StatusCodes.Status404NotFound);
             try
             {
-                var response = await issuer.IssueAsync(request, cancellationToken)
+                var response = await issuer.IssueAsync(request, ct)
                     .ConfigureAwait(false);
                 var body = ContactRouteAuthorityWireCodec.EncodeResponse(request, response);
                 context.Response.ContentLength = body.Length;
@@ -383,10 +173,14 @@ internal static class ContactRouteAuthorityHostingExtensions
             }
             catch (Exception exception) when (exception is
                 ContactRouteAuthorityUnavailableException or IOException or
-                UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+                UnauthorizedAccessException or InvalidDataException or InvalidOperationException or Npgsql.NpgsqlException)
             {
                 return Empty(context.Response, StatusCodes.Status503ServiceUnavailable);
             }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return Empty(context.Response, StatusCodes.Status503ServiceUnavailable);
         }
         catch (EndOfStreamException)
         {
@@ -425,7 +219,7 @@ internal readonly struct ContactRouteAuthorityHostingState;
 
 internal static class ContactRouteAuthorityHostingExtensions
 {
-    internal const string EndpointPath = "/api/v1/contact-route-authority";
+    internal const string EndpointPath = "/api/v2/contact-route-authority";
 
     internal static ContactRouteAuthorityHostingState AddContactRouteAuthority(
         this IServiceCollection services,

@@ -40,6 +40,16 @@ internal sealed class DeepIdV2DirectoryProofRequest
         minimumAdhHash = wire.Lookup.MinimumAdhHash.ToArray();
     }
 
+    internal DeepIdV2DirectoryProofRequest(ReadOnlySpan<byte> networkId,
+        ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> bootId, ulong sendSample,
+        ReadOnlySpan<byte> leafKey, ulong minimumGeneration,
+        ReadOnlySpan<byte> minimumHash)
+        : this(networkId, nonce, bootId, sendSample, leafKey)
+    {
+        MinimumAdhGeneration = minimumGeneration;
+        minimumAdhHash = Required(minimumHash, 32, nameof(minimumHash));
+    }
+
     internal ReadOnlyMemory<byte> NetworkId => networkId.ToArray();
     internal ReadOnlyMemory<byte> Nonce => nonce.ToArray();
     internal ReadOnlyMemory<byte> BootId => bootId.ToArray();
@@ -268,6 +278,35 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var issued = await IssueAsync(new DeepIdV2DirectoryProofRequest(wire),
             cancellationToken).ConfigureAwait(false);
         return DeepIdV2DirectoryProofWireCodec.EncodeResponse(wire, issued);
+    }
+
+    // Read-only release fence: cached/signing results cannot outlive a head
+    // changed during an asynchronous callback or external-floor transition.
+    internal async ValueTask RequireStillCurrentAsync(
+        VerifiedDeepIdV2DirectoryFreshness expected,
+        ReadOnlyMemory<byte> expectedExactXnv1,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (latestHeadFloor is null)
+            throw new InvalidOperationException("Route issuance requires an independent latest-head floor.");
+        var trusted = await trustedTimeSource.ReadAsync(cancellationToken).ConfigureAwait(false);
+        trusted.Validate();
+        if (!expected.IsCurrentAtMonotonic(trusted.ServerBootId.Span,
+                trusted.ServerMonotonicSample))
+            throw new CryptographicException("DID2 route proof expired before release.");
+        var authority = networkAuthoritySource.Read();
+        using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+        using var store = new DeepIdV2DirectoryStateStore(statePath, integrityKey,
+            networkId, bootstrapSource, authority, verifier, deploymentProfileId, latestHeadFloor);
+        using var lease = store.Open(cancellationToken);
+        var current = await lease.ReadAsync(checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds),
+            cancellationToken).ConfigureAwait(false);
+        if (!Fixed(current.CurrentHead.ExactAdh1.Span, expected.ExactAdh1.Span))
+            throw new CryptographicException("DID2 route head changed before release.");
+        var exactView = await currentViewSource.ReadExactXnv1Async(cancellationToken).ConfigureAwait(false);
+        if (!Fixed(exactView.Span, expectedExactXnv1.Span))
+            throw new CryptographicException("DID2 current view changed before release.");
     }
 
     internal async ValueTask<byte[]> ReadHistoryAsync(ReadOnlyMemory<byte> exactRequest,

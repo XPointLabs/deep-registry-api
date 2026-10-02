@@ -1,5 +1,6 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Net;
+using System.Buffers.Binary;
 using System.Text;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
@@ -104,6 +105,18 @@ public sealed class XPointNetworkClosureDistributionHostingTests
     }
 
     [Fact]
+    public async Task RetiredSevenChainBundleIsUnavailableWithoutPartialResponse()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var retired = fixture.Frame[..^20];
+        BinaryPrimitives.WriteUInt16BigEndian(retired.AsSpan(8), 7);
+        File.WriteAllBytes(fixture.Path, retired);
+        using var response = await fixture.Client.PostAsync(XPointNetworkClosureDistributionHosting.EndpointPath, Request());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
     public async Task ConcurrentFetchDoesNotQueueOrAllocateAnotherBundle()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -152,11 +165,11 @@ public sealed class XPointNetworkClosureDistributionHostingTests
 
         private Fixture()
         {
-            var chains = new[] { "XNA1", "DTS1", "XVP1", "XNV1", "XNH1", "XND1", "PMT2" }
+            var chains = new[] { "XNA1", "DTS1", "XVP1", "XNV1", "XNH1", "XND1", "PMT2", "PMA2" }
                 .Select(magic => { var record = new byte[12]; Encoding.ASCII.GetBytes(magic).CopyTo(record, 0);
                     return (IReadOnlyList<ReadOnlyMemory<byte>>)new ReadOnlyMemory<byte>[] { record }; }).ToArray();
             Frame = XPointNetworkClosureWireCodec.EncodeResponse(Network,
-                chains[0], chains[1], chains[2], chains[3], chains[4], chains[5], chains[6]);
+                chains[0], chains[1], chains[2], chains[3], chains[4], chains[5], chains[6], chains[7]);
         }
 
         internal static async Task<Fixture> CreateAsync()

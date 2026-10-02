@@ -593,70 +593,22 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                 descriptorBound.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes
                     .ToArray());
 
-            // The prekey becomes unambiguously active only after a later
-            // authenticated time observation. Both own and peer proofs use
-            // Alice's protected directory floor, never Bob's local store.
+            // Both own and peer proofs use Alice's protected directory floor,
+            // never Bob's local store. Account-owned initial-claim completion
+            // is covered by the Shared DID2 business fixture; the retired
+            // caller-supplied DPK2/session API must not be restored here.
             forwardTime.SetUnixTime(1_700_000_410);
             var currentAlice = await peerProof.FetchOwnGenesisAsync(
                 firstAtLatest.CurrentCheckpoint!.Binding,
                 fixture.Authority, 1, 2);
             var currentBob = await peerProof.FetchByDid2Async(secondDid,
                 fixture.Authority, 1, 2);
-            var operationSample = Math.Max(currentAlice.MonotonicSample,
-                currentBob.MonotonicSample) + 1;
-            await Assert.ThrowsAsync<CryptographicException>(() =>
-                accounts.BeginOwnDph2ClaimAsync(peerProof, fixture.Authority,
-                    verified, Bytes(16, 0xc1),
-                    operationSample, 64));
-            await Assert.ThrowsAsync<CryptographicException>(() =>
-                accounts.BeginOwnDph2ClaimAsync(peerProof,
-                    fixture.Authority, currentBob,
-                    Bytes(16, 0xc1), operationSample, 64));
-            if (OperatingSystem.IsWindows())
-            {
-                using var bobPrekeys = await secondAccounts
-                    .OpenLocalPreKeyAuthoringAuthorityAsync();
-                var bobDirectory = ApplicationCoreVerifier.StartDmd1Lineage(
-                    secondVerified.CurrentCheckpoint!.Directory).Next;
-                using var bobOffering = bobPrekeys.AuthorOneTimeV2(
-                    new Dpk2AuthoringContext(bobDirectory, 1, 1, 1,
-                        1_700_000_400, 1_700_000_400, 1_700_086_800));
-                using var started = await accounts.BeginOwnDph2ClaimAsync(
-                    peerProof, fixture.Authority, currentAlice,
-                    Bytes(16, 0xc1), operationSample, 64);
-                await Assert.ThrowsAsync<CryptographicException>(() =>
-                    accounts.CompleteOwnDph2ClaimAsync(started,
-                        bobOffering.ExactDpk2, peerProof, fixture.Authority,
-                        currentAlice, currentAlice, Bytes(16, 0xc1),
-                        operationSample, 64));
-                var tamperedDpk2 = bobOffering.ExactDpk2.ToArray();
-                tamperedDpk2[^1] ^= 1;
-                await Assert.ThrowsAsync<MessagingWireFormatException>(() =>
-                    accounts.CompleteOwnDph2ClaimAsync(started,
-                        Dpk2Codec.Encode(bobOffering.Record), peerProof,
-                        fixture.Authority, currentAlice, currentBob,
-                        Bytes(16, 0xc1), operationSample, 64));
-                await Assert.ThrowsAsync<MessagingWireFormatException>(() =>
-                    accounts.CompleteOwnDph2ClaimAsync(started,
-                        tamperedDpk2, peerProof, fixture.Authority,
-                        currentAlice, currentBob, Bytes(16, 0xc1),
-                        operationSample, 64));
-                using var prepared = await accounts.CompleteOwnDph2ClaimAsync(
-                    started, bobOffering.ExactDpk2, peerProof,
-                    fixture.Authority, currentAlice, currentBob,
-                    Bytes(16, 0xc1), operationSample, 64);
-                Assert.Equal(started.ClaimOperationId.ToArray(),
-                    prepared.ClaimOperationId.ToArray());
-                Assert.Equal(bobOffering.Record.ResponderAccountId.ToArray(),
-                    prepared.ResponderAccountId.ToArray());
-                var replay = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                    accounts.CompleteOwnDph2ClaimAsync(started,
-                        bobOffering.ExactDpk2, peerProof, fixture.Authority,
-                        currentAlice, currentBob, Bytes(16, 0xc1),
-                        operationSample, 64));
-                Assert.Contains("no longer available", replay.Message,
-                    StringComparison.Ordinal);
-            }
+            Assert.Equal(firstAtLatest.CurrentCheckpoint!.Directory.Record.DeepAccountId.ToArray(),
+                currentAlice.CurrentCheckpoint!.Directory.Record.DeepAccountId.ToArray());
+            Assert.Equal(secondVerified.CurrentCheckpoint!.Directory.Record.DeepAccountId.ToArray(),
+                currentBob.CurrentCheckpoint!.Directory.Record.DeepAccountId.ToArray());
+            Assert.Equal(2UL, currentAlice.NextProtectedLkg.TreeSize);
+            Assert.Equal(2UL, currentBob.NextProtectedLkg.TreeSize);
 
             // The imported root checkpoint targets head 1. After another
             // admission, a genesis-floor reader must receive a live DTT1 for

@@ -45,6 +45,14 @@ Logs expose the exception type and a closed static reason code (otherwise
 `unclassified`), never arbitrary messages, source identifiers or custody paths.
 Diagnostic labels do not change authority checks or HTTP status codes.
 
+The read-only production check on 2026-10-02 confirmed readiness 503 and the
+source-whitelisted `manual-time-anchor-stale` failure in the deployed manual
+time composition. Automatic NTS was not enabled. These are live diagnostic
+findings, not evidence of a repaired deployment. The stale-anchor and monotonic
+reset labels remain Error severity and expose neither the anchor nor paths.
+Enabling a helper alone does not provision a missing floor or repair expired
+signed network/directory authority.
+
 `/api/v2/account-directory/history` distributes source-bound DHQ2/DHR2 pages
 from the authenticated journal under the independent PostgreSQL floor. It is
 read-only and is never a freshness capability. Unknown historical sources

@@ -7,6 +7,21 @@ registration extension fields that are not part of the Deep-native protocol cont
 
 ## Candidate image publication
 
+The private DID2 mailbox grant candidate follows
+[DR-0054](../docs/survival-program/decisions/DR-0054-did2-private-mailbox-grant-issuance.md).
+`DeepIdV2MailboxGrantAuthority:Enabled` defaults to false. Enabling it requires
+the current DID2 proof authority/external latest-head floor, complete public
+network bundle, an exact public `ObserverCredentialPath`, independent protected
+`DepositSignerSocketPath` and `RetrieveSignerSocketPath`, and disabled retired
+`ProductionMailbox` authority. The existing registered node keys authenticate
+the calling nodes; issuer secrets never enter XNode or client configuration.
+Provision [the grant journal](docs/sql/did2-mailbox-grant-journal.sql) explicitly
+in the independent restore-authority DB with a separate least-privilege runtime
+role and fixed capacity. Keep it with the floor through backup/recovery. Runtime
+does not execute DDL, persist raw capability requests, reset capacity or renew
+exact winners. Full private HTTP/signer/proof/floor and matched rollout checks
+remain required; local source builds do not activate the release.
+
 The manual **Publish registry image** workflow uses the existing repository
 secret `XPOINTLABS_CI_TOKEN` for GHCR login, matching the push-triggered candidate
 publisher. That credential needs package access and `write:packages`; checkout

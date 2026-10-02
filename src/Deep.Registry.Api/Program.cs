@@ -67,6 +67,8 @@ var deepIdV2DirectoryAuthority =
     Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
         .AddDeepIdV2DirectoryAuthority(builder.Services, builder.Configuration,
             builder.Environment);
+var deepIdV2MailboxGrants = Deep.Registry.Api.DirectoryPublication.DeepIdV2MailboxGrantHosting
+    .AddDeepIdV2MailboxGrants(builder.Services, builder.Configuration);
 #endif
 var targetedCurrentValueDirectoryPackages =
     Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
@@ -152,6 +154,8 @@ Deep.Registry.Api.DirectoryPublication.XPointNetworkClosureDistributionHosting
 #if DEEP_PROTOCOL_DIRECTORY_V1
 Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
     .MapAccountDirectoryAuthorityEndpoint(app, accountDirectoryAuthority);
+Deep.Registry.Api.DirectoryPublication.DeepIdV2MailboxGrantHosting
+    .MapDeepIdV2MailboxGrants(app, deepIdV2MailboxGrants);
 Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
     .MapDeepIdV2DirectoryAuthorityEndpoint(app, deepIdV2DirectoryAuthority);
 #endif

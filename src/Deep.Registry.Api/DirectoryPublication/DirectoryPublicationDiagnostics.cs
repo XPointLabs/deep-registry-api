@@ -22,6 +22,8 @@ internal static class DirectoryPublicationDiagnostics
     // and all verification/HTTP outcomes remain independent of this label.
     internal static string UnavailableReason(Exception error) => error.Message switch
     {
+        "The protected trusted-time anchor is stale." => "manual-time-anchor-stale",
+        "The platform monotonic clock reset; trusted time requires a custody rotation." => "manual-time-clock-reset",
         "Production DID2 authority does not cover the trusted-time interval." => "authority-time-coverage",
         "Production DID2 current head cannot cover a new proof." => "head-time-coverage",
         "DID2 proof has no usable nonce-bound lifetime." => "proof-lifetime",
