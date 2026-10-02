@@ -74,6 +74,7 @@
     <Compile Include="ContactRouteClosureTransportTests.cs" />
     <Compile Include="DeepIdV2RouteThresholdJournalTests.cs" />
     <Compile Include="DeepIdV2RouteThresholdIssuerTests.cs" />
+    <Compile Include="DeepIdV2PublicationJournalTests.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(DirectoryDiagnosticsFocused)' == 'true'">
@@ -104,6 +105,8 @@
   <ItemGroup>
     <None Include="..\..\docs\sql\did2-publication-journal.sql"
           Link="Fixtures\did2-publication-journal.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\sql\did2-publication-successor-fence.sql"
+          Link="Fixtures\did2-publication-successor-fence.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\sql\did2-mailbox-grant-journal.sql"
           Link="Fixtures\did2-mailbox-grant-journal.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\sql\did2-route-threshold-journal.sql"
