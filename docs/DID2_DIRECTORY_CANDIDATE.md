@@ -377,7 +377,24 @@ floor database. Effective runtime column permissions and empty initial journals
 read back correctly. Before/after logical dumps were retained and copied to local
 private backup custody with matching hashes. Existing floor rows and credentials
 were not written by provisioning. This is not an issuance, restore drill or
-device-delivery claim; contact activation and full recovery gates remain open.
+device-delivery claim; full recovery gates remain open.
+
+Contact activation follow-up (2026-10-02): the same `1c1a6cb` image now runs with
+route/publication enabled and the three existing registered nodes in the DR48
+access list. Only those five environment entries changed; the previous owner is
+stopped and retained. Both readiness routes passed, all seven checked custody
+files and 2,987 retained proof nonce markers matched, and a fresh quiescent backup
+was retained. The two exact proxy routes were added with the existing upstream
+and security include after nginx validation. Public unauthenticated POSTs returned
+401; this proves access gating, not witness issuance. Public and origin-local
+HTTPS closure responses both returned the full 19,670 bytes with the same retained
+SHA-256. The supported `7d918c6` installer activated the closed contact profile on
+all three nodes, preserving registered Ed25519/BLS keys and named state volumes.
+Read-only checks found coordination/resolver/claim enabled, retired contact/group
+runtimes disabled and readiness 200. Mailbox authority readiness remains false.
+A guarded Android retry with VPN still hit route authenticated-time coverage
+rejection; its particular artifact and failure direction are not yet established.
+Contact delivery, grants, messages, attachments and groups remain open physical gates.
 
 ## Earlier production proof-budget rollout evidence
 
