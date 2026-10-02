@@ -35,6 +35,9 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 string.Equals(args[1], "provision-floor",
                     StringComparison.Ordinal))
                 ProvisionFloor(configuration, cancellationToken);
+            else if (args.Length == 2 &&
+                string.Equals(args[1], "inspect-authority-window", StringComparison.Ordinal))
+                InspectAuthorityWindow(configuration);
             else if (args.Length == 3 &&
                 string.Equals(args[1], "provision-nts-floor", StringComparison.Ordinal))
                 ProvisionNtsFloor(configuration, args[2], cancellationToken);
@@ -438,6 +441,21 @@ internal static class DeepIdV2DirectoryOperatorCommand
             authority, head, coreHash);
         Console.Out.WriteLine(
             $"Verified DID2 genesis ADH1 core hash: {Convert.ToHexString(coreHash)}");
+    }
+
+    private static void InspectAuthorityWindow(IConfiguration configuration)
+    {
+        var options = configuration.GetSection("DeepIdV2DirectoryAuthority").Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        if (options.ExactAuthorityPaths.Concat(options.ExactTimePolicyPaths).Any(path => !Path.IsPathFullyQualified(path)))
+            throw new ArgumentException("Authority window inspection requires absolute pinned artifact paths.");
+        var network = DirectoryPublicationHostingExtensions.Hex(options.NetworkIdHex, 16, "DID2 network");
+        var pin = DirectoryPublicationHostingExtensions.Hex(options.GenesisAuthorityCoreHashHex, 32, "DID2 genesis pin");
+        var verified = new DeepIdV2XPointAuthoritySource(network, pin, options.ExactAuthorityPaths, options.ExactTimePolicyPaths).ReadWithTimePolicy();
+        Console.Out.WriteLine(JsonSerializer.Serialize(new {
+            schema = "deep.registry.signed-authority-window.v1", currentTimeEvidence = false,
+            authorityNotBefore = verified.Authority.NotBefore, authorityExpiresAt = verified.Authority.ExpiresAt,
+            policyNotBefore = verified.Policy.NotBefore, policyExpiresAt = verified.Policy.ExpiresAt
+        }));
     }
 
     private static void ProvisionNtsFloor(IConfiguration configuration, string expectedHash,

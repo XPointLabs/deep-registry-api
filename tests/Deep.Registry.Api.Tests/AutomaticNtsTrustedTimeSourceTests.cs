@@ -5,6 +5,7 @@ using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Configuration;
+using System.Text.Json;
 
 namespace Deep.Registry.Api.Tests;
 
@@ -217,6 +218,29 @@ public sealed class AutomaticNtsTrustedTimeSourceTests
         Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(args, config));
         Assert.False(File.Exists(world.FloorPath));
         Assert.Equal(manual, File.ReadAllBytes(world.ManualPath));
+    }
+
+    [Fact]
+    public void SignedWindowInspectionVerifiesPinsWithoutProvisioningOrClaimingFreshTime()
+    {
+        using var world = new World(provision: false); var config = world.UpgradeConfiguration();
+        var saved = Console.Out; using var captured = new StringWriter();
+        try
+        {
+            Console.SetOut(captured);
+            Assert.Equal(0, DeepIdV2DirectoryOperatorCommand.TryRun(["did2-directory", "inspect-authority-window"], config));
+        }
+        finally { Console.SetOut(saved); }
+        using var json = JsonDocument.Parse(captured.ToString()); var root = json.RootElement;
+        Assert.Equal("deep.registry.signed-authority-window.v1", root.GetProperty("schema").GetString());
+        Assert.False(root.GetProperty("currentTimeEvidence").GetBoolean());
+        Assert.Equal(world.Authority.ExpiresAt, root.GetProperty("authorityExpiresAt").GetUInt64());
+        Assert.Equal(world.Policy.ExpiresAt, root.GetProperty("policyExpiresAt").GetUInt64());
+        Assert.Equal(6, root.EnumerateObject().Count());
+        Assert.False(File.Exists(world.FloorPath)); Assert.False(File.Exists(world.ManualPath));
+        config["DeepIdV2DirectoryAuthority:GenesisAuthorityCoreHashHex"] = new string('a', 64);
+        Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(["did2-directory", "inspect-authority-window"], config));
+        Assert.False(File.Exists(world.FloorPath));
     }
 
     private sealed class World : IDisposable

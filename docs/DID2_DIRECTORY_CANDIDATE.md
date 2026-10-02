@@ -37,6 +37,12 @@ The runtime is unavailable until new authenticated source acquisition succeeds.
 The command does not reset initialized ADA2 or the external head floor, renew
 signed authority/operational views, or assert production/device readiness.
 
+`did2-directory inspect-authority-window` reads and verifies only the pinned
+XNA1/DTS1 lineage, then reports a closed schema of its validity bounds with
+`currentTimeEvidence=false`. It opens no time key, floor, account or journal.
+Those signed bounds are constraints, not observations; do not use the report
+as DTT1, an NTS measurement or readiness approval.
+
 `ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled` selects the
 owned persistent NTS observer, whose absolute executable path is supplied by
 `NtsObserverExecutablePath`. `NtsLowerFloorPath` is a separate durable,
