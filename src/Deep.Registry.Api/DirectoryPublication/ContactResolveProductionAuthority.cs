@@ -233,6 +233,30 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
         gate.Dispose();
     }
 
+    // Caller holds the manual state lease. This retains only its authenticated
+    // historical lower bound; no uptime, old upper bound or wall time is used.
+    internal static ulong ReadRetainedLowerForUpgrade(string path,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> key, ReadOnlySpan<byte> expectedHash)
+    {
+        var encoded = DirectoryPublicationProtectedFile.ReadBounded(path, PayloadBytes + 32);
+        try
+        {
+            if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(encoded), expectedHash))
+                throw new CryptographicException("Manual time anchor compare/exchange failed.");
+            var state = Decode(encoded, network, key);
+            try
+            {
+                if (state.ObservedUnixTime <= state.UncertaintySeconds ||
+                    state.ObservedUnixTime > ulong.MaxValue - state.UncertaintySeconds ||
+                    state.ObservedUnixTime + state.UncertaintySeconds >= state.ValidUntilUnixTime)
+                    throw new InvalidDataException("Retained manual time interval is invalid.");
+                return state.ObservedUnixTime - state.UncertaintySeconds;
+            }
+            finally { CryptographicOperations.ZeroMemory(state.ServerBootId); }
+        }
+        finally { CryptographicOperations.ZeroMemory(encoded); }
+    }
+
     private static TrustedTimeState ReadState(
         string path,
         ReadOnlySpan<byte> networkId,

@@ -17,6 +17,26 @@ preserve its authority, ADA2, independent head floor, nonce ledger and custody.
 Do not rerun `provision-state` on initialized ADA2 to obtain a missing NTS
 floor, and do not change signed policy or trust OS/HTTP time to pass readiness.
 
+The explicit existing-directory transition is defined by
+[DR-0068](../../docs/survival-program/decisions/DR-0068-manual-to-nts-protected-floor-upgrade.md).
+Stage the intended automatic-time configuration, including an absolute,
+distinct `NtsLowerFloorPath`, and run the candidate operator command once:
+
+```text
+dotnet Deep.Registry.Api.dll did2-directory provision-nts-floor <retainedManualAnchorSha256>
+```
+
+The caller must retain the exact independently obtained protected manual-anchor
+hash; no server-reported value is accepted as operator approval. The command
+keeps that anchor unchanged and creates the separate floor, pending stage and
+one-time fence. Interrupted pre-activation execution can resume with the same
+hash and exact authenticated stage. Existing floors, corrupt/conflicting stages
+and a completed fence with missing floor reject. Preserve the fence alongside
+the current floor during backup/restore; do not delete it to retry provisioning.
+The runtime is unavailable until new authenticated source acquisition succeeds.
+The command does not reset initialized ADA2 or the external head floor, renew
+signed authority/operational views, or assert production/device readiness.
+
 `ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled` selects the
 owned persistent NTS observer, whose absolute executable path is supplied by
 `NtsObserverExecutablePath`. `NtsLowerFloorPath` is a separate durable,

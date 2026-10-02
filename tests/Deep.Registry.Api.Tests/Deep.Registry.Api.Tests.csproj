@@ -87,6 +87,12 @@
     <Compile Include="DeepIdV2MailboxGrantJournalTests.cs" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(TrustedTimeUpgradeFocused)' == 'true'">
+    <Compile Remove="**\*.cs" />
+    <Compile Include="AutomaticNtsTrustedTimeSourceTests.cs" />
+    <Compile Include="ProductionContactResolveDirectoryPackageIssuerTests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="..\..\docs\sql\did2-publication-journal.sql"
           Link="Fixtures\did2-publication-journal.sql" CopyToOutputDirectory="PreserveNewest" />

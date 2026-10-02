@@ -35,6 +35,9 @@ internal static class DeepIdV2DirectoryOperatorCommand
                 string.Equals(args[1], "provision-floor",
                     StringComparison.Ordinal))
                 ProvisionFloor(configuration, cancellationToken);
+            else if (args.Length == 3 &&
+                string.Equals(args[1], "provision-nts-floor", StringComparison.Ordinal))
+                ProvisionNtsFloor(configuration, args[2], cancellationToken);
             else if (args.Length == 4 &&
                 string.Equals(args[1], "export-current-head",
                     StringComparison.Ordinal))
@@ -435,6 +438,49 @@ internal static class DeepIdV2DirectoryOperatorCommand
             authority, head, coreHash);
         Console.Out.WriteLine(
             $"Verified DID2 genesis ADH1 core hash: {Convert.ToHexString(coreHash)}");
+    }
+
+    private static void ProvisionNtsFloor(IConfiguration configuration, string expectedHash,
+        CancellationToken cancellationToken)
+    {
+        var did2 = configuration.GetSection("DeepIdV2DirectoryAuthority").Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        var time = configuration.GetSection("ContactResolveProductionAuthority").Get<ContactResolveProductionAuthorityOptions>() ?? new();
+        if (!did2.Enabled || !time.Enabled || !time.AutomaticTrustedTimeEnabled ||
+            !string.Equals(did2.NetworkIdHex, time.NetworkIdHex, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("NTS upgrade requires the intended enabled DID2/time composition.");
+        var custodyPaths = did2.ExactAuthorityPaths.Concat(did2.ExactTimePolicyPaths)
+            .Concat(new[] { did2.StatePath, did2.IntegrityKeyPath, did2.GenesisHeadPath,
+                time.TrustedTimeStatePath, time.TrustedTimeIntegrityKeyPath, time.NtsLowerFloorPath }).ToArray();
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (custodyPaths.Any(path => string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) ||
+            custodyPaths.Select(Path.GetFullPath).Distinct(comparer).Count() != custodyPaths.Length || !File.Exists(did2.StatePath))
+            throw new InvalidOperationException("NTS upgrade must preserve distinct initialized directory custody.");
+        var targets = new[] { time.NtsLowerFloorPath, time.NtsLowerFloorPath + ".lock",
+            time.NtsLowerFloorPath + ".manual-upgrade-pending", time.NtsLowerFloorPath + ".manual-upgrade-fence" };
+        var retained = custodyPaths.Where(path => !comparer.Equals(Path.GetFullPath(path), Path.GetFullPath(time.NtsLowerFloorPath)))
+            .Concat(new[] { did2.CurrentXnv1Path, did2.ProofRequestLedgerIntegrityKeyPath, time.RequestLedgerIntegrityKeyPath })
+            .Concat(time.Witnesses.Select(witness => witness.Ed25519SeedPath)).Where(path => !string.IsNullOrWhiteSpace(path)).ToArray();
+        if (retained.Any(path => !Path.IsPathFullyQualified(path) || targets.Any(target => comparer.Equals(Path.GetFullPath(path), Path.GetFullPath(target)))))
+            throw new InvalidOperationException("NTS upgrade output aliases retained authority custody.");
+        foreach (var ledgerRoot in new[] { did2.ProofRequestLedgerRootPath, time.RequestLedgerRootPath }.Where(path => !string.IsNullOrWhiteSpace(path)))
+        {
+            if (!Path.IsPathFullyQualified(ledgerRoot) || targets.Any(target =>
+                    Path.GetFullPath(target).StartsWith(Path.GetFullPath(ledgerRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                        + Path.DirectorySeparatorChar, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
+                throw new InvalidOperationException("NTS upgrade output cannot enter a nonce ledger.");
+        }
+        var network = DirectoryPublicationHostingExtensions.Hex(did2.NetworkIdHex, 16, "DID2 network");
+        var pin = DirectoryPublicationHostingExtensions.Hex(did2.GenesisAuthorityCoreHashHex, 32, "DID2 genesis pin");
+        var authority = new DeepIdV2XPointAuthoritySource(network, pin, did2.ExactAuthorityPaths, did2.ExactTimePolicyPaths).ReadWithTimePolicy();
+        var key = DirectoryPublicationProtectedFile.ReadKey(time.TrustedTimeIntegrityKeyPath);
+        try
+        {
+            ManualToNtsFloorUpgrade.Run(time.TrustedTimeStatePath, time.NtsLowerFloorPath, network, key,
+                DirectoryPublicationHostingExtensions.Hex(expectedHash, 32, "retained manual anchor hash"),
+                Math.Max(authority.Authority.NotBefore, authority.Policy.NotBefore), cancellationToken);
+            Console.Out.WriteLine("DID2 NTS lower floor provisioned; fresh authenticated acquisition is still required.");
+        }
+        finally { CryptographicOperations.ZeroMemory(key); }
     }
 
     private static void ProvisionFloor(IConfiguration configuration,

@@ -50,6 +50,8 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
             throw new ArgumentException("Automatic NTS custody configuration is incomplete.");
         RejectReparse(this.executable);
         RejectReparse(this.floorPath);
+        if (File.Exists(this.floorPath + ".manual-upgrade-pending"))
+            throw new InvalidDataException("NTS manual upgrade is unfinished; no runtime activation is allowed.");
         // Re-authenticate any retained floor before starting a process. No persisted
         // upper bound survives this instance's new boot ID, even if uptime increased.
         using var lease = DirectoryPublicationProtectedFile.AcquireLease(this.floorPath, default);
@@ -236,13 +238,7 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
             throw new ArgumentException("Initial NTS floor custody is incomplete.");
         RejectReparse(path);
         using var lease = DirectoryPublicationProtectedFile.AcquireLease(path, cancellationToken);
-        Span<byte> payload = stackalloc byte[38];
-        "NTF1"u8.CopyTo(payload);
-        BinaryPrimitives.WriteUInt16BigEndian(payload[4..], 1);
-        network.CopyTo(payload[6..]);
-        BinaryPrimitives.WriteUInt64BigEndian(payload[22..], 1);
-        BinaryPrimitives.WriteUInt64BigEndian(payload[30..], signedPolicyLowerBound);
-        var encoded = DirectoryPublicationProtectedFile.Protect(payload, integrityKey);
+        var encoded = EncodeInitialFloor(network, integrityKey, signedPolicyLowerBound);
         try
         {
             // CreateNew is explicit first-time custody, never recovery/reset.
@@ -251,6 +247,18 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
             stream.Write(encoded); stream.Flush(true);
         }
         finally { CryptographicOperations.ZeroMemory(encoded); }
+    }
+
+    internal static byte[] EncodeInitialFloor(ReadOnlySpan<byte> network,
+        ReadOnlySpan<byte> integrityKey, ulong lowerBound)
+    {
+        Span<byte> payload = stackalloc byte[38];
+        "NTF1"u8.CopyTo(payload);
+        BinaryPrimitives.WriteUInt16BigEndian(payload[4..], 1);
+        network.CopyTo(payload[6..]);
+        BinaryPrimitives.WriteUInt64BigEndian(payload[22..], 1);
+        BinaryPrimitives.WriteUInt64BigEndian(payload[30..], lowerBound);
+        return DirectoryPublicationProtectedFile.Protect(payload, integrityKey);
     }
 
     private void EnsureObserver(string request)
