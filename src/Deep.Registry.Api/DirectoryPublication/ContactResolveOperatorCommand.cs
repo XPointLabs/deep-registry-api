@@ -8,7 +8,7 @@ internal static class ContactResolveOperatorCommand
 {
     private const string Command = "contact-resolve-authority";
 
-    internal static async ValueTask<int?> TryRunAsync(
+    internal static ValueTask<int?> TryRunAsync(
         string[] args,
         IConfiguration configuration,
         CancellationToken cancellationToken = default)
@@ -16,20 +16,20 @@ internal static class ContactResolveOperatorCommand
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(configuration);
         if (args.Length == 0 || !string.Equals(args[0], Command, StringComparison.Ordinal))
-            return null;
+            return ValueTask.FromResult<int?>(null);
 
         try
         {
+            RetiredDirectoryConfiguration.RequireAbsent(configuration);
             if (args.Length < 2)
                 throw new ArgumentException("A ContactResolve operator action is required.");
             var values = Parse(args.AsSpan(2));
-            return args[1] switch
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<int?>(args[1] switch
             {
                 "provision-time" => ProvisionTime(configuration, values),
-                "author-package" => await AuthorPackageAsync(
-                    configuration, values, cancellationToken).ConfigureAwait(false),
                 _ => throw new ArgumentException("The ContactResolve operator action is unknown."),
-            };
+            });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -41,7 +41,7 @@ internal static class ContactResolveOperatorCommand
         {
             Console.Error.WriteLine(
                 $"ContactResolve operator action failed closed ({exception.GetType().Name}).");
-            return 2;
+            return ValueTask.FromResult<int?>(2);
         }
     }
 
@@ -95,56 +95,6 @@ internal static class ContactResolveOperatorCommand
         }
     }
 
-    private static async ValueTask<int> AuthorPackageAsync(
-        IConfiguration configuration,
-        IReadOnlyDictionary<string, string> values,
-        CancellationToken cancellationToken)
-    {
-        RequireExactOptions(values, required: ["request", "output"], optional: []);
-        var inputPath = ExistingRegularFile(values["request"]);
-        var outputPath = NewRegularFile(values["output"]);
-        var encodedRequest = DirectoryPublicationProtectedFile.ReadBounded(
-            inputPath, ContactResolveDirectoryPackageCodec.AbsoluteMaximumRequestBytes);
-        try
-        {
-            var request = ContactResolveDirectoryPackageCodec.DecodeRequest(encodedRequest);
-            var services = new ServiceCollection();
-            _ = services.AddContactResolveDirectoryPackages(configuration);
-            await using var provider = services.BuildServiceProvider(new ServiceProviderOptions
-            {
-                ValidateOnBuild = true,
-                ValidateScopes = true,
-            });
-            var issuer = ProductionContactResolveDirectoryPackageIssuer
-                .CreateForOfflineOperator(provider);
-            var package = await issuer.IssueAsync(request, cancellationToken).ConfigureAwait(false);
-            var encodedResponse = ContactResolveDirectoryPackageCodec.EncodeResponse(request, package);
-            try
-            {
-                WriteNew(outputPath, encodedResponse);
-                var digest = SHA256.HashData(encodedResponse);
-                try
-                {
-                    Console.Out.WriteLine(
-                        $"ContactResolve CDR1 package ready: {encodedResponse.Length} bytes, SHA-256 {Convert.ToHexString(digest)}");
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(digest);
-                }
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(encodedResponse);
-            }
-            return 0;
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(encodedRequest);
-        }
-    }
-
     private static Dictionary<string, string> Parse(ReadOnlySpan<string> args)
     {
         if ((args.Length & 1) != 0)
@@ -169,35 +119,6 @@ internal static class ContactResolveOperatorCommand
         if (required.Any(value => !values.ContainsKey(value)) ||
             values.Keys.Any(value => !required.Contains(value) && !optional.Contains(value)))
             throw new ArgumentException("The ContactResolve operator option set is incomplete or unknown.");
-    }
-
-    private static string ExistingRegularFile(string value)
-    {
-        var path = Path.GetFullPath(value);
-        if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidDataException("The ContactResolve request input is unavailable.");
-        return path;
-    }
-
-    private static string NewRegularFile(string value)
-    {
-        var path = Path.GetFullPath(value);
-        if (File.Exists(path) || Directory.Exists(path))
-            throw new IOException("The ContactResolve output already exists.");
-        var directory = Path.GetDirectoryName(path);
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory) ||
-            (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidDataException("The ContactResolve output directory is unavailable.");
-        return path;
-    }
-
-    private static void WriteNew(string path, ReadOnlySpan<byte> bytes)
-    {
-        using var stream = new FileStream(
-            path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096,
-            FileOptions.WriteThrough);
-        stream.Write(bytes);
-        stream.Flush(true);
     }
 
     private static ulong U64(string value, string name) =>

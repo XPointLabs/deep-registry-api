@@ -4,6 +4,7 @@ using System.Text;
 
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using Deep.Protocol.AccountDirectoryV1;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
@@ -17,17 +18,27 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
     private readonly IDirectoryPublicationMonotonicClock monotonicClock;
     private readonly IDirectoryPublicationLiveChallengeAuthority challengeAuthority;
     private readonly IDirectoryPublicationProtectedNetworkLkgSource? protectedNetworkLkgSource;
+#if DEEP_PROTOCOL_DIRECTORY_V1
+    private readonly IDirectoryPublicationDid2ProofContextSource? did2ProofContextSource;
+#endif
 
     internal ProductionDirectoryCanonicalPublicationVerifier(
         DirectoryPublicationTrustAnchor trustAnchor,
         IDirectoryPublicationMonotonicClock monotonicClock,
         IDirectoryPublicationLiveChallengeAuthority challengeAuthority,
-        IDirectoryPublicationProtectedNetworkLkgSource? protectedNetworkLkgSource = null)
+        IDirectoryPublicationProtectedNetworkLkgSource? protectedNetworkLkgSource = null
+#if DEEP_PROTOCOL_DIRECTORY_V1
+        , IDirectoryPublicationDid2ProofContextSource? did2ProofContextSource = null
+#endif
+        )
     {
         this.trustAnchor = trustAnchor ?? throw new ArgumentNullException(nameof(trustAnchor));
         this.monotonicClock = monotonicClock ?? throw new ArgumentNullException(nameof(monotonicClock));
         this.challengeAuthority = challengeAuthority ?? throw new ArgumentNullException(nameof(challengeAuthority));
         this.protectedNetworkLkgSource = protectedNetworkLkgSource;
+#if DEEP_PROTOCOL_DIRECTORY_V1
+        this.did2ProofContextSource = did2ProofContextSource;
+#endif
     }
 
     internal static bool HasRequiredProtocolSurface
@@ -82,6 +93,19 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
                 "The verified XNA1 authority belongs to another network.");
         }
 
+        if (did2ProofContextSource is null || closure.SupportedReader != 2)
+            throw Error(DirectoryCanonicalVerificationError.FreshnessClosureInvalid,
+                "Catalog publication requires an independent DID2 context and reader version two.");
+        var did2Context = await did2ProofContextSource.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var lookup = DeepIdV2AccountDirectoryLookupCodec.Author(did2Context.RequestedDid2,
+            authority.NetworkId.Span, did2Context.ProtectedHead.LogGeneration,
+            did2Context.ProtectedHead.CoreHash.Span, serviceProfile: 1,
+            new byte[38], new byte[32]);
+        var query = VerifiedDeepIdV2DirectoryQuery.VerifyDid2(lookup, did2Context.RequestedDid2);
+        if (!Fixed(query.DirectoryLeafKey.Span, closure.QueriedDirectoryLeafKey.Span))
+            throw Error(DirectoryCanonicalVerificationError.FreshnessClosureInvalid,
+                "Catalog query differs from the independently configured DID2 credential.");
+
         // Reject unauthenticated authority material before touching the durable
         // one-use challenge ledger. The ledger remains the sole source of the
         // nonce/window capability used by the public freshness producer.
@@ -103,24 +127,26 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
                 "The consumed DTT1 challenge is outside the current protected monotonic boot/sample.");
         }
 
-        VerifiedAccountDirectoryFreshness freshness;
+        VerifiedDeepIdV2DirectoryFreshness freshness;
         try
         {
-            freshness = AccountDirectoryCurrentProofVerifier.Verify(
+            using var mlDsa65 = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            freshness = DeepIdV2DirectoryCurrentProofVerifier.VerifyRequestedDid2(
                 authority,
                 closure.ExactDirectoryHead,
                 closure.ExactLiveTimeAttestation,
                 closure.ExactDirectoryProof,
                 challenge.Nonce.Span,
-                closure.QueriedDirectoryLeafKey.Span,
+                query,
                 new AccountDirectoryMonotonicRequestWindow(
                     challenge.BootId.Span,
                     challenge.NonceCreatedAtMonotonicSeconds,
                     challenge.ResponseReceivedAtMonotonicSeconds,
                     challenge.CurrentMonotonicSeconds),
-                protectedLkg: null,
-                currentCheckpoint: null,
-                closure.SupportedReader);
+                did2Context.ProtectedHead,
+                did2Context.DeploymentProfileId,
+                closure.SupportedReader,
+                mlDsa65);
         }
         catch (AccountDirectoryFreshnessVerificationException exception)
         {
@@ -128,6 +154,11 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
                 ? DirectoryCanonicalVerificationError.WrongNetwork
                 : DirectoryCanonicalVerificationError.FreshnessClosureInvalid;
             throw Error(error, "The nonce-bound DTT1/ADH1/ADP1 freshness closure did not verify.", exception);
+        }
+        catch (Exception exception) when (exception is FormatException or ArgumentException or CryptographicException)
+        {
+            throw Error(DirectoryCanonicalVerificationError.FreshnessClosureInvalid,
+                "The DID2 freshness closure did not verify.", exception);
         }
 
         var trustedTime = new OnionTrustedTimeAuthority(new MonotonicClockAdapter(monotonicClock));
@@ -213,6 +244,17 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
                 exception);
         }
 
+        var currentDid2Context = await did2ProofContextSource.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (!Fixed(currentDid2Context.ProtectedHead.ExactAdh1.Span, freshness.ExactAdh1.Span) ||
+            !Fixed(currentDid2Context.RequestedDid2.CanonicalBytes.Span, did2Context.RequestedDid2.CanonicalBytes.Span) ||
+            currentDid2Context.DeploymentProfileId != did2Context.DeploymentProfileId)
+            throw Error(DirectoryCanonicalVerificationError.FreshnessClosureInvalid,
+                "The independent DID2 context changed before catalog publication.");
+        var releaseReading = await monotonicClock.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (!freshness.IsCurrentAtMonotonic(releaseReading.BootId.Span, releaseReading.SampleSeconds))
+            throw Error(DirectoryCanonicalVerificationError.FreshnessClosureInvalid,
+                "The DID2 proof expired before catalog publication.");
+
         byte[] viewHash;
         byte[] headHash;
         byte[] pmtHash;
@@ -261,7 +303,7 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
                 lkg.ViewGeneration,
                 DirectoryPublicationProtectedLkgFingerprint.RetentionFromVerifiedProtocol(
                     freshness,
-                    lkg),
+                    lkg, releaseReading),
                 verifiedView,
                 verifiedHead,
                 verifiedTopology);
@@ -299,7 +341,7 @@ internal sealed class ProductionDirectoryCanonicalPublicationVerifier : IDirecto
             lkg.ViewGeneration,
             DirectoryPublicationProtectedLkgFingerprint.RetentionFromVerifiedProtocol(
                 freshness,
-                lkg),
+                lkg, releaseReading),
             verifiedView,
             verifiedHead,
             verifiedTopology,

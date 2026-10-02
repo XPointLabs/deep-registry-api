@@ -58,7 +58,7 @@ internal sealed class DirectoryPublicationVerificationClosure
         {
             throw new ArgumentException("XNV1 and XNH1 successor chains must have equal cardinality.");
         }
-        if (supportedReader == 0)
+        if (supportedReader != 2)
         {
             throw new ArgumentOutOfRangeException(nameof(supportedReader));
         }

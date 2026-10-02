@@ -41,14 +41,19 @@ public sealed class DeepIdV2DirectoryAuthorityHostingTests
         DeepIdV2EnvironmentKeyGuard.RequireUniqueKeys(input);
     }
 
-    [Fact]
-    public void LegacyAndDid2AdmissionCannotBeEnabledTogether()
+    [Theory]
+    [InlineData("AccountDirectoryAuthority:Enabled", "true")]
+    [InlineData("AccountDirectoryAuthority:Enabled", "false")]
+    [InlineData("AccountDirectoryAuthority:Unknown", "value")]
+    [InlineData("ContactResolveDirectoryArtifacts:Unknown", "value")]
+    [InlineData("TargetedCurrentValueDirectoryPackages:Enabled", "false")]
+    public void RetiredAuthoritySectionsAreNeverAccepted(string key, string value)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["DeepIdV2DirectoryAuthority:Enabled"] = "true",
-                ["AccountDirectoryAuthority:Enabled"] = "true"
+                [key] = value
             }).Build();
         Assert.Throws<InvalidOperationException>(() =>
             new ServiceCollection().AddDeepIdV2DirectoryAuthority(

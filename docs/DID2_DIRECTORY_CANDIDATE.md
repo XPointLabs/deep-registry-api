@@ -6,6 +6,24 @@ readiness alone does not prove mailbox grants or physical delivery.
 
 ## Automatic time and historical distribution (2026-09-29)
 
+### Network catalog source cutover (2026-10-02)
+
+Network catalog writes now require the current DID2 admission/proof authority
+and `DirectoryPublication:RequestedDid2Path`, an absolute path to the exact
+public DID2 credential used by the catalog publisher's proof query. Never
+supply a recovery phrase, private key or resolver read capability at this path.
+The verifier derives the exact query locally and reads the current authenticated
+ADA2 head under the independent external latest-head floor. It accepts only
+reader version two and ADP1 V2, rechecks the head before release and projects
+retention time using the actual protected monotonic elapsed interval. The
+existing write envelope is not extended or interpreted as identity authority.
+Missing current authority/context stays closed; mirror-only byte distribution
+does not assert freshness. Update staged configuration with the matched source
+graph before rollout; do not reset ADA2, nonce markers or floors to make it start.
+Positive joined/native catalog, full linked consumer and live/device gates
+remain pending. See the single normative source
+[DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md).
+
 The candidate Registry Dockerfile packages the reviewed DevOps NTS observer
 at `/usr/local/bin/deep-nts-observer` for the actual `TARGETARCH` (amd64 or
 arm64), using the pinned Go builder, locked modules and observer unit tests.
@@ -107,8 +125,13 @@ provisioning are in [Deep DEV](../../deep-devops/docs/DEEP_DEV.md).
 This is a development/UAT path, not a production release approval. The
 `/api/v2/account-directory/genesis-admissions` route is disabled by default.
 It accepts only DGA1 V2, verifies the exact DID2/DAB2 ML-DSA and classical
-closure, and appends to separately provisioned ADA2 state. The legacy V1
-admission and the V2 admission cannot be enabled together.
+closure, and appends to separately provisioned ADA2 state. The V1 admission,
+proof-package and targeted-current-value hosts have been removed by
+[DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md).
+The retired `AccountDirectoryAuthority`, `ContactResolveDirectoryArtifacts`
+and `TargetedCurrentValueDirectoryPackages` configuration sections must be
+absent, even when disabled or containing only unknown fields. This source
+cutover does not delete deployed custody, journals, floors or registered keys.
 
 The `DeepIdV2DirectoryAuthority` configuration requires:
 
@@ -196,8 +219,7 @@ the Protocol authoring boundary. It never consumes a nonce or writes state.
 Actual admission and proof requests independently perform their required
 checks; readiness is not authorization. Corruption, rollback and forks remain
 closed, not repaired by retry. UAT may explicitly set
-`DeepIdV2DirectoryAuthority:Enabled=true` and keep
-`AccountDirectoryAuthority:Enabled=false`.
+`DeepIdV2DirectoryAuthority:Enabled=true`; omit all retired sections entirely.
 
 When explicitly enabled, head renewal re-reads the protected monotonic
 trusted-time anchor, the complete ADA2 journal and independent PostgreSQL
@@ -267,8 +289,8 @@ The DID2-only proof issuer derives current/non-membership
 material directly from the fully restored ADA2 journal under its exclusive
 lease. It consumes a durable nonce before accessing witness custody, reads a
 signed exact XNV1, and issues and self-verifies a live DTT1/ADP1 V2 using the
-PQ verifier. Its nonce ledger must use a separate path/key from V1 if it is
-ever composed for a deployed service. In UAT, an explicitly enabled
+PQ verifier. Retain its separately provisioned path/key and protected nonce
+markers on upgrades; the removed V1 issuer is not an available fallback. In UAT, an explicitly enabled
 `POST /api/v2/account-directory/proofs` accepts only the exact bounded `DPQ2`
 frame and returns `DPP2`; it shares the bounded admission gate but uses its
 own durable one-use nonce ledger. The public route remains disabled by default

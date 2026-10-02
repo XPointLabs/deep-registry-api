@@ -124,7 +124,7 @@ internal sealed class DirectoryCatalogCompactionCapability
 
 #if DEEP_PROTOCOL_DIRECTORY_V1
     internal static DirectoryCatalogCompactionCapability MintFromVerifiedProtocol(
-        VerifiedAccountDirectoryFreshness currentFreshness,
+        VerifiedDeepIdV2DirectoryFreshness currentFreshness,
         IReadOnlyList<VerifiedXPointNetworkForwardCheckpoint> sourceSpecificProofs)
     {
         ArgumentNullException.ThrowIfNull(currentFreshness);
@@ -237,10 +237,17 @@ internal static class DirectoryPublicationProtectedLkgFingerprint
         value.LastForwardCheckpointGeneration);
 
     internal static DirectoryPublicationRetentionAuthority RetentionFromVerifiedProtocol(
-        VerifiedAccountDirectoryFreshness freshness,
-        XPointNetworkProtectedLkg value) => new(
-            freshness.TrustedUpperUnixSeconds,
+        VerifiedDeepIdV2DirectoryFreshness freshness,
+        XPointNetworkProtectedLkg value,
+        DirectoryPublicationMonotonicReading current)
+    {
+        ArgumentNullException.ThrowIfNull(freshness);
+        if (!freshness.IsCurrentAtMonotonic(current.BootId.Span, current.SampleSeconds))
+            throw new CryptographicException("DID2 catalog freshness expired before retention was minted.");
+        return new DirectoryPublicationRetentionAuthority(
+            checked(freshness.TrustedUpperUnixSeconds + (current.SampleSeconds - freshness.MonotonicSample)),
             Compute(value));
+    }
 #endif
 
     private static byte[] Compute(

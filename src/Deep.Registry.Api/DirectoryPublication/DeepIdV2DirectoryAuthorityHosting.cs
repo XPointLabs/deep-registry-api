@@ -52,6 +52,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
+        RetiredDirectoryConfiguration.RequireAbsent(configuration);
         DeepIdV2EnvironmentKeyGuard.RequireUniqueProcessKeys();
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
@@ -464,9 +465,6 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
         Validate(DeepIdV2DirectoryAuthorityOptions options,
             IConfiguration configuration)
     {
-        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
-            throw new InvalidOperationException(
-                "DID2 and legacy account-directory admission cannot run together.");
         if (!configuration.GetValue<bool>(
                 "ContactResolveProductionAuthority:Enabled"))
             throw new InvalidOperationException(
@@ -522,14 +520,10 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 : [])
             .Concat(new[]
             {
-                configuration["AccountDirectoryAuthority:StatePath"],
-                configuration["AccountDirectoryAuthority:IntegrityKeyPath"],
                 configuration["ContactResolveProductionAuthority:TrustedTimeStatePath"],
                 configuration["ContactResolveProductionAuthority:TrustedTimeIntegrityKeyPath"],
                 configuration["ContactResolveProductionAuthority:RequestLedgerIntegrityKeyPath"],
-                configuration["ContactResolveProductionAuthority:RequestLedgerRootPath"],
-                configuration["ContactResolveDirectoryArtifacts:StatePath"],
-                configuration["ContactResolveDirectoryArtifacts:IntegrityKeyPath"]
+                configuration["ContactResolveProductionAuthority:RequestLedgerRootPath"]
             }.Where(static path => !string.IsNullOrWhiteSpace(path))
              .Select(static path => path!))
             .Select(Path.GetFullPath).ToArray();

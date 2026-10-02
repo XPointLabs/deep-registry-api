@@ -19,6 +19,7 @@ internal sealed class DirectoryPublicationOptions
     public string ProtectedNetworkLkgPath { get; set; } = string.Empty;
     public string ProtectedNetworkLkgIntegrityKeyPath { get; set; } = string.Empty;
     public string PublisherClientCertificateSha256 { get; set; } = string.Empty;
+    public string RequestedDid2Path { get; set; } = string.Empty;
 }
 
 internal readonly record struct DirectoryPublicationHostingState(
@@ -75,6 +76,7 @@ internal static class DirectoryPublicationHostingExtensions
         this IServiceCollection services,
         IConfiguration configuration)
     {
+        RetiredDirectoryConfiguration.RequireAbsent(configuration);
         var section = configuration.GetSection("DirectoryPublication");
         var configured = section.Get<DirectoryPublicationOptions>() ?? new DirectoryPublicationOptions();
         services.Configure<DirectoryPublicationOptions>(section);
@@ -108,6 +110,15 @@ internal static class DirectoryPublicationHostingExtensions
             }
 
             ValidateWriteOptions(configured);
+#if DEEP_PROTOCOL_DIRECTORY_V1
+            var did2Options = configuration.GetSection("DeepIdV2DirectoryAuthority")
+                .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+            if (!did2Options.Enabled || !did2Options.ProofEnabled)
+                throw new InvalidOperationException("Catalog writes require the current DID2 proof authority.");
+            services.AddSingleton<IDirectoryPublicationDid2ProofContextSource>(sp =>
+                new DirectoryPublicationDid2ProofContextSource(configured.RequestedDid2Path,
+                    sp.GetRequiredService<DeepIdV2DirectoryProofIssuer>(), did2Options.DeploymentProfileId));
+#endif
             var authorityHash = Hex(
                 configured.AuthorityGenerationZeroCoreHashHex,
                 32,
@@ -142,7 +153,11 @@ internal static class DirectoryPublicationHostingExtensions
                     sp.GetRequiredService<DirectoryPublicationTrustAnchor>(),
                     sp.GetRequiredService<IDirectoryPublicationMonotonicClock>(),
                     sp.GetRequiredService<IDirectoryPublicationLiveChallengeAuthority>(),
-                    sp.GetRequiredService<IDirectoryPublicationProtectedNetworkLkgSource>()));
+                    sp.GetRequiredService<IDirectoryPublicationProtectedNetworkLkgSource>()
+#if DEEP_PROTOCOL_DIRECTORY_V1
+                    , sp.GetRequiredService<IDirectoryPublicationDid2ProofContextSource>()
+#endif
+                    ));
         }
 
         services.AddSingleton(sp => new DirectoryPublicationCatalog(
@@ -374,7 +389,8 @@ internal static class DirectoryPublicationHostingExtensions
             [nameof(options.ProtectedNetworkLkgPath)] = options.ProtectedNetworkLkgPath,
             [nameof(options.ProtectedNetworkLkgIntegrityKeyPath)] = options.ProtectedNetworkLkgIntegrityKeyPath,
             [nameof(options.PublisherClientCertificateSha256)] = options.PublisherClientCertificateSha256,
-            [nameof(options.AuthorityGenerationZeroCoreHashHex)] = options.AuthorityGenerationZeroCoreHashHex
+            [nameof(options.AuthorityGenerationZeroCoreHashHex)] = options.AuthorityGenerationZeroCoreHashHex,
+            [nameof(options.RequestedDid2Path)] = options.RequestedDid2Path
         };
         var missing = required.FirstOrDefault(value => string.IsNullOrWhiteSpace(value.Value));
         if (missing.Key is not null)
@@ -540,6 +556,7 @@ internal static class DirectoryPublicationWriteEnvelopeCodec
             var boot = reader.ReadBytes(16).ToArray();
             var created = reader.ReadUInt64();
             var supportedReader = reader.ReadUInt16();
+            if (supportedReader != 2) throw Malformed();
             var queriedKey = reader.ReadBytes(32).ToArray();
             var authority = reader.ReadChain(DirectoryPublicationVerificationClosure.MaximumAuthorityChainEntries);
             var timePolicy = reader.ReadChain(DirectoryPublicationVerificationClosure.MaximumAuthorityChainEntries);

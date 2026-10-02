@@ -217,9 +217,9 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
             trusted.ObservedUnixTime, trusted.UncertaintySeconds);
 
         // The one-use marker is durable before witness custody or PQ proof work.
-        var ledgerRequest = new ContactResolveDirectoryPackageRequest(
+        var ledgerRequest = new DirectoryProofReplayRequest(
             networkId, request.Nonce.ToArray(), request.BootId.ToArray(),
-            request.ClientMonotonicSendSample, null, null, null);
+            request.ClientMonotonicSendSample);
         await requestLedger.ConsumeAsync(ledgerRequest, trusted, epoch,
             cancellationToken).ConfigureAwait(false);
 
@@ -278,6 +278,26 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var issued = await IssueAsync(new DeepIdV2DirectoryProofRequest(wire),
             cancellationToken).ConfigureAwait(false);
         return DeepIdV2DirectoryProofWireCodec.EncodeResponse(wire, issued);
+    }
+
+    // Read-only independent input for the network catalog verifier. No nonce,
+    // signer callback, head renewal or journal/floor advance is performed here.
+    internal async ValueTask<AccountDirectoryProtectedLkg> ReadCurrentHeadAsync(
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (latestHeadFloor is null)
+            throw new InvalidOperationException("Catalog verification requires an independent latest-head floor.");
+        var trusted = await trustedTimeSource.ReadAsync(cancellationToken).ConfigureAwait(false);
+        trusted.Validate();
+        var authority = networkAuthoritySource.Read();
+        using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+        using var store = new DeepIdV2DirectoryStateStore(statePath, integrityKey,
+            networkId, bootstrapSource, authority, verifier, deploymentProfileId, latestHeadFloor);
+        using var lease = store.Open(cancellationToken);
+        var restored = await lease.ReadAsync(checked(trusted.ObservedUnixTime + trusted.UncertaintySeconds),
+            cancellationToken).ConfigureAwait(false);
+        return restored.CurrentHead;
     }
 
     // Read-only release fence: cached/signing results cannot outlive a head

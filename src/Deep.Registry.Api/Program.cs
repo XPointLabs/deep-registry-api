@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
+Deep.Registry.Api.DirectoryPublication.RetiredDirectoryConfiguration.RequireAbsent(builder.Configuration);
 
 #if DEEP_PROTOCOL_DIRECTORY_V1
 var contactResolveOperatorExit = await
@@ -53,16 +54,12 @@ var productionMailboxEnabled =
 var directoryPublication =
     Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
         .AddDirectoryPublication(builder.Services, builder.Configuration);
-var contactResolveDirectoryPackages =
-    Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExtensions
-        .AddContactResolveDirectoryPackages(builder.Services, builder.Configuration);
 var networkClosureDistribution =
     Deep.Registry.Api.DirectoryPublication.XPointNetworkClosureDistributionHosting
         .AddXPointNetworkClosureDistribution(builder.Services, builder.Configuration);
 #if DEEP_PROTOCOL_DIRECTORY_V1
-var accountDirectoryAuthority =
-    Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
-        .AddAccountDirectoryAuthority(builder.Services, builder.Configuration);
+Deep.Registry.Api.DirectoryPublication.ContactResolveProductionAuthorityServiceCollectionExtensions
+    .AddContactResolveProductionAuthority(builder.Services, builder.Configuration);
 var deepIdV2DirectoryAuthority =
     Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
         .AddDeepIdV2DirectoryAuthority(builder.Services, builder.Configuration,
@@ -70,10 +67,6 @@ var deepIdV2DirectoryAuthority =
 var deepIdV2MailboxGrants = Deep.Registry.Api.DirectoryPublication.DeepIdV2MailboxGrantHosting
     .AddDeepIdV2MailboxGrants(builder.Services, builder.Configuration);
 #endif
-var targetedCurrentValueDirectoryPackages =
-    Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
-        .AddTargetedCurrentValueDirectoryPackages(
-            builder.Services, builder.Configuration, contactResolveDirectoryPackages);
 var contactRouteAuthority =
     Deep.Registry.Api.DirectoryPublication.ContactRouteAuthorityHostingExtensions
         .AddContactRouteAuthority(builder.Services, builder.Configuration);
@@ -147,21 +140,14 @@ if (productionMailboxEnabled)
     Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.MapProductionMailboxEndpoints(app);
 Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
     .MapDirectoryPublicationEndpoints(app, directoryPublication);
-Deep.Registry.Api.DirectoryPublication.ContactResolveDirectoryPackageHostingExtensions
-    .MapContactResolveDirectoryPackageEndpoint(app, contactResolveDirectoryPackages);
 Deep.Registry.Api.DirectoryPublication.XPointNetworkClosureDistributionHosting
     .MapXPointNetworkClosureDistribution(app, networkClosureDistribution);
 #if DEEP_PROTOCOL_DIRECTORY_V1
-Deep.Registry.Api.DirectoryPublication.AccountDirectoryAuthorityHostingExtensions
-    .MapAccountDirectoryAuthorityEndpoint(app, accountDirectoryAuthority);
 Deep.Registry.Api.DirectoryPublication.DeepIdV2MailboxGrantHosting
     .MapDeepIdV2MailboxGrants(app, deepIdV2MailboxGrants);
 Deep.Registry.Api.DirectoryPublication.DeepIdV2DirectoryAuthorityHostingExtensions
     .MapDeepIdV2DirectoryAuthorityEndpoint(app, deepIdV2DirectoryAuthority);
 #endif
-Deep.Registry.Api.DirectoryPublication.TargetedCurrentValueDirectoryPackageHostingExtensions
-    .MapTargetedCurrentValueDirectoryPackageEndpoint(
-        app, targetedCurrentValueDirectoryPackages);
 Deep.Registry.Api.DirectoryPublication.ContactRouteAuthorityHostingExtensions
     .MapContactRouteAuthorityEndpoint(app, contactRouteAuthority);
 Deep.Registry.Api.DirectoryPublication.ContactPublicationAuthorityHostingExtensions

@@ -23,6 +23,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
             return null;
         try
         {
+            RetiredDirectoryConfiguration.RequireAbsent(configuration);
             if (args.Length == 2 &&
                 string.Equals(args[1], "provision-state",
                     StringComparison.Ordinal))
@@ -114,9 +115,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
         CancellationToken cancellationToken,
         uint uncertaintySeconds = 0)
     {
-        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
-            throw new InvalidOperationException(
-                "DID2 head refresh cannot run while ADA1 admission is enabled.");
+        RetiredDirectoryConfiguration.RequireAbsent(configuration);
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         var custodyOptions = configuration.GetSection(
@@ -576,9 +575,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
     private static void ProvisionFloor(IConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
-            throw new InvalidOperationException(
-                "DID2 floor cannot be provisioned while ADA1 admission is enabled.");
+        RetiredDirectoryConfiguration.RequireAbsent(configuration);
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         if (string.IsNullOrWhiteSpace(
@@ -612,9 +609,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
         ulong validFromUnixSeconds, ulong validUntilUnixSeconds,
         CancellationToken cancellationToken)
     {
-        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
-            throw new InvalidOperationException(
-                "DID2 genesis cannot be authored while ADA1 admission is enabled.");
+        RetiredDirectoryConfiguration.RequireAbsent(configuration);
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         var custodyOptions = configuration.GetSection(
@@ -689,9 +684,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
     private static void Provision(IConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        if (configuration.GetValue<bool>("AccountDirectoryAuthority:Enabled"))
-            throw new InvalidOperationException(
-                "DID2 state cannot be provisioned while ADA1 admission is enabled.");
+        RetiredDirectoryConfiguration.RequireAbsent(configuration);
         var options = configuration.GetSection("DeepIdV2DirectoryAuthority")
             .Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
         if (string.IsNullOrWhiteSpace(options.StatePath) ||
