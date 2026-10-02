@@ -14,7 +14,7 @@ public interface IEd25519ExternalSigner
 /// <summary>
 /// Production adapter for a separately protected issuer. Wire format is PMES/v1 followed by a
 /// big-endian uint32 payload length and the payload; response is exactly one 64-byte detached
-/// Ed25519 signature. No key material crosses the socket.
+/// Ed25519 signature followed by end-of-stream. No key material crosses the socket.
 /// </summary>
 public sealed class UnixSocketEd25519ExternalSigner : IEd25519ExternalSigner
 {
@@ -52,16 +52,25 @@ public sealed class UnixSocketEd25519ExternalSigner : IEd25519ExternalSigner
         await SendAllAsync(socket, header, boundedCancellation);
         await SendAllAsync(socket, signingBytes, boundedCancellation);
         var signature = new byte[64];
-        var offset = 0;
-        while (offset < signature.Length)
+        try
         {
-            var read = await socket.ReceiveAsync(signature.AsMemory(offset), SocketFlags.None, boundedCancellation);
-            if (read == 0) throw new IOException("External signer returned a truncated signature.");
-            offset += read;
+            var offset = 0;
+            while (offset < signature.Length)
+            {
+                var read = await socket.ReceiveAsync(signature.AsMemory(offset), SocketFlags.None, boundedCancellation);
+                if (read == 0) throw new IOException("External signer returned a truncated signature.");
+                offset += read;
+            }
+            // Available is only a snapshot of queued bytes. Require the peer's
+            // end-of-stream under the same deadline so delayed tails cannot be
+            // accepted as a canonical response. No completion escapes first.
+            var trailing = new byte[1];
+            if (await socket.ReceiveAsync(trailing, SocketFlags.None, boundedCancellation) != 0)
+                throw new IOException("External signer returned trailing data.");
+            boundedCancellation.ThrowIfCancellationRequested();
+            return signature;
         }
-        if (socket.Available != 0)
-            throw new IOException("External signer returned trailing data.");
-        return signature;
+        catch { CryptographicOperations.ZeroMemory(signature); throw; }
     }
 
     private static async ValueTask SendAllAsync(

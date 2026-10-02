@@ -42,6 +42,20 @@ RUN set -eux; \
       -p:DeepProtocolSourceCutover=true \
       --arch "${dotnet_arch}"
 
+# Optional real Linux socket regression lane. No signing keys, state mounts,
+# service ports or production mutation; the default image graph is unchanged.
+FROM --platform=${BUILDPLATFORM} ${SDK_IMAGE} AS mailbox-signer-tests
+WORKDIR /src
+COPY . ./deep-registry-api
+COPY --from=deep_protocol . ./deep-protocol
+WORKDIR /src/deep-registry-api
+RUN dotnet test tests/Deep.Registry.Api.Tests/Deep.Registry.Api.Tests.csproj \
+    --configuration Release -m:1 -p:UseSharedCompilation=false \
+    -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true \
+    -p:DirectoryVerifierFocused=true -p:MailboxSignerFocused=true \
+    --filter FullyQualifiedName~UnixSocketEd25519ExternalSignerTests \
+    --logger trx --results-directory /test-results
+
 FROM ${RUNTIME_IMAGE} AS runtime
 ARG DEEP_PROTOCOL_REVISION
 ARG DEEP_DEVOPS_REVISION

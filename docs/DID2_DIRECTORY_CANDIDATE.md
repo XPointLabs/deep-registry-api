@@ -1,5 +1,9 @@
 # DID2 Registry admission candidate
 
+Private grant composition and external signer prerequisites are documented
+in [DID2 private mailbox grants](DID2_PRIVATE_MAILBOX_GRANTS.md); admission
+readiness alone does not prove mailbox grants or physical delivery.
+
 ## Automatic time and historical distribution (2026-09-29)
 
 The candidate Registry Dockerfile packages the reviewed DevOps NTS observer
