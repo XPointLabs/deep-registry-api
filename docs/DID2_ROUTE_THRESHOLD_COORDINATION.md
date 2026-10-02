@@ -42,6 +42,16 @@ Exhaustion is an operator action, not a timed cleanup. A same-nonce changed
 request conflicts; a valid replay returns identical committed threshold bytes.
 Stale/expired winners reject and are not renewed under their old nonce.
 
+The Shared consumer retains the entire original request before dispatch under
+[DR-0073](../../docs/survival-program/decisions/DR-0073-did2-exact-route-request-custody.md).
+Its connected test exchange now forwards that retained request, never rebuilding
+the minimum from a newer proof. Registry wire, permanent reservation/winner
+schema and production runtime are unchanged. Exact replay alone does not waive
+DR42's current-anchor threshold adoption/completion gate in the client.
+The real-account fixture uses DR70's pending signed network view, independent
+ADA2-backed DID2 proof and subsequent topology completion; it no longer calls
+the removed legacy one-stage operational author.
+
 Fast isolated lane (does not replace the full Registry/Protocol/recovery gates):
 
 ```powershell

@@ -71,10 +71,10 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                 ScalarMult.Base(Bytes(32, (byte)(0xe8 + i))), Enumerable.Range(0, 5).Select(role =>
                     (ReadOnlyMemory<byte>)PublicKey((byte)(0x10 + i * 5 + role))).ToArray())).ToArray();
             var clock = new Clock();
-            var operational = await XPointNetworkOperationalGenesisAuthor.AuthorAsync(new(
+            var pendingOperational = await XPointNetworkOperationalGenesisAuthor.AuthorNetworkCandidateAsync(new(
                 Bytes(32, 0x12), bootstrap, [root], witnesses, descriptors, Bytes(32, 0xf1),
-                Bytes(32, 0xf4), Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
-                990, 1_000, 1_500, Bytes(32, 0xf2), clock.Boot, 100, 100, 100, 1_100, 5));
+                Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
+                990, 1_000, 1_500));
             var genesis = await DeepIdV2DirectoryHeadAuthor.AuthorGenesisAsync(bootstrap.Authority,
                 990, 4_600, witnesses);
             var xnaPath = Path.Combine(directory, "root.xna1"); var dtsPath = Path.Combine(directory, "time.dts1");
@@ -83,15 +83,10 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             await File.WriteAllBytesAsync(xnaPath, bootstrap.ExactXna1.ToArray());
             await File.WriteAllBytesAsync(dtsPath, bootstrap.ExactDts1.ToArray());
             await File.WriteAllBytesAsync(headPath, genesis.ExactAdh1.ToArray());
-            await File.WriteAllBytesAsync(viewPath, operational.ExactXnv1.ToArray());
+            await File.WriteAllBytesAsync(viewPath, pendingOperational.ExactXnv1.ToArray());
             var integrity = Bytes(32, 0x55);
             await File.WriteAllBytesAsync(statePath, DirectoryPublicationProtectedFile.Protect(
                 DeepIdV2DirectoryStateCodec.Encode(network, new([new(genesis.ExactAdh1, genesis.CoreHash)], [], [])), integrity));
-            var networkBytes = XPointNetworkClosureWireCodec.EncodeResponse(network,
-                [bootstrap.ExactXna1], [bootstrap.ExactDts1], [operational.ExactXvp1],
-                [operational.ExactXnv1], [operational.ExactXnh1], operational.ExactXnd1,
-                [operational.ExactPmt2], [operational.ExactPma2]);
-            await File.WriteAllBytesAsync(bundlePath, networkBytes);
             var rootSource = new DeepIdV2XPointAuthoritySource(network, bootstrap.GenesisPin.AuthorityCoreHash.Span,
                 [xnaPath], [dtsPath]);
             var headSource = new DeepIdV2DirectoryBootstrapSource(headPath, genesis.CoreHash.Span);
@@ -118,13 +113,26 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             var accounts = new DeepIdV2AccountService(storage, directory, network, 1,
                 new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
             await accounts.CreateAsync("Real route QA");
-            var admitted = await admission.AdmitAsync(DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
-                await accounts.PrepareGenesisAdmissionAsync()));
+            using var pq = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            var admissionRequest = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(await accounts.PrepareGenesisAdmissionAsync());
+            var checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(admissionRequest.Admission, 1_000, 1, 2, pq);
+            var admitted = await admission.AdmitAsync(admissionRequest);
             using var nonceLedger = new ProtectedFileContactResolveOneUseRequestLedger(
                 Path.Combine(directory, "proof-nonces"), network, Bytes(32, 0x56));
             using var proofs = new DeepIdV2DirectoryProofIssuer(rootSource, headSource,
                 new DeepIdV2FileCurrentViewSource(viewPath), custody, nonceLedger, clock,
                 statePath, network, integrity, 1, floor);
+            // DR70: signed candidate view precedes independently current DID2
+            // proof; only that proof allows topology/network completion.
+            var networkProof = await proofs.IssueAsync(new(network, Bytes(32, 0xf2), clock.Boot, clock.Sample,
+                checkpoint.Checkpoint.DirectoryLeafKey.Span, genesis.ProtectedHead.LogGeneration, genesis.CoreHash.Span), default);
+            var operational = await XPointNetworkOperationalGenesisAuthor.CompleteDid2Async(pendingOperational,
+                networkProof.Freshness, new OnionTrustedTimeAuthority(clock));
+            var networkBytes = XPointNetworkClosureWireCodec.EncodeResponse(network,
+                [bootstrap.ExactXna1], [bootstrap.ExactDts1], [operational.ExactXvp1],
+                [operational.ExactXnv1], [operational.ExactXnh1], operational.ExactXnd1,
+                [operational.ExactPmt2], [operational.ExactPma2]);
+            await File.WriteAllBytesAsync(bundlePath, networkBytes);
             using var distribution = new XPointNetworkClosureDistribution(new()
                 { NetworkIdHex = Convert.ToHexString(network), BundlePath = bundlePath });
             using var journal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
@@ -142,7 +150,6 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             app.MapContactPublicationAuthorityEndpoint(new(network, PeerAuthenticationFixture.Access())); await app.StartAsync();
             using var client = app.GetTestClient(); client.BaseAddress = new Uri("https://authority.example/");
             using var handler = new DirectoryHandler(proofs, networkBytes);
-            using var pq = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
             var accountFloor = await accounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority, genesis.ExactAdh1, genesis.CoreHash);
             using var proofClient = new DeepIdV2DirectoryProofClient(new HttpServiceRequestTransport(
                 new HttpClient(handler, false), DeepIdV2DirectoryProofClient.CreateTransportOptions("https://authority.example/"),
@@ -343,14 +350,13 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
     private sealed class RouteHttpExchange(HttpClient client) : IDid2ContactRouteThresholdSource
     {
         internal ContactRouteAuthorityWireRequest? Request; internal byte[]? Response;
-        public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ReadOnlyMemory<byte> nonce,
+        public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
             DeepIdV2CurrentContactAuthorization auth, VerifiedOnionNetworkContext network,
-            VerifiedXPointNetworkAuthority authority, ReadOnlyMemory<byte> xra, OnionTrustedTimeAuthority time,
+            VerifiedXPointNetworkAuthority authority, OnionTrustedTimeAuthority time,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            var floor = auth.Freshness.NextProtectedLkg;
-            Request = new(authority.NetworkId.Span, nonce.Span, auth.Freshness.QueriedDirectoryLeafKey.Span,
-                floor.LogGeneration, floor.CoreHash.Span, auth.Authorization.Record.CanonicalBytes.Span, xra.Span);
+            Did2ContactRouteRequestCustody.RequireCurrent(exactPendingRequest, auth, network);
+            Request = exactPendingRequest;
             var exact = ContactRouteAuthorityWireCodec.EncodeRequest(Request);
             using var body = new ByteArrayContent(exact);
             body.Headers.ContentType = MediaTypeHeaderValue.Parse(ContactRouteAuthorityWireCodec.RequestMediaType);
