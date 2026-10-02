@@ -324,8 +324,12 @@ source per 10-second window and a global burst of 64, refilling at most 16 each
 routes. The contact issuer's independent budget is unchanged. These are local
 resource defaults, not protocol freshness or a cluster-wide availability claim.
 The actual DID2 proof ledger is explicitly provisioned for 200,000 retained
-markers: `64 + (86400 / 10 + 1) * 16 = 138320`, with 61,680 entries of finite
-boundary/crash headroom. Its protected format, epoch authentication and key/path
+markers: `64 + (86400 / 10 + 1) * 16 = 138320` public admissions plus at most
+`(86400 / 10 + 1) * 6 = 51846` private route/publication proof requests behind
+the existing shared contact admission gate, leaving 9,834 entries of finite
+boundary/crash headroom. Each private issuer obtains one fresh proof before
+route/publication signing or replay verification. Enabling them must not count
+that shared-ledger demand as unused crash margin. The ledger format, epoch and key/path
 are unchanged; upgrading the capacity never deletes existing markers or reopens
 a nonce. Corruption, rollback, a full ledger and excess requests still fail closed.
 Repeated process restarts can consume that finite margin; monitor storage and
@@ -338,6 +342,44 @@ ledger path/key, directory state, independent floor and signer custody on upgrad
 The focused burst test models client preparation, both replicas' fragments/final
 proofs and three background refreshers. It is local admission evidence, not native
 publication or physical message delivery; the guarded device retry remains required.
+
+## Private DID2 contact coordination deployment
+
+The current route/publication terminals require the existing production witness
+custody, trusted time, DID2 proof issuer, complete signed network bundle and
+independent floor connection. Provision the exact permanent schemas in that same
+independent restore domain using
+[did2-route-threshold-journal.sql](sql/did2-route-threshold-journal.sql) and
+[did2-publication-journal.sql](sql/did2-publication-journal.sql), then explicitly
+insert each network capacity row. Runtime never creates them. Keep the runtime
+role distinct from the DBA: SELECT on all four tables, UPDATE(entry_count) only
+on capacity rows, INSERT and UPDATE(exact_response) only on request journals;
+no schema CREATE, DELETE/TRUNCATE or updates to retained request/capacity columns.
+Retain logical backups with the external floor; never recreate an empty journal
+after a lost-response or observation failure.
+
+Enable both contact authority sections together with the DR48 registered-node
+access list. The reverse proxy adds only their two exact V2 coordination paths
+on the existing listener/security include. A route or a registered-node signature
+is not proof of publisher, witness, placement or current account authority.
+The coordinated XNode candidate is prepared/staged by the supported DevOps and
+installer workflow, with the retired ContactService runtime still disabled.
+An empty unauthenticated 401 verifies access gating, not successful issuance;
+actual three-hop device publication/claim and message delivery remain required.
+The owning contracts are
+[DR36](../../docs/survival-program/decisions/DR-0036-did2-route-threshold-coordination.md),
+[DR38](../../docs/survival-program/decisions/DR-0038-did2-publication-coordination.md)
+and [DR48](../../docs/survival-program/decisions/DR-0048-private-contact-coordination-peer-authentication.md).
+
+Operator provisioning evidence (2026-10-02): all four previously absent tables
+and two explicit 4,096-entry capacity rows committed in the independently hosted
+floor database. Effective runtime column permissions and empty initial journals
+read back correctly. Before/after logical dumps were retained and copied to local
+private backup custody with matching hashes. Existing floor rows and credentials
+were not written by provisioning. This is not an issuance, restore drill or
+device-delivery claim; contact activation and full recovery gates remain open.
+
+## Earlier production proof-budget rollout evidence
 
 Production follow-up (2026-10-02): the Linux AMD64 `1c1a6cb` image was installed
 with the previous environment, mounts and loopback listener unchanged. The old

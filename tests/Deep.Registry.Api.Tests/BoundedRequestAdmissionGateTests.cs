@@ -113,8 +113,11 @@ public sealed class BoundedRequestAdmissionGateTests
             windows * DeepIdV2IssuanceAdmissionGate.GlobalRefillLimit);
         Assert.Equal(138_320, worstCase);
         Assert.Equal(200_000, DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity);
+        Assert.Equal(51_846, DeepIdV2IssuanceAdmissionGate.PrivateCoordinationAllowance);
+        Assert.Equal(9_834, DeepIdV2IssuanceAdmissionGate.CrashAndBoundaryMargin);
         Assert.Equal(DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity,
-            worstCase + DeepIdV2IssuanceAdmissionGate.CrashAndBoundaryMargin);
+            worstCase + DeepIdV2IssuanceAdmissionGate.PrivateCoordinationAllowance +
+            DeepIdV2IssuanceAdmissionGate.CrashAndBoundaryMargin);
         Assert.InRange(DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity, 16, 1_000_000);
         Assert.True(worstCase > ContactResolveIssuanceAdmissionGate.MinimumLedgerCapacity);
     }

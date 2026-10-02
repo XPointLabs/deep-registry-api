@@ -162,8 +162,10 @@ internal sealed class ContactResolveIssuanceAdmissionGate(TimeProvider timeProvi
 /// their fragments in addition to the three hosts' background refresh. Its
 /// independent bounded budget is coupled to the actual proof ledger, not the
 /// smaller ContactResolve issuer ledger. Across one authenticated UTC day,
-/// 64 + (86400 / 10 + 1) * 16 = 138320 admissions fit in 200000 entries. The margin
-/// is finite; repeated restarts/capacity exhaustion must still fail closed.
+/// 64 + (86400 / 10 + 1) * 16 = 138320 public admissions, plus at most 51846
+/// private route/publication proof requests behind their shared six-per-window
+/// gate, fit in 200000 entries. The remaining crash margin is finite; repeated
+/// restarts/capacity exhaustion must still fail closed.
 /// </summary>
 internal sealed class DeepIdV2IssuanceAdmissionGate(TimeProvider timeProvider)
 {
@@ -173,7 +175,10 @@ internal sealed class DeepIdV2IssuanceAdmissionGate(TimeProvider timeProvider)
     internal const int WindowSeconds = 10;
     internal const int AdmissionSafetyHorizonSeconds = 86_400;
     internal const int MinimumLedgerCapacity = 200_000;
-    internal const int CrashAndBoundaryMargin = 61_680;
+    internal const int PrivateCoordinationAllowance =
+        (AdmissionSafetyHorizonSeconds / ContactResolveIssuanceAdmissionGate.WindowSeconds + 1) *
+        ContactResolveIssuanceAdmissionGate.GlobalLimit;
+    internal const int CrashAndBoundaryMargin = 9_834;
 
     private readonly BoundedRequestAdmissionGate gate = new(
         timeProvider, perSourceLimit: PerSourceLimit, globalLimit: GlobalLimit,
