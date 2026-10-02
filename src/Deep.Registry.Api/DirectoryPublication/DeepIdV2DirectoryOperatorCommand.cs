@@ -38,6 +38,19 @@ internal static class DeepIdV2DirectoryOperatorCommand
             else if (args.Length == 2 &&
                 string.Equals(args[1], "inspect-authority-window", StringComparison.Ordinal))
                 InspectAuthorityWindow(configuration);
+            else if (args.Length == 2 &&
+                string.Equals(args[1], "observe-trusted-time", StringComparison.Ordinal))
+            {
+                if (!configuration.GetValue<bool>("ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled"))
+                    throw new InvalidOperationException("Time observation requires authenticated automatic acquisition.");
+                var observation = ReadOperatorTrustedTime(configuration, cancellationToken);
+                Console.Out.WriteLine(JsonSerializer.Serialize(new {
+                    schema = "deep.registry.authenticated-time-observation.v1",
+                    reusableFreshnessEvidence = false,
+                    observedUnixSeconds = observation.ObservedUnixTime,
+                    uncertaintySeconds = observation.UncertaintySeconds
+                }));
+            }
             else if (args.Length == 3 &&
                 string.Equals(args[1], "provision-nts-floor", StringComparison.Ordinal))
                 ProvisionNtsFloor(configuration, args[2], cancellationToken);
@@ -87,7 +100,7 @@ internal static class DeepIdV2DirectoryOperatorCommand
             ArgumentException or IOException or CryptographicException or
             InvalidDataException or InvalidOperationException or
             FormatException or UnauthorizedAccessException or OverflowException or
-            NpgsqlException)
+            NpgsqlException or TimeoutException)
         {
             Console.Error.WriteLine(
                 $"DID2 directory operator action failed closed ({exception.GetType().Name}).");
@@ -231,6 +244,10 @@ internal static class DeepIdV2DirectoryOperatorCommand
     private static ContactResolveTrustedTimeContext ReadOperatorTrustedTime(
         IConfiguration configuration, CancellationToken cancellationToken)
     {
+        // Operator actions select the same owner as runtime. Never silently
+        // fall back to a retained manual interval after automatic cutover.
+        if (configuration.GetValue<bool>("ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled"))
+            return ReadAutomaticOperatorTimeAsync(configuration, cancellationToken).GetAwaiter().GetResult();
         var options = ContactResolveProductionAuthorityServiceCollectionExtensions
             .ReadRequiredOptions(configuration);
         var network = DirectoryPublicationHostingExtensions.Hex(
@@ -247,6 +264,61 @@ internal static class DeepIdV2DirectoryOperatorCommand
             return trusted;
         }
         finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private static async Task<ContactResolveTrustedTimeContext> ReadAutomaticOperatorTimeAsync(
+        IConfiguration configuration, CancellationToken cancellationToken)
+    {
+        var did2 = configuration.GetSection("DeepIdV2DirectoryAuthority").Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
+        var time = configuration.GetSection("ContactResolveProductionAuthority").Get<ContactResolveProductionAuthorityOptions>() ?? new();
+        var paths = did2.ExactAuthorityPaths.Concat(did2.ExactTimePolicyPaths)
+            .Concat(new[] { time.TrustedTimeStatePath, time.TrustedTimeIntegrityKeyPath,
+                time.NtsLowerFloorPath, time.NtsObserverExecutablePath }).ToArray();
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (!did2.Enabled || !time.Enabled || !time.AutomaticTrustedTimeEnabled ||
+            !string.Equals(did2.NetworkIdHex, time.NetworkIdHex, StringComparison.OrdinalIgnoreCase) ||
+            paths.Any(path => string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) ||
+            paths.Select(Path.GetFullPath).Distinct(comparer).Count() != paths.Length)
+            throw new InvalidOperationException("Automatic operator time requires distinct pinned DID2/time custody.");
+        var network = DirectoryPublicationHostingExtensions.Hex(did2.NetworkIdHex, 16, "DID2 network");
+        var pin = DirectoryPublicationHostingExtensions.Hex(did2.GenesisAuthorityCoreHashHex, 32, "DID2 genesis pin");
+        var authority = new DeepIdV2XPointAuthoritySource(network, pin, did2.ExactAuthorityPaths, did2.ExactTimePolicyPaths);
+        _ = authority.ReadWithTimePolicy();
+        var key = DirectoryPublicationProtectedFile.ReadKey(time.TrustedTimeIntegrityKeyPath);
+        try
+        {
+            using var source = new AutomaticNtsTrustedTimeSource(authority, time.NtsObserverExecutablePath,
+                time.NtsLowerFloorPath, network, key,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<AutomaticNtsTrustedTimeSource>.Instance);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                await source.StartAsync(timeout.Token).ConfigureAwait(false);
+                return await AwaitAutomaticOperatorTimeAsync(source, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            { throw new TimeoutException("Authenticated operator time acquisition is unavailable."); }
+            finally { await source.StopAsync(CancellationToken.None).ConfigureAwait(false); }
+        }
+        finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    internal static async Task<ContactResolveTrustedTimeContext> AwaitAutomaticOperatorTimeAsync(
+        IContactResolveTrustedTimeContextSource source, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var trusted = await source.ReadAsync(cancellationToken).ConfigureAwait(false);
+                trusted.Validate();
+                return trusted;
+            }
+            catch (ContactResolveDirectoryPackageUnavailableException)
+            { await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false); }
+        }
     }
 
     private static void ExportCurrentHead(IConfiguration configuration,

@@ -43,6 +43,18 @@ XNA1/DTS1 lineage, then reports a closed schema of its validity bounds with
 Those signed bounds are constraints, not observations; do not use the report
 as DTT1, an NTS measurement or readiness approval.
 
+After explicit floor activation, `did2-directory observe-trusted-time` starts
+the packaged observer against the verified signed policy, waits at most 30
+seconds for fresh authenticated quorum and persists its lower floor before
+reporting the observed interval. It neither reads the stale manual anchor nor
+falls back to it. The closed report contains only schema, observed Unix seconds,
+uncertainty and `reusableFreshnessEvidence=false`; it is an operator observation,
+not DTT1, a transferable freshness capability or readiness/device approval.
+No account, head or nonce ledger is mutated. `refresh-current-head` selects
+this same automatic owner when enabled; manual configuration retains its
+existing protected monotonic owner. Automatic acquisition failures remain
+closed, including timeout, source loss and invalid custody.
+
 `ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled` selects the
 owned persistent NTS observer, whose absolute executable path is supplied by
 `NtsObserverExecutablePath`. `NtsLowerFloorPath` is a separate durable,

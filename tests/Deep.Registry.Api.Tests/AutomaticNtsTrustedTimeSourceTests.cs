@@ -243,6 +243,49 @@ public sealed class AutomaticNtsTrustedTimeSourceTests
         Assert.False(File.Exists(world.FloorPath));
     }
 
+    [Fact]
+    public async Task OperatorWaitRequiresReattestationAndCancelsWithoutUsingManualTime()
+    {
+        using var world = new World();
+        using var source = world.Create();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            DeepIdV2DirectoryOperatorCommand.AwaitAutomaticOperatorTimeAsync(source, cancellation.Token));
+        Assert.Equal(world.InitialFloor, File.ReadAllBytes(world.FloorPath));
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_100), 1_000, 1_000);
+        var trusted = await DeepIdV2DirectoryOperatorCommand.AwaitAutomaticOperatorTimeAsync(source, default);
+        Assert.Equal(1_700_000_100UL, trusted.ObservedUnixTime);
+        var corrupted = File.ReadAllBytes(world.FloorPath); corrupted[^1] ^= 1; File.WriteAllBytes(world.FloorPath, corrupted);
+        await Assert.ThrowsAsync<CryptographicException>(() =>
+            DeepIdV2DirectoryOperatorCommand.AwaitAutomaticOperatorTimeAsync(source, default));
+    }
+
+    [Theory]
+    [InlineData("automatic-disabled")]
+    [InlineData("foreign-network")]
+    [InlineData("relative")]
+    [InlineData("alias")]
+    [InlineData("arity")]
+    [InlineData("missing-floor")]
+    public void TimeObservationRejectsInvalidScopeWithoutManualFallbackOrDirectoryMutation(string mutation)
+    {
+        using var world = new World(); var config = world.UpgradeConfiguration();
+        var manualHash = world.ProvisionManual();
+        config["ContactResolveProductionAuthority:NtsObserverExecutablePath"] = Environment.ProcessPath;
+        if (mutation == "automatic-disabled") config["ContactResolveProductionAuthority:AutomaticTrustedTimeEnabled"] = "false";
+        if (mutation == "foreign-network") config["ContactResolveProductionAuthority:NetworkIdHex"] = new string('a', 32);
+        if (mutation == "relative") config["ContactResolveProductionAuthority:NtsObserverExecutablePath"] = "relative.exe";
+        if (mutation == "alias") config["ContactResolveProductionAuthority:NtsLowerFloorPath"] = world.ManualPath;
+        if (mutation == "missing-floor") File.Delete(world.FloorPath);
+        var args = new[] { "did2-directory", "observe-trusted-time" };
+        if (mutation == "arity") args = [..args, "extra"];
+        Assert.Equal(2, DeepIdV2DirectoryOperatorCommand.TryRun(args, config));
+        Assert.Equal(manualHash, SHA256.HashData(File.ReadAllBytes(world.ManualPath)));
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(config["DeepIdV2DirectoryAuthority:StatePath"]!));
+        if (mutation == "missing-floor") Assert.False(File.Exists(world.FloorPath));
+        else Assert.Equal(world.InitialFloor, File.ReadAllBytes(world.FloorPath));
+    }
+
     private sealed class World : IDisposable
     {
         private readonly ContactResolveAuthoringFixture fixture = ContactResolveAuthoringFixture.Create(currentValue:false);
