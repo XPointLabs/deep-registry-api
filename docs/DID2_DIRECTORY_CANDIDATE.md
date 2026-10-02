@@ -315,3 +315,25 @@ against the restored ADA2 head history, and encodes a `DPP2` response with
 exact ADH1/DTT1/ADP1 V2. Framing and cross-links are shape checks only;
 production freshness still requires the public DID2 verifier and an
 independently verified XPoint authority on the client.
+
+## DID2 proof resource budget
+
+The DID2 host uses a separate process-local admission budget: 32 requests per
+source and 64 globally per 10-second window, shared by its genesis/proof/history
+routes. The contact issuer's independent budget is unchanged. These are local
+resource defaults, not protocol freshness or a cluster-wide availability claim.
+The actual DID2 proof ledger is explicitly provisioned for 600,000 retained
+markers: `(86400 / 10 + 1) * 64 = 553024`, with 46,976 entries of finite
+boundary/crash headroom. Its protected format, epoch authentication and key/path
+are unchanged; upgrading the capacity never deletes existing markers or reopens
+a nonce. Corruption, rollback, a full ledger and excess requests still fail closed.
+Repeated process restarts can consume that finite margin; monitor storage and
+keep one active issuance owner. Do not present this arithmetic as protection
+against unbounded restarts or a sustained-throughput guarantee.
+
+Reserve disk space and inodes for the full marker bound before rollout; a marker
+uses a separate durable file, not only its payload size. Retain the exact existing
+ledger path/key, directory state, independent floor and signer custody on upgrade.
+The focused burst test models client preparation, both replicas' fragments/final
+proofs and three background refreshers. It is local admission evidence, not native
+publication or physical message delivery; the guarded device retry remains required.

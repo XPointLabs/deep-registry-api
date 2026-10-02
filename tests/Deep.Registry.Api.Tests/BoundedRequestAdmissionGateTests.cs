@@ -81,12 +81,62 @@ public sealed class BoundedRequestAdmissionGateTests
         var clock = new ManualTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1_700_000_000));
         var gate = new DeepIdV2IssuanceAdmissionGate(clock);
         var source = IPAddress.Parse("192.0.2.1");
-        for (var index = 0; index < 6; index++)
+        for (var index = 0; index < DeepIdV2IssuanceAdmissionGate.PerSourceLimit; index++)
             Assert.True(gate.TryAcquire(source).IsAccepted);
         Assert.Equal(10U, gate.TryAcquire(source).RetryAfterSeconds);
-        Assert.False(gate.TryAcquire(IPAddress.Parse("192.0.2.2")).IsAccepted);
+        // A saturated device cannot spend the whole independent global budget.
+        Assert.True(gate.TryAcquire(IPAddress.Parse("192.0.2.2")).IsAccepted);
         clock.Advance(TimeSpan.FromSeconds(10));
         Assert.True(gate.TryAcquire(source).IsAccepted);
+    }
+
+    [Fact]
+    public void Did2_global_budget_remains_bounded_across_source_partitions()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1_700_000_000));
+        var gate = new DeepIdV2IssuanceAdmissionGate(clock);
+        for (var index = 1; index <= DeepIdV2IssuanceAdmissionGate.GlobalLimit; index++)
+            Assert.True(gate.TryAcquire(IPAddress.Parse($"192.0.2.{index}")).IsAccepted);
+        var refused = gate.TryAcquire(IPAddress.Parse("198.51.100.1"));
+        Assert.False(refused.IsAccepted);
+        Assert.Equal(10U, refused.RetryAfterSeconds);
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(gate.TryAcquire(IPAddress.Parse("198.51.100.1")).IsAccepted);
+    }
+
+    [Fact]
+    public void Did2_budget_is_coupled_to_its_independent_full_day_ledger()
+    {
+        var windows = DeepIdV2IssuanceAdmissionGate.AdmissionSafetyHorizonSeconds /
+            DeepIdV2IssuanceAdmissionGate.WindowSeconds + 1;
+        var worstCase = checked(windows * DeepIdV2IssuanceAdmissionGate.GlobalLimit);
+        Assert.Equal(553_024, worstCase);
+        Assert.Equal(600_000, DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity);
+        Assert.Equal(DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity,
+            worstCase + DeepIdV2IssuanceAdmissionGate.CrashAndBoundaryMargin);
+        Assert.InRange(DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity, 16, 1_000_000);
+        Assert.True(worstCase > ContactResolveIssuanceAdmissionGate.MinimumLedgerCapacity);
+    }
+
+    [Fact]
+    public void Did2_publication_and_three_host_refresh_fit_one_bounded_burst()
+    {
+        // Conservative current initial-publication budget: up to eight client
+        // preparation proofs and six fragments to each of two replicas. Each
+        // replica remints six placements plus two final-commit proofs, with
+        // two background refreshes on each of the three hosts. This is an
+        // admission model, not native publication/device delivery evidence.
+        var clock = new ManualTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1_700_000_000));
+        var gate = new DeepIdV2IssuanceAdmissionGate(clock);
+        var client = IPAddress.Parse("192.0.2.10");
+        var nodes = new[] { IPAddress.Parse("192.0.2.11"), IPAddress.Parse("192.0.2.12"),
+            IPAddress.Parse("192.0.2.13") };
+        foreach (var node in nodes)
+            for (var i = 0; i < 2; i++) Assert.True(gate.TryAcquire(node).IsAccepted);
+        for (var i = 0; i < 8 + 2 * 6; i++) Assert.True(gate.TryAcquire(client).IsAccepted);
+        foreach (var node in nodes.Take(2))
+            for (var i = 0; i < 6 + 2; i++) Assert.True(gate.TryAcquire(node).IsAccepted);
+        Assert.True(gate.TryAcquire(IPAddress.Parse("192.0.2.20")).IsAccepted);
     }
 
     private static BoundedRequestAdmissionGate Gate(

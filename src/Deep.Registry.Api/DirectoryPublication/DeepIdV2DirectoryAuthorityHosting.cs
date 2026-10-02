@@ -133,7 +133,8 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 try
                 {
                     return new ProtectedFileContactResolveOneUseRequestLedger(
-                        options.ProofRequestLedgerRootPath, network, key);
+                        options.ProofRequestLedgerRootPath, network, key,
+                        capacity: DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity);
                 }
                 finally { CryptographicOperations.ZeroMemory(key); }
             });

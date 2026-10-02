@@ -81,6 +81,7 @@
     <Compile Include="DirectoryPublicationDiagnosticsTests.cs" />
     <Compile Include="DirectorySourceCutoverTests.cs" />
     <Compile Include="DirectoryNetworkAuthorityFixture.cs" />
+    <Compile Include="BoundedRequestAdmissionGateTests.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(MailboxGrantFocused)' == 'true'">

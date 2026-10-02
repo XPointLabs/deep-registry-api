@@ -111,6 +111,63 @@ public sealed class DirectorySourceCutoverTests
     }
 
     [Fact]
+    public async Task ProofBudgetExpansionRetainsConsumedNoncesWithoutReprovisioning()
+    {
+        var authority = DirectoryNetworkAuthorityFixture.Create();
+        var epoch = AccountDirectoryDtt1IssuanceEpoch.Derive(authority, 1_700_000_100, 1);
+        var root = TemporaryRoot();
+        var time = new ContactResolveTrustedTimeContext(Bytes(16, 4), 900, 1_700_000_100, 1);
+        var used = new DirectoryProofReplayRequest(authority.NetworkId.Span, Bytes(32, 6), Bytes(16, 7), 10);
+        try
+        {
+            using (var oldBudget = new ProtectedFileContactResolveOneUseRequestLedger(root,
+                authority.NetworkId.Span, Bytes(32, 5), capacity: 65_536, compactionInterval: 1))
+                await oldBudget.ConsumeAsync(used, time, epoch, default);
+            var marker = Assert.Single(Directory.EnumerateFiles(root, "*.request", SearchOption.AllDirectories));
+            var retained = File.ReadAllBytes(marker);
+            using var expanded = new ProtectedFileContactResolveOneUseRequestLedger(root,
+                authority.NetworkId.Span, Bytes(32, 5),
+                capacity: DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity, compactionInterval: 1);
+            await Assert.ThrowsAsync<CryptographicException>(() =>
+                expanded.ConsumeAsync(used, time, epoch, default).AsTask());
+            Assert.Equal(retained, File.ReadAllBytes(marker));
+            await expanded.ConsumeAsync(new DirectoryProofReplayRequest(authority.NetworkId.Span,
+                Bytes(32, 9), Bytes(16, 8), 11), time, epoch, default);
+            Assert.Equal(retained, File.ReadAllBytes(marker));
+            Assert.Equal(2, Directory.EnumerateFiles(root, "*.request", SearchOption.AllDirectories).Count());
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task LargerProofBudgetCannotHideCorruptRetainedLedgerState()
+    {
+        var authority = DirectoryNetworkAuthorityFixture.Create();
+        var epoch = AccountDirectoryDtt1IssuanceEpoch.Derive(authority, 1_700_000_100, 1);
+        var root = TemporaryRoot();
+        var time = new ContactResolveTrustedTimeContext(Bytes(16, 4), 900, 1_700_000_100, 1);
+        try
+        {
+            using (var oldBudget = new ProtectedFileContactResolveOneUseRequestLedger(root,
+                authority.NetworkId.Span, Bytes(32, 5)))
+                await oldBudget.ConsumeAsync(new DirectoryProofReplayRequest(authority.NetworkId.Span,
+                    Bytes(32, 6), Bytes(16, 7), 10), time, epoch, default);
+            var path = Path.Combine(root, ".quota.state");
+            var corrupt = File.ReadAllBytes(path); corrupt[^1] ^= 1;
+            File.WriteAllBytes(path, corrupt);
+            using var expanded = new ProtectedFileContactResolveOneUseRequestLedger(root,
+                authority.NetworkId.Span, Bytes(32, 5),
+                capacity: DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity);
+            await Assert.ThrowsAsync<CryptographicException>(() => expanded.ConsumeAsync(
+                new DirectoryProofReplayRequest(authority.NetworkId.Span, Bytes(32, 9), Bytes(16, 8), 11),
+                time, epoch, default).AsTask());
+            Assert.Equal(corrupt, File.ReadAllBytes(path));
+            Assert.Single(Directory.EnumerateFiles(root, "*.request", SearchOption.AllDirectories));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task CancelledOrWrongNetworkNonceDoesNotCreateLedgerState()
     {
         var authority = DirectoryNetworkAuthorityFixture.Create();

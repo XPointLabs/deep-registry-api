@@ -146,15 +146,25 @@ internal sealed class ContactResolveIssuanceAdmissionGate(TimeProvider timeProvi
 }
 
 /// <summary>
-/// DID2 enrollment can require several directly successive proofs from one
-/// device. Keep its budget separate from contact resolution, while retaining
-/// the same six-per-window global ceiling required by the one-use ledger.
+/// One DID2 enrollment/publication requires fresh proofs for both replicas and
+/// their fragments in addition to the three hosts' background refresh. Its
+/// independent bounded budget is coupled to the actual proof ledger, not the
+/// smaller ContactResolve issuer ledger. Across one authenticated UTC day,
+/// (86400 / 10 + 1) * 64 = 553024 admissions fit in 600000 entries. The margin
+/// is finite; repeated restarts/capacity exhaustion must still fail closed.
 /// </summary>
 internal sealed class DeepIdV2IssuanceAdmissionGate(TimeProvider timeProvider)
 {
+    internal const int PerSourceLimit = 32;
+    internal const int GlobalLimit = 64;
+    internal const int WindowSeconds = 10;
+    internal const int AdmissionSafetyHorizonSeconds = 86_400;
+    internal const int MinimumLedgerCapacity = 600_000;
+    internal const int CrashAndBoundaryMargin = 46_976;
+
     private readonly BoundedRequestAdmissionGate gate = new(
-        timeProvider, perSourceLimit: 6, globalLimit: 6,
-        TimeSpan.FromSeconds(10), TimeSpan.FromMinutes(2));
+        timeProvider, perSourceLimit: PerSourceLimit, globalLimit: GlobalLimit,
+        TimeSpan.FromSeconds(WindowSeconds), TimeSpan.FromMinutes(2));
 
     internal BoundedAdmissionDecision TryAcquire(IPAddress? address) => gate.TryAcquire(address);
 }
