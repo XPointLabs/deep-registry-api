@@ -110,6 +110,8 @@
           Link="Fixtures\did2-route-threshold-journal.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\sql\did2-route-threshold-issued-head-upgrade.sql"
           Link="Fixtures\did2-route-threshold-issued-head-upgrade.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\sql\did2-route-threshold-generation-fence.sql"
+          Link="Fixtures\did2-route-threshold-generation-fence.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\sql\did2-latest-head-floor.sql"
           Link="Fixtures\did2-latest-head-floor.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\vendor\p04\membership-contract-v1.json"

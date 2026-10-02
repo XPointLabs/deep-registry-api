@@ -5,6 +5,7 @@ CREATE TABLE deep_did2_route_journal_network (
     entry_count bigint NOT NULL CHECK (entry_count >= 0),
     maximum_entries bigint NOT NULL CHECK (maximum_entries BETWEEN 1 AND 1048576),
     response_envelope_version smallint NOT NULL DEFAULT 3 CHECK (response_envelope_version = 3),
+    generation_fence_version smallint NOT NULL DEFAULT 1 CHECK (generation_fence_version = 1),
     CHECK (entry_count <= maximum_entries)
 );
 CREATE TABLE deep_did2_route_threshold_journal (
@@ -16,6 +17,11 @@ CREATE TABLE deep_did2_route_threshold_journal (
     exact_response bytea CHECK (octet_length(exact_response) BETWEEN 2151 AND 15179),
     PRIMARY KEY (network_id, request_nonce)
 );
+-- Canonical request V2: account lookup, XRA1 field 2 (stable advertisement ID),
+-- field 3 (unsigned generation bytes). PostgreSQL bytea offsets are 1-based.
+CREATE UNIQUE INDEX deep_did2_route_generation_winner ON deep_did2_route_threshold_journal
+    (network_id, (substring(exact_request FROM 57 FOR 32)),
+     (substring(exact_request FROM 646 FOR 32)), (substring(exact_request FROM 686 FOR 8)));
 -- Operator inserts one network row with entry_count=0 and explicit capacity.
 -- Runtime: SELECT and UPDATE(entry_count) on network table;
 -- SELECT/INSERT and UPDATE(exact_response) on journal. Request bytes and

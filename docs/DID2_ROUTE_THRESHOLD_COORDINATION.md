@@ -54,6 +54,26 @@ Exhaustion is an operator action, not a timed cleanup. A same-nonce changed
 request conflicts; a valid replay returns identical committed threshold bytes.
 Stale/expired winners reject and are not renewed under their old nonce.
 
+Per-generation fencing follows
+[DR-0072](../../docs/survival-program/decisions/DR-0072-did2-route-renewal-lineage.md).
+The canonical request's account lookup, stable XRA1 ID and unsigned generation
+select one permanent exact reservation, independently of the coordination nonce.
+Another nonce or changed request for that generation rejects before signing and
+without increasing capacity, including after a signing failure or restart. This
+does not authorize a nonzero-generation request: authenticated predecessor and
+current-context successor verification remain separate activation requirements.
+
+Existing DR75 journals require the once-only provisioning transaction
+[`sql/did2-route-threshold-generation-fence.sql`](sql/did2-route-threshold-generation-fence.sql)
+before using the matched runtime. Stop dispatch and back up the exact journal
+and latest-head floor first. The unique expression index includes all existing
+request bytes, including audit-only response rows, without decoding old responses
+or rewriting history. Competing existing generation reservations abort the
+transaction: investigate and decide explicitly; do not delete rows or silently
+choose one. Only successful provisioning installs `generation_fence_version=1`;
+runtime rejects its absence before any signing callback and performs no DDL.
+Fresh installations use the updated base schema, not either upgrade script.
+
 The Shared consumer retains the entire original request before dispatch under
 [DR-0073](../../docs/survival-program/decisions/DR-0073-did2-exact-route-request-custody.md).
 Its connected exchange forwards that retained request, never rebuilding the

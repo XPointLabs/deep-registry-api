@@ -35,11 +35,16 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
         if (!Fixed(network, request.NetworkId.Span)) throw new ContactRouteAuthorityRejectedException();
         var exactRequest = ContactRouteAuthorityWireCodec.EncodeRequest(request);
         var nonce = request.RequestNonce.ToArray();
+        var advertisement = ContactCodec.Decode("XRA1", request.ExactXra1.Span);
+        var lineage = advertisement.Field(2).ToArray();
+        var generation = advertisement.Field(3).ToArray();
         // Reservation is its own durable transaction before any signing callback.
         await using (var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false))
         await using (var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
         {
             var capacity = await LockNetworkAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await RequireGenerationAsync(connection, transaction, request.DirectoryLookupKey.ToArray(),
+                lineage, generation, exactRequest, cancellationToken).ConfigureAwait(false);
             var retained = await ReadAsync(connection, transaction, nonce, cancellationToken).ConfigureAwait(false);
             if (retained is not null) RequireRequest(retained.Value.Request, exactRequest);
             else
@@ -64,6 +69,8 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
         await using (var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
         {
             _ = await LockNetworkAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await RequireGenerationAsync(connection, transaction, request.DirectoryLookupKey.ToArray(),
+                lineage, generation, exactRequest, cancellationToken).ConfigureAwait(false);
             var retained = await ReadAsync(connection, transaction, nonce, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidDataException("Durable route reservation disappeared.");
             RequireRequest(retained.Request, exactRequest);
@@ -98,22 +105,46 @@ internal sealed class DeepIdV2PostgreSqlRouteThresholdJournal : IDeepIdV2RouteTh
     private async ValueTask<(long Count, long Maximum)> LockNetworkAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand("SELECT entry_count, maximum_entries, response_envelope_version " +
+        await using var command = new NpgsqlCommand("SELECT entry_count, maximum_entries, response_envelope_version, generation_fence_version " +
             "FROM deep_did2_route_journal_network WHERE network_id = $1 FOR UPDATE", connection, transaction);
         Add(command, network);
         NpgsqlDataReader opened;
         try { opened = await command.ExecuteReaderAsync(ct).ConfigureAwait(false); }
         catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UndefinedColumn)
-        { throw new InvalidDataException("Route journal response generation is not provisioned.", error); }
+        { throw new InvalidDataException("Route journal response/lineage provisioning is incomplete.", error); }
         await using var reader = opened;
         if (!await reader.ReadAsync(ct).ConfigureAwait(false))
             throw new InvalidDataException("Route journal network is not provisioned.");
         var count = reader.GetInt64(0); var maximum = reader.GetInt64(1);
         if (reader.GetInt16(2) != ContactRouteAuthorityWireCodec.ResponseVersion)
             throw new InvalidDataException("Route journal response generation is not provisioned.");
+        if (reader.GetInt16(3) != 1)
+            throw new InvalidDataException("Route journal lineage fencing is not provisioned.");
         if (maximum is < 1 or > 1_048_576 || count < 0 || count > maximum)
             throw new InvalidDataException("Route journal capacity is corrupt.");
         return (count, maximum);
+    }
+
+    private async ValueTask RequireGenerationAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        byte[] lookup, byte[] lineage, byte[] generation, byte[] expected, CancellationToken ct)
+    {
+        // Canonical request V2: lookup at zero-based 56; XRA starts at 601,
+        // its fixed field 2 at 44 and field 3 at 84. SQL bytea offsets are 1-based.
+        // The operator's unique expression index covers existing exact rows too;
+        // no runtime backfill, old-response reader or caller-provided generation key.
+        await using var command = new NpgsqlCommand("SELECT exact_request FROM deep_did2_route_threshold_journal " +
+            "WHERE network_id = $1 AND substring(exact_request FROM 57 FOR 32) = $2 " +
+            "AND substring(exact_request FROM 646 FOR 32) = $3 " +
+            "AND substring(exact_request FROM 686 FOR 8) = $4 LIMIT 2", connection, transaction);
+        Add(command, network, lookup, lineage, generation);
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return;
+        var retained = reader.GetFieldValue<byte[]>(0);
+        if (await reader.ReadAsync(ct).ConfigureAwait(false))
+            throw new InvalidDataException("Route journal contains competing generation reservations.");
+        // A different nonce, minimum, signed XRA or any other byte conflicts even
+        // while the first reservation has no response. Failed signing never frees it.
+        RequireRequest(retained, expected);
     }
 
     private async ValueTask<(byte[] Request, byte[]? Response)?> ReadAsync(NpgsqlConnection connection,

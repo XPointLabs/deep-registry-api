@@ -8,6 +8,79 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2RouteThresholdJournalTests
 {
+    [Fact]
+    public void GenerationIndexProjectionMatchesCanonicalCodecFields()
+    {
+        var network = Enumerable.Repeat((byte)0x11, 16).ToArray();
+        var artifacts = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x50);
+        var request = ContactRouteAuthorityHttpTests.Request(network, artifacts.Xra);
+        var exact = ContactRouteAuthorityWireCodec.EncodeRequest(request);
+        var xra = ContactCodec.Decode("XRA1", request.ExactXra1.Span);
+        Assert.Equal(request.DirectoryLookupKey.ToArray(), exact.AsSpan(56, 32).ToArray());
+        Assert.Equal(xra.Field(2).ToArray(), exact.AsSpan(645, 32).ToArray());
+        Assert.Equal(xra.Field(3).ToArray(), exact.AsSpan(685, 8).ToArray());
+    }
+
+    [Fact]
+    public async Task OperatorFenceAbortsOnExistingCompetingNoncesWithoutChangingEvidence()
+    {
+        var connection = Environment.GetEnvironmentVariable("DEEP_TEST_DID2_ROUTE_POSTGRES");
+        Assert.False(string.IsNullOrWhiteSpace(connection), "Set the isolated route-test PostgreSQL connection.");
+        var schema = "did2_route_test_" + Guid.NewGuid().ToString("N");
+        await using var admin = new NpgsqlConnection(connection); await admin.OpenAsync();
+        await using (var create = new NpgsqlCommand($"CREATE SCHEMA \"{schema}\"", admin)) await create.ExecuteNonQueryAsync();
+        var scoped = new NpgsqlConnectionStringBuilder(connection) { SearchPath = schema }.ConnectionString;
+        try
+        {
+            await using var setup = new NpgsqlConnection(scoped); await setup.OpenAsync();
+            var sql = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-journal.sql"));
+            await using (var ddl = new NpgsqlCommand(sql, setup)) await ddl.ExecuteNonQueryAsync();
+            await using (var old = new NpgsqlCommand("ALTER TABLE deep_did2_route_journal_network DROP COLUMN generation_fence_version; " +
+                "DROP INDEX deep_did2_route_generation_winner", setup)) await old.ExecuteNonQueryAsync();
+            var network = Enumerable.Repeat((byte)0x11, 16).ToArray();
+            var request = ContactRouteAuthorityHttpTests.Request(network,
+                ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x50).Xra);
+            var competitors = new[] { request, WithNonce(request, 0xa1) };
+            await using (var provision = new NpgsqlCommand("INSERT INTO deep_did2_route_journal_network " +
+                "(network_id, entry_count, maximum_entries) VALUES ($1, 2, 4)", setup))
+            { provision.Parameters.Add(new() { Value = network }); await provision.ExecuteNonQueryAsync(); }
+            foreach (var competitor in competitors)
+            {
+                await using var insert = new NpgsqlCommand("INSERT INTO deep_did2_route_threshold_journal " +
+                    "(network_id, request_nonce, exact_request) VALUES ($1,$2,$3)", setup);
+                foreach (var value in new[] { network, competitor.RequestNonce.ToArray(), ContactRouteAuthorityWireCodec.EncodeRequest(competitor) })
+                    insert.Parameters.Add(new() { Value = value });
+                await insert.ExecuteNonQueryAsync();
+            }
+            var upgrade = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-generation-fence.sql"));
+            await using (var ddl = new NpgsqlCommand(upgrade, setup))
+            {
+                var failure = await Assert.ThrowsAsync<PostgresException>(() => ddl.ExecuteNonQueryAsync());
+                Assert.Equal(PostgresErrorCodes.UniqueViolation, failure.SqlState);
+            }
+            await using (var rollback = new NpgsqlCommand("ROLLBACK", setup)) await rollback.ExecuteNonQueryAsync();
+            await using (var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network", setup))
+                Assert.Equal(2L, await count.ExecuteScalarAsync());
+            await using (var retained = new NpgsqlCommand("SELECT exact_request FROM deep_did2_route_threshold_journal ORDER BY request_nonce", setup))
+            {
+                await using var reader = await retained.ExecuteReaderAsync();
+                foreach (var competitor in competitors)
+                { Assert.True(await reader.ReadAsync()); Assert.Equal(ContactRouteAuthorityWireCodec.EncodeRequest(competitor), reader.GetFieldValue<byte[]>(0)); }
+                Assert.False(await reader.ReadAsync());
+            }
+            using var journal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
+            var calls = 0;
+            await Assert.ThrowsAsync<InvalidDataException>(async () => await journal.GetOrIssueAsync(request,
+                _ => { calls++; throw new InvalidOperationException("Unprovisioned fence must not sign."); }, default));
+            Assert.Equal(0, calls);
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA \"{schema}\" CASCADE", admin);
+            await cleanup.ExecuteNonQueryAsync();
+        }
+    }
+
     // Actual PostgreSQL durability/concurrency, structural transport records.
     // These are NOT issued route authority or physical delivery evidence.
     [Theory]
@@ -34,6 +107,10 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 .Replace("BETWEEN 2151 AND 15179", "BETWEEN 2151 AND 11079");
             await using (var ddl = new NpgsqlCommand(sql, setup))
                 await ddl.ExecuteNonQueryAsync();
+            if (upgradeExisting)
+                await using (var oldFence = new NpgsqlCommand("ALTER TABLE deep_did2_route_journal_network " +
+                    "DROP COLUMN generation_fence_version; DROP INDEX deep_did2_route_generation_winner", setup))
+                    await oldFence.ExecuteNonQueryAsync();
             var network = Enumerable.Repeat((byte)0x11, 16).ToArray();
             var records = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x50);
             var request = ContactRouteAuthorityHttpTests.Request(network, records.Xra);
@@ -51,7 +128,7 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                              "(network_id, entry_count, maximum_entries) VALUES ($1, 0, $2)", setup))
             {
                 provision.Parameters.Add(new() { Value = network });
-                provision.Parameters.Add(new() { Value = upgradeExisting ? 3L : 2L });
+                provision.Parameters.Add(new() { Value = upgradeExisting ? 4L : 3L });
                 await provision.ExecuteNonQueryAsync();
             }
             if (upgradeExisting)
@@ -59,7 +136,7 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 // Old provision rejects before reservation/signature callbacks.
                 await Assert.ThrowsAsync<InvalidDataException>(async () => await journal.GetOrIssueAsync(request, Issue, default));
                 Assert.Equal(0, calls);
-                var retired = WithNonce(request, 0xc1);
+                var retired = WithLineage(request, 0x60, 0xc1);
                 var retiredRequest = ContactRouteAuthorityWireCodec.EncodeRequest(retired);
                 var current = ContactRouteAuthorityWireCodec.EncodeResponse(retired,
                     new(network, retired.RequestNonce.Span, records.Pms, records.Xrc, records.Xss,
@@ -81,6 +158,11 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 }
                 var upgrade = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-issued-head-upgrade.sql"));
                 await using (var ddl = new NpgsqlCommand(upgrade, setup)) await ddl.ExecuteNonQueryAsync();
+                // DR75 alone cannot activate a nonce-only journal for renewal.
+                await Assert.ThrowsAsync<InvalidDataException>(async () => await journal.GetOrIssueAsync(request, Issue, default));
+                Assert.Equal(0, calls);
+                var fence = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-route-threshold-generation-fence.sql"));
+                await using (var ddl = new NpgsqlCommand(fence, setup)) await ddl.ExecuteNonQueryAsync();
                 await using (var retained = new NpgsqlCommand("SELECT exact_request, exact_response FROM deep_did2_route_threshold_journal WHERE request_nonce=$1", setup))
                 {
                     retained.Parameters.Add(new() { Value = retired.RequestNonce.ToArray() });
@@ -97,6 +179,14 @@ public sealed class DeepIdV2RouteThresholdJournalTests
                 _ => throw new IOException("Injected signing interruption."), default));
             await using (var reserved = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network", setup))
                 Assert.Equal(upgradeExisting ? 2L : 1L, await reserved.ExecuteScalarAsync());
+            // Failed signing does not release a generation, including another
+            // process/nonce; no callback or additional capacity is consumed.
+            await Task.WhenAll(Enumerable.Range(0xa0, 8).Select(async value =>
+                await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () =>
+                    await journal.GetOrIssueAsync(WithNonce(request, (byte)value), Issue, default))));
+            Assert.Equal(0, calls);
+            await using (var reserved = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network", setup))
+                Assert.Equal(upgradeExisting ? 2L : 1L, await reserved.ExecuteScalarAsync());
             var changed = new ContactRouteAuthorityWireRequest(network, request.RequestNonce.Span,
                 request.DirectoryLookupKey.Span, 1, request.MinimumAdh1CoreHash.Span,
                 request.ExactDca1.Span, request.ExactXra1.Span);
@@ -109,11 +199,18 @@ public sealed class DeepIdV2RouteThresholdJournalTests
             using var restarted = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
             Assert.Equal(response, (await restarted.GetOrIssueAsync(request,
                 _ => throw new InvalidOperationException("Replay must not sign."), default)).ToArray());
-            var another = WithNonce(request, 0xa1);
+            await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () =>
+                await restarted.GetOrIssueAsync(WithNonce(request, 0xa1), Issue, default));
+            var another = WithLineage(request, 0x70, 0xa1);
             await Assert.ThrowsAsync<OperationCanceledException>(async () =>
                 await restarted.GetOrIssueAsync(another, _ => throw new OperationCanceledException(), default));
+            var next = WithGeneration(request, ulong.MaxValue, 0xa2);
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+                await restarted.GetOrIssueAsync(next, _ => throw new OperationCanceledException(), default));
+            await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () =>
+                await restarted.GetOrIssueAsync(WithNonce(next, 0xa3), Issue, default));
             await Assert.ThrowsAsync<ContactRouteAuthorityUnavailableException>(async () =>
-                await restarted.GetOrIssueAsync(WithNonce(request, 0xa2), Issue, default));
+                await restarted.GetOrIssueAsync(WithLineage(request, 0x80, 0xa4), Issue, default));
             await using (var corrupt = new NpgsqlCommand("UPDATE deep_did2_route_threshold_journal " +
                              "SET exact_response = set_byte(exact_response, 0, 255) WHERE request_nonce = $1", setup))
             {
@@ -136,5 +233,21 @@ public sealed class DeepIdV2RouteThresholdJournalTests
         new(request.NetworkId.Span, Enumerable.Repeat(value, 32).ToArray(),
             request.DirectoryLookupKey.Span, request.MinimumAdh1Generation,
             request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span, request.ExactXra1.Span);
+
+    private static ContactRouteAuthorityWireRequest WithLineage(ContactRouteAuthorityWireRequest request, byte seed, byte nonce) =>
+        WithNonce(ContactRouteAuthorityHttpTests.Request(request.NetworkId.ToArray(),
+            ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(request.NetworkId.ToArray(), seed).Xra), nonce);
+
+    private static ContactRouteAuthorityWireRequest WithGeneration(ContactRouteAuthorityWireRequest request, ulong generation, byte nonce)
+    {
+        var record = ContactCodec.Decode("XRA1", request.ExactXra1.Span);
+        var fields = Enumerable.Range(1, 16).Select(tag => record.Field(tag)).ToArray();
+        var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, generation);
+        fields[2] = bytes; fields[3] = Enumerable.Repeat((byte)0x71, 32).ToArray();
+        var xra = ContactCodecValidation.AuthorRecord("XRA1", fields);
+        return WithNonce(new(request.NetworkId.Span, request.RequestNonce.Span,
+            request.DirectoryLookupKey.Span, request.MinimumAdh1Generation,
+            request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span, xra.CanonicalBytes.Span), nonce);
+    }
 }
 #endif

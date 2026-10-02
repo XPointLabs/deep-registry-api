@@ -233,6 +233,16 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             await route.EnsureCurrentAsync();
             Assert.Equal(crashMode == 0 ? 1UL : 2UL, route.Recipient.Freshness.NextProtectedLkg.LogGeneration);
             Assert.NotNull(exchange.Request); Assert.NotNull(exchange.Response);
+            var conflictingRoute = new ContactRouteAuthorityWireRequest(exchange.Request.NetworkId.Span,
+                Bytes(32, 0xe1), exchange.Request.DirectoryLookupKey.Span, exchange.Request.MinimumAdh1Generation,
+                exchange.Request.MinimumAdh1CoreHash.Span, exchange.Request.ExactDca1.Span, exchange.Request.ExactXra1.Span);
+            var routeSignerCalls = countedCustody.Calls;
+            // Genuine current DID2/device-signed XRA; only the coordination nonce
+            // differs. The durable generation reservation rejects before custody.
+            await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () => await issuer.IssueAsync(conflictingRoute, default));
+            Assert.Equal(routeSignerCalls, countedCustody.Calls);
+            await using (var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network WHERE network_id=$1", db))
+            { count.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await count.ExecuteScalarAsync()); }
             var publicationExchange = new PublicationHttpExchange(client, admissionTime) { LoseFirstResponse = true };
             await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactPublicationAsync(Bytes(32, 0xd1), source,
                 new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange));
@@ -326,10 +336,14 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             await File.WriteAllBytesAsync(bundlePath, corrupt);
             await Assert.ThrowsAnyAsync<CryptographicException>(async () => await restarted.IssueAsync(exchange.Request!, default));
             await File.WriteAllBytesAsync(bundlePath, networkBytes);
-            var interrupted = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0xe1),
-                exchange.Request.DirectoryLookupKey.Span, exchange.Request.MinimumAdh1Generation,
-                exchange.Request.MinimumAdh1CoreHash.Span, exchange.Request.ExactDca1.Span,
-                exchange.Request.ExactXra1.Span);
+            // Callback-time expiry/view tests need a genuinely new device-signed
+            // advertisement lineage. Changing an old winner's nonce must now
+            // reject earlier and cannot exercise the signing callback.
+            var interruptedDraft = new RouteHttpExchange(client) { InterruptBeforeSend = true };
+            await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactRouteAsync(Bytes(32, 0xe3), source,
+                new(100, 2, Bytes(32, 0xd2)), interruptedDraft));
+            Assert.NotNull(interruptedDraft.Request);
+            var interrupted = interruptedDraft.Request!;
             var late = new ProductionContactRouteThresholdIssuer(proofs, rootSource, distribution,
                 new DelayedCustody(custody, () => { clock.Sample = 500; clock.UnixTime = 1_500; }), clock, journal);
             await Assert.ThrowsAsync<ContactRouteAuthorityRejectedException>(async () => await late.IssueAsync(interrupted, default));
@@ -337,12 +351,10 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                              "deep_did2_route_threshold_journal WHERE request_nonce = $1", db))
             { pending.Parameters.Add(new() { Value = interrupted.RequestNonce.ToArray() }); Assert.Equal(true, await pending.ExecuteScalarAsync()); }
             clock.Sample = 100; clock.UnixTime = 1_100; // Controlled test clock only.
-            var recovered = await restarted.IssueAsync(interrupted, default);
-            Assert.NotEmpty(recovered.ExactXrc1.ToArray());
-            var changedViewRequest = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0xe2),
-                exchange.Request.DirectoryLookupKey.Span, exchange.Request.MinimumAdh1Generation,
-                exchange.Request.MinimumAdh1CoreHash.Span, exchange.Request.ExactDca1.Span,
-                exchange.Request.ExactXra1.Span);
+            // The same pending exact reservation can fail twice and recover;
+            // neither failure frees its generation or consumes another client
+            // intent. Do not exceed protected pending capacity for a fixture.
+            var changedViewRequest = interrupted;
             var changedView = operational.ExactXnv1.ToArray(); changedView[^1] ^= 1;
             var switchingView = new ProductionContactRouteThresholdIssuer(proofs, rootSource, distribution,
                 new DelayedCustody(custody, () => File.WriteAllBytes(viewPath, changedView)), clock, journal);
@@ -420,6 +432,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
     {
         internal ContactRouteAuthorityWireRequest? Request; internal byte[]? Response;
         internal bool LoseFirstResponse;
+        internal bool InterruptBeforeSend;
         public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
             DeepIdV2CurrentContactAuthorization auth, VerifiedOnionNetworkContext network,
             VerifiedXPointNetworkAuthority authority, OnionTrustedTimeAuthority time,
@@ -427,6 +440,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
         {
             Did2ContactRouteRequestCustody.RequireCurrent(exactPendingRequest, auth, network);
             Request = exactPendingRequest;
+            if (InterruptBeforeSend) throw new IOException("Capture genuine pending request before transport.");
             var exact = ContactRouteAuthorityWireCodec.EncodeRequest(Request);
             using var body = new ByteArrayContent(exact);
             body.Headers.ContentType = MediaTypeHeaderValue.Parse(ContactRouteAuthorityWireCodec.RequestMediaType);
