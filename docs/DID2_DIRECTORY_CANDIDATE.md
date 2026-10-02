@@ -319,11 +319,12 @@ independently verified XPoint authority on the client.
 ## DID2 proof resource budget
 
 The DID2 host uses a separate process-local admission budget: 32 requests per
-source and 64 globally per 10-second window, shared by its genesis/proof/history
+source per 10-second window and a global burst of 64, refilling at most 16 each
+10 seconds (unused credit never exceeds 64), shared by its genesis/proof/history
 routes. The contact issuer's independent budget is unchanged. These are local
 resource defaults, not protocol freshness or a cluster-wide availability claim.
-The actual DID2 proof ledger is explicitly provisioned for 600,000 retained
-markers: `(86400 / 10 + 1) * 64 = 553024`, with 46,976 entries of finite
+The actual DID2 proof ledger is explicitly provisioned for 200,000 retained
+markers: `64 + (86400 / 10 + 1) * 16 = 138320`, with 61,680 entries of finite
 boundary/crash headroom. Its protected format, epoch authentication and key/path
 are unchanged; upgrading the capacity never deletes existing markers or reopens
 a nonce. Corruption, rollback, a full ledger and excess requests still fail closed.

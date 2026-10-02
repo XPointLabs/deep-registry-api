@@ -109,13 +109,33 @@ public sealed class BoundedRequestAdmissionGateTests
     {
         var windows = DeepIdV2IssuanceAdmissionGate.AdmissionSafetyHorizonSeconds /
             DeepIdV2IssuanceAdmissionGate.WindowSeconds + 1;
-        var worstCase = checked(windows * DeepIdV2IssuanceAdmissionGate.GlobalLimit);
-        Assert.Equal(553_024, worstCase);
-        Assert.Equal(600_000, DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity);
+        var worstCase = checked(DeepIdV2IssuanceAdmissionGate.GlobalLimit +
+            windows * DeepIdV2IssuanceAdmissionGate.GlobalRefillLimit);
+        Assert.Equal(138_320, worstCase);
+        Assert.Equal(200_000, DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity);
         Assert.Equal(DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity,
             worstCase + DeepIdV2IssuanceAdmissionGate.CrashAndBoundaryMargin);
         Assert.InRange(DeepIdV2IssuanceAdmissionGate.MinimumLedgerCapacity, 16, 1_000_000);
         Assert.True(worstCase > ContactResolveIssuanceAdmissionGate.MinimumLedgerCapacity);
+    }
+
+    [Fact]
+    public void Did2_refill_limits_sustained_demand_and_never_banks_extra_idle_credit()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1_700_000_000));
+        var gate = new DeepIdV2IssuanceAdmissionGate(clock);
+        for (var index = 1; index <= 64; index++)
+            Assert.True(gate.TryAcquire(IPAddress.Parse($"192.0.2.{index}")).IsAccepted);
+        clock.Advance(TimeSpan.FromSeconds(10));
+        for (var index = 1; index <= 16; index++)
+            Assert.True(gate.TryAcquire(IPAddress.Parse($"192.0.2.{index}")).IsAccepted);
+        Assert.False(gate.TryAcquire(IPAddress.Parse("198.51.100.1")).IsAccepted);
+        clock.Advance(TimeSpan.FromSeconds(-1));
+        Assert.False(gate.TryAcquire(IPAddress.Parse("198.51.100.2")).IsAccepted);
+        clock.Advance(TimeSpan.FromHours(1));
+        for (var index = 1; index <= 64; index++)
+            Assert.True(gate.TryAcquire(IPAddress.Parse($"192.0.2.{index}")).IsAccepted);
+        Assert.False(gate.TryAcquire(IPAddress.Parse("198.51.100.3")).IsAccepted);
     }
 
     [Fact]

@@ -14,6 +14,7 @@ internal sealed class BoundedRequestAdmissionGate
     private readonly TimeSpan partitionLifetime;
     private readonly int perSourceLimit;
     private readonly int globalLimit;
+    private readonly int globalRefillLimit;
     private readonly int maximumPartitions;
     private readonly Dictionary<string, Bucket> sources = new(StringComparer.Ordinal);
     private DateTimeOffset globalWindowStart;
@@ -26,7 +27,8 @@ internal sealed class BoundedRequestAdmissionGate
         int globalLimit,
         TimeSpan window,
         TimeSpan partitionLifetime,
-        int maximumPartitions = 4_096)
+        int maximumPartitions = 4_096,
+        int? globalRefillLimit = null)
     {
         this.timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         if (perSourceLimit < 1 || globalLimit < perSourceLimit)
@@ -35,8 +37,11 @@ internal sealed class BoundedRequestAdmissionGate
             throw new ArgumentOutOfRangeException(nameof(window));
         if (maximumPartitions is < 16 or > 65_536)
             throw new ArgumentOutOfRangeException(nameof(maximumPartitions));
+        if (globalRefillLimit is { } refill && (refill < 1 || refill > globalLimit))
+            throw new ArgumentOutOfRangeException(nameof(globalRefillLimit));
         this.perSourceLimit = perSourceLimit;
         this.globalLimit = globalLimit;
+        this.globalRefillLimit = globalRefillLimit ?? globalLimit;
         this.window = window;
         this.partitionLifetime = partitionLifetime;
         this.maximumPartitions = maximumPartitions;
@@ -83,8 +88,15 @@ internal sealed class BoundedRequestAdmissionGate
     private void ResetGlobalIfNeeded(DateTimeOffset now)
     {
         if (now - globalWindowStart < window) return;
-        globalWindowStart = now;
-        globalCount = 0;
+        // By default one interval restores the old fixed-window budget. A
+        // smaller refill permits a bounded foreground burst without increasing
+        // the full-day nonce demand to that burst rate. Idle time never credits
+        // more than one full bucket, and wall-clock rollback credits nothing.
+        var elapsedWindows = (now - globalWindowStart).Ticks / window.Ticks;
+        var creditedWindows = Math.Min(elapsedWindows,
+            (globalLimit + (long)globalRefillLimit - 1) / globalRefillLimit);
+        globalCount = checked((int)Math.Max(0, globalCount - creditedWindows * globalRefillLimit));
+        globalWindowStart += TimeSpan.FromTicks(elapsedWindows * window.Ticks);
     }
 
     private void PruneExpired(DateTimeOffset now)
@@ -150,21 +162,23 @@ internal sealed class ContactResolveIssuanceAdmissionGate(TimeProvider timeProvi
 /// their fragments in addition to the three hosts' background refresh. Its
 /// independent bounded budget is coupled to the actual proof ledger, not the
 /// smaller ContactResolve issuer ledger. Across one authenticated UTC day,
-/// (86400 / 10 + 1) * 64 = 553024 admissions fit in 600000 entries. The margin
+/// 64 + (86400 / 10 + 1) * 16 = 138320 admissions fit in 200000 entries. The margin
 /// is finite; repeated restarts/capacity exhaustion must still fail closed.
 /// </summary>
 internal sealed class DeepIdV2IssuanceAdmissionGate(TimeProvider timeProvider)
 {
     internal const int PerSourceLimit = 32;
     internal const int GlobalLimit = 64;
+    internal const int GlobalRefillLimit = 16;
     internal const int WindowSeconds = 10;
     internal const int AdmissionSafetyHorizonSeconds = 86_400;
-    internal const int MinimumLedgerCapacity = 600_000;
-    internal const int CrashAndBoundaryMargin = 46_976;
+    internal const int MinimumLedgerCapacity = 200_000;
+    internal const int CrashAndBoundaryMargin = 61_680;
 
     private readonly BoundedRequestAdmissionGate gate = new(
         timeProvider, perSourceLimit: PerSourceLimit, globalLimit: GlobalLimit,
-        TimeSpan.FromSeconds(WindowSeconds), TimeSpan.FromMinutes(2));
+        TimeSpan.FromSeconds(WindowSeconds), TimeSpan.FromMinutes(2),
+        globalRefillLimit: GlobalRefillLimit);
 
     internal BoundedAdmissionDecision TryAcquire(IPAddress? address) => gate.TryAcquire(address);
 }
