@@ -338,3 +338,19 @@ ledger path/key, directory state, independent floor and signer custody on upgrad
 The focused burst test models client preparation, both replicas' fragments/final
 proofs and three background refreshers. It is local admission evidence, not native
 publication or physical message delivery; the guarded device retry remains required.
+
+Production follow-up (2026-10-02): the Linux AMD64 `1c1a6cb` image was installed
+with the previous environment, mounts and loopback listener unchanged. The old
+owner is stopped; both readiness routes returned 200. The directory/proof keys
+and all 1,785 retained nonce markers matched before/after, and a private quiescent
+state/time-floor backup was retained. Public Registry/DID2/staking requests returned
+200; the complete network closure still matched the retained export. No proxy,
+certificate, signer or independent-floor reset was performed.
+
+The first guarded Android action after upgrade still failed at pre-key publication.
+After current host readiness recovered, one exact protected retry advanced to
+`ContactPublication (TransportIo)`: the preceding account-owned pre-key operation
+returned its authenticated pair and recorded/revalidated protected completion.
+This does not distinguish first dispatch from exact replay or prove present
+replica availability. Contact composition and full physical message/asset/group
+delivery remain open; no GitHub release or main merge was performed.
