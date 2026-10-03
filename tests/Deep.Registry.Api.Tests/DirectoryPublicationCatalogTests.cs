@@ -8,6 +8,23 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DirectoryPublicationCatalogTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(ushort.MaxValue)]
+    public void NonCurrentReaderRejectsBeforeCatalogOrVerifier(int reader)
+    {
+        var network = Bytes(1, DirectoryPublicationCatalog.NetworkIdBytes);
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => SyntheticClosure(
+            network, 1,
+            Artifact("XNV1", network, 1, 1),
+            Artifact("XNH1", network, 1, 2),
+            Artifact("PMT2", network, 1, 3),
+            null, checked((ushort)reader)));
+        Assert.Equal("supportedReader", exception.ParamName);
+    }
+
     [Fact]
     public async Task RestartPreservesExactBytesHashesAndExactReplay()
     {
@@ -618,7 +635,8 @@ public sealed class DirectoryPublicationCatalogTests
         byte[] view,
         byte[] head,
         byte[] topology,
-        byte[]? checkpoint) =>
+        byte[]? checkpoint,
+        ushort supportedReader = 2) =>
         new(
             [Artifact("XNA1", network, generation, 1)],
             [Artifact("DTS1", network, generation, 2)],
@@ -640,7 +658,7 @@ public sealed class DirectoryPublicationCatalogTests
             1,
             2,
             3,
-            1,
+            supportedReader,
             checkpoint is null ? [] : [Artifact("XNA1", network, generation, 10)],
             checkpoint is null ? [] : [checkpoint]);
 

@@ -166,6 +166,40 @@ public sealed class DirectoryPublicationHttpTests
         Assert.Null(catalog.GetCurrent());
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(ushort.MaxValue)]
+    public async Task NonCurrentReaderRejectsWithoutConsumingChallengeOrMutatingCatalog(int reader)
+    {
+        using var directory = new TemporaryDirectory();
+        var network = Bytes(7, 16);
+        var clock = new ControlledClock(Bytes(13, 16), 100);
+        var ledger = new DurableDirectoryPublicationChallengeLedger(
+            directory.ChallengePath, network, Bytes(12, 32), clock);
+        var ticket = await ledger.IssueAsync(default);
+        var verifier = new ConsumingSyntheticVerifier(network, challengeAuthority: ledger);
+        var catalog = new DirectoryPublicationCatalog(directory.CatalogPath, network, verifier);
+        await using var app = await StartAppAsync(
+            catalog, clock, ledger, new AllowAuthorizer(), writeEnabled: true);
+        var client = Client(app);
+
+        var rejected = await client.PostAsync("/api/v1/directory/publications",
+            Content(Fixture(network, 1, ticket, checked((ushort)reader)).Envelope));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Equal(0, verifier.Calls);
+        Assert.Null(catalog.GetCurrent());
+        Assert.Equal(0, catalog.HistoryCount);
+
+        // The rejected envelope must not consume the otherwise valid challenge.
+        var current = await client.PostAsync("/api/v1/directory/publications",
+            Content(Fixture(network, 1, ticket).Envelope));
+        Assert.Equal(HttpStatusCode.Created, current.StatusCode);
+        Assert.Equal(1, verifier.Calls);
+        Assert.Equal(1, catalog.HistoryCount);
+    }
+
     [Fact]
     public async Task Consumed_challenge_remains_replay_protected_after_restart()
     {
@@ -319,7 +353,8 @@ public sealed class DirectoryPublicationHttpTests
     private static FixtureData Fixture(
         byte[] network,
         ulong generation,
-        DirectoryPublicationChallengeTicket ticket)
+        DirectoryPublicationChallengeTicket ticket,
+        ushort supportedReader = 2)
     {
         var view = Artifact("XNV1", network, generation, 1);
         var head = Artifact("XNH1", network, generation, 2);
@@ -338,13 +373,13 @@ public sealed class DirectoryPublicationHttpTests
         var adp = Artifact("ADP1", network, generation, 12);
         var envelope = EncodeEnvelope(
             ticket, [authority], [time], [policy], [view], [head], nodes, [mailbox],
-            [], [], adh, dtt, adp, view, head, mailbox, [], []);
+            [], [], adh, dtt, adp, view, head, mailbox, [], [], supportedReader);
         var closure = new DirectoryPublicationVerificationClosure(
             [authority], [time], [policy], [view], [head],
             nodes.Select(static value => (ReadOnlyMemory<byte>)value).ToArray(), [mailbox],
             adh, dtt, adp, ticket.Nonce.Span, Bytes(17, 32), ticket.BootId.Span,
             ticket.CreatedAtMonotonicSeconds, ticket.CreatedAtMonotonicSeconds,
-            ticket.CreatedAtMonotonicSeconds, 1);
+            ticket.CreatedAtMonotonicSeconds, 2);
         return new FixtureData(
             ticket, envelope, head,
             () => new DirectoryPublicationCandidate(view, head, mailbox, closure));
@@ -368,7 +403,8 @@ public sealed class DirectoryPublicationHttpTests
         byte[] currentHead,
         byte[] currentMailbox,
         byte[] xnf,
-        byte[] nfp)
+        byte[] nfp,
+        ushort supportedReader)
     {
         using var stream = new MemoryStream();
         stream.Write("DPW1"u8);
@@ -377,7 +413,7 @@ public sealed class DirectoryPublicationHttpTests
         stream.Write(ticket.Nonce.Span);
         stream.Write(ticket.BootId.Span);
         WriteUInt64(stream, ticket.CreatedAtMonotonicSeconds);
-        WriteUInt16(stream, 1);
+        WriteUInt16(stream, supportedReader);
         stream.Write(Bytes(17, 32));
         foreach (var chain in new[] { authority, time, policy, views, heads, nodes, mailbox, resetAuthority, forward })
             WriteChain(stream, chain);
@@ -395,7 +431,7 @@ public sealed class DirectoryPublicationHttpTests
         stream.Write(Bytes(1, 32));
         stream.Write(Bytes(2, 16));
         WriteUInt64(stream, 1);
-        WriteUInt16(stream, 1);
+        WriteUInt16(stream, 2);
         stream.Write(Bytes(3, 32));
         for (var index = 0; index < 9; index++) WriteUInt16(stream, 0);
         WriteUInt32(stream, DirectoryCatalogLimits.AbsoluteMaximumArtifactBytes + 1u);
