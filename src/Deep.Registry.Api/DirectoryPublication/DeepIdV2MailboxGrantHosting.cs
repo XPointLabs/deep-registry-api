@@ -6,7 +6,6 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.XPointNetworkV1;
-using Deep.Registry.Api.ProductionMailbox;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Deep.Registry.Api.DirectoryPublication;
@@ -64,10 +63,11 @@ internal static class DeepIdV2MailboxGrantHosting
 
     internal static bool AddDeepIdV2MailboxGrants(this IServiceCollection services, IConfiguration configuration)
     {
+        RetiredMailboxConfiguration.RequireAbsent(configuration);
         var options = configuration.GetSection("DeepIdV2MailboxGrantAuthority").Get<DeepIdV2MailboxGrantOptions>() ?? new();
         if (!options.Enabled) return false;
         var did2 = configuration.GetSection("DeepIdV2DirectoryAuthority").Get<DeepIdV2DirectoryAuthorityOptions>() ?? new();
-        if (!did2.Enabled || !did2.ProofEnabled || configuration.GetValue<bool>("ProductionMailbox:Enabled") ||
+        if (!did2.Enabled || !did2.ProofEnabled ||
             !configuration.GetValue<bool>("XPointNetworkClosureDistribution:Enabled") ||
             string.IsNullOrWhiteSpace(did2.LatestHeadFloorPostgreSqlConnectionString) || did2.NetworkIdHex.Length != 32 ||
             !Path.IsPathFullyQualified(options.ObserverCredentialPath))

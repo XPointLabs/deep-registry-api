@@ -5,6 +5,7 @@ using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 Deep.Registry.Api.DirectoryPublication.RetiredDirectoryConfiguration.RequireAbsent(builder.Configuration);
+Deep.Registry.Api.DirectoryPublication.RetiredMailboxConfiguration.RequireAbsent(builder.Configuration);
 
 #if DEEP_PROTOCOL_DIRECTORY_V1
 var contactResolveOperatorExit = await
@@ -48,9 +49,6 @@ if (useForwardedHeaders)
         options.KnownProxies.Add(knownProxy);
     });
 }
-var productionMailboxEnabled =
-    Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.AddProductionMailbox(
-        builder.Services, builder.Configuration, builder.Environment);
 var directoryPublication =
     Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
         .AddDirectoryPublication(builder.Services, builder.Configuration);
@@ -136,8 +134,6 @@ if (useForwardedHeaders) app.UseForwardedHeaders();
 app.MapGet("/", () => Results.Redirect("/index.html"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "deep-registry-api" }));
 app.MapMembershipProjectionEndpoints();
-if (productionMailboxEnabled)
-    Deep.Registry.Api.ProductionMailbox.ProductionMailboxHostingExtensions.MapProductionMailboxEndpoints(app);
 Deep.Registry.Api.DirectoryPublication.DirectoryPublicationHostingExtensions
     .MapDirectoryPublicationEndpoints(app, directoryPublication);
 Deep.Registry.Api.DirectoryPublication.XPointNetworkClosureDistributionHosting

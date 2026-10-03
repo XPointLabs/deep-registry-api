@@ -12,8 +12,9 @@ The private DID2 mailbox grant candidate follows
 `DeepIdV2MailboxGrantAuthority:Enabled` defaults to false. Enabling it requires
 the current DID2 proof authority/external latest-head floor, complete public
 network bundle, an exact public `ObserverCredentialPath`, independent protected
-`DepositSignerSocketPath` and `RetrieveSignerSocketPath`, and disabled retired
-`ProductionMailbox` authority. The existing registered node keys authenticate
+`DepositSignerSocketPath` and `RetrieveSignerSocketPath`. The retired
+`ProductionMailbox` source composition is removed and its configuration must
+be absent, including disabled sections/environment overrides. The existing registered node keys authenticate
 the calling nodes; issuer secrets never enter XNode or client configuration.
 Provision [the grant journal](docs/sql/did2-mailbox-grant-journal.sql) explicitly
 in the independent restore-authority DB with a separate least-privilege runtime

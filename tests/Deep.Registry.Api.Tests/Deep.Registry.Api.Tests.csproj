@@ -57,9 +57,6 @@
 
   <ItemGroup Condition="'$(DirectoryVerifierFocused)' == 'true'">
     <Compile Remove="PrivacyContactXNodeContractTests.cs" />
-    <Compile Remove="ProductionMailboxCoordinatorTests.cs" />
-    <Compile Remove="ProductionMailboxV2PublicationTests.cs" />
-    <Compile Remove="ProductionMailboxV2XNodeContractTests.cs" />
   </ItemGroup>
 
   <!-- Fast business-slice lane only; the default full gate remains unchanged. -->
@@ -103,6 +100,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\..\docs\sql\did2-mailbox-grant-v3-upgrade.sql"
+          Link="Fixtures\did2-mailbox-grant-v3-upgrade.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\sql\did2-publication-journal.sql"
           Link="Fixtures\did2-publication-journal.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\sql\did2-publication-successor-fence.sql"

@@ -10,6 +10,27 @@ namespace Deep.Registry.Api.Tests;
 public sealed class DeepIdV2MailboxGrantHttpTests
 {
     [Theory]
+    [InlineData("ProductionMailbox", "false")]
+    [InlineData("ProductionMailbox:Enabled", "false")]
+    [InlineData("ProductionMailbox:Unknown", "unused")]
+    public void RetiredCompositionRejectsConfigurationBeforeRegisteringAnyService(string key, string value)
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { [key] = value }).Build();
+        var services = new ServiceCollection();
+        Assert.Throws<InvalidOperationException>(() => RetiredMailboxConfiguration.RequireAbsent(configuration));
+        Assert.Throws<InvalidOperationException>(() => services.AddDeepIdV2MailboxGrants(configuration));
+        Assert.Empty(services);
+    }
+
+    [Fact]
+    public void ActualRegistryAssemblyHasNoRetiredMailboxCompositionOrSoftwareSigner()
+    {
+        var types = typeof(UnixSocketEd25519ExternalSigner).Assembly.GetTypes();
+        Assert.DoesNotContain(types, type => type.Namespace == "Deep.Registry.Api.ProductionMailbox");
+        Assert.DoesNotContain(types, type => type.Name == "DevelopmentSoftwareEd25519Signer");
+    }
+
+    [Theory]
     [InlineData("{}")]
     [InlineData("[]")]
     [InlineData("null")]

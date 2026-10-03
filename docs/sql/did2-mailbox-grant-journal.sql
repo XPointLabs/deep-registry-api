@@ -11,7 +11,7 @@ CREATE TABLE deep_did2_grant_journal (
     operation_id bytea NOT NULL CHECK (octet_length(operation_id) = 32),
     request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
     scope_hash bytea NOT NULL CHECK (octet_length(scope_hash) = 32),
-    exact_response bytea CHECK (octet_length(exact_response) = 478),
+    exact_response bytea CHECK (octet_length(exact_response) = 510),
     PRIMARY KEY (network_id, operation_id)
 );
 -- Operator inserts one network row with count=0 and explicit capacity.

@@ -27,11 +27,24 @@ then journals and re-verifies the exact signed winner before release.
 
 Admission/proof, complete network distribution and the independent PostgreSQL
 floor/journal must be configured together. The retired `ProductionMailbox`
-authority must remain disabled. Runtime checks cannot be replaced by an
+configuration is rejected even when disabled; remove the section and its
+environment overrides. The retired coordinator, endpoint/state composition and
+software signer no longer exist in the Registry assembly. Runtime checks cannot be replaced by an
 operator manifest, a configured URL, test signatures or an HTTP health result.
 Preserve the initialized directory, floor, nonce ledger, grant journal and
 existing identity/issuer keys. Do not repair readiness by provisioning new
 genesis or deleting retained state.
+
+The current wire and matched-rollout gate follow
+[DR-0081](../../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md).
+The private HTTP client and permanent winner journal use only the current
+result; there is no old-result reader or conversion. For an already provisioned
+journal, run the explicit operator
+[constraint cutover](sql/did2-mailbox-grant-v3-upgrade.sql) before activation.
+It preserves immutable hashes, reservations, capacity and current winners,
+and rejects any incompatible retained winner before changing the constraint.
+The runtime does not execute DDL or repair retained state. Do not roll out this
+source against the previous signed policy/bundle or publish a delivery claim.
 
 The endpoint is node-private, not a client entry point. Deploy its ingress and
 external signer processes only as part of the matched node/Registry composition.

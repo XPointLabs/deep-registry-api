@@ -1,6 +1,6 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
-using Deep.Registry.Api.ProductionMailbox;
+using Deep.Registry.Api.DirectoryPublication;
 
 namespace Deep.Registry.Api.Tests;
 

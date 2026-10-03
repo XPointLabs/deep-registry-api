@@ -1,6 +1,7 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Security.Cryptography;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.Registry;
 using Npgsql;
 
 namespace Deep.Registry.Api.DirectoryPublication;
@@ -71,7 +72,7 @@ internal sealed class DeepIdV2PostgreSqlMailboxGrantJournal : IDeepIdV2MailboxGr
             {
                 // Cross-process exclusion remains held across the signing callback.
                 var candidate = await issue(ct).ConfigureAwait(false);
-                if (candidate.Length != 478) throw new InvalidDataException("Grant journal requires a bounded exact winner.");
+                if (candidate.Length != 510) throw new InvalidDataException("Grant journal requires a bounded exact winner.");
                 expected = candidate.ToArray();
                 RequireWinner(request, expected);
                 await using var update = new NpgsqlCommand("UPDATE deep_did2_grant_journal SET exact_response = $3 " +
@@ -116,7 +117,7 @@ internal sealed class DeepIdV2PostgreSqlMailboxGrantJournal : IDeepIdV2MailboxGr
         var request = reader.GetFieldValue<byte[]>(0); var scope = reader.GetFieldValue<byte[]>(1);
         var winner = reader.IsDBNull(2) ? null : reader.GetFieldValue<byte[]>(2);
         if (request.Length != 32 || scope.Length != 32 || request.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
-            scope.AsSpan().IndexOfAnyExcept((byte)0) < 0 || winner is not null && winner.Length != 478)
+            scope.AsSpan().IndexOfAnyExcept((byte)0) < 0 || winner is not null && winner.Length != 510)
             throw new InvalidDataException("Grant journal row is malformed.");
         return (request, scope, winner);
     }
@@ -124,8 +125,8 @@ internal sealed class DeepIdV2PostgreSqlMailboxGrantJournal : IDeepIdV2MailboxGr
     { if (!Fixed(retained.Request, hash) || !Fixed(retained.Scope, scope)) throw new CryptographicException("Grant operation has conflicting immutable scope."); }
     private static void RequireWinner(ContactRecord request, byte[] exact)
     {
-        if (exact.Length != 478) throw new InvalidDataException("Grant journal cannot retain a non-success.");
-        ContactCodec.ValidateMailboxGrantResultBinding(request, ContactCodec.Decode("XMC1", exact));
+        if (exact.Length != 510) throw new InvalidDataException("Grant journal cannot retain a non-success.");
+        ContactCodec.ValidateMailboxGrantResultBinding(request, ContactCodec.Decode(DeepProtocolIdentifiers.Magic.XMC2, exact));
     }
     private static bool Fixed(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
     private static void Add(NpgsqlCommand command, params byte[][] values)
