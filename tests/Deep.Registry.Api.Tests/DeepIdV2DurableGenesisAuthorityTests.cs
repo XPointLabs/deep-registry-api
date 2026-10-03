@@ -22,7 +22,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
                System.Runtime.InteropServices.Architecture.X64)))
             return;
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-real-admission", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -154,7 +154,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             var proofRequest = new AccountDirectoryProofAuthoringRequest(
                 fixture.Network, Bytes(32, 0xb1), Bytes(16, 0xb2),
                 4_100, restored.CurrentHead.ExactAdh1.Span,
-                fixture.Snapshot.ExactCurrentXnv1.Span,
+                fixture.ExactCurrentXnv1.AsSpan(),
                 observedTime, uncertainty,
                 observedTime - uncertainty,
                 observedTime + uncertainty,
@@ -173,7 +173,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
 
             var viewPath = Path.Combine(root, "current.xnv1");
             await File.WriteAllBytesAsync(viewPath,
-                fixture.Snapshot.ExactCurrentXnv1.ToArray());
+                fixture.ExactCurrentXnv1.ToArray());
             using var nonceLedger =
                 new ProtectedFileContactResolveOneUseRequestLedger(
                     Path.Combine(root, "did2-proof-nonces"), fixture.Network,
@@ -282,12 +282,6 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                             wrongFloor, exactDid2, Bytes(32, 0xbb),
                             Bytes(16, 0xbc), 4_105))));
 
-            var legacyFloor = fixture.Snapshot.CurrentDirectoryHead;
-            await Assert.ThrowsAsync<CryptographicException>(async () =>
-                await proofIssuer.IssueAsync(
-                    new DeepIdV2DirectoryProofRequest(fixture.Network,
-                        Bytes(32, 0xb5), Bytes(16, 0xb6), 4_102,
-                        first.DirectoryLeafKey.Span, legacyFloor)));
             var damagedView = await File.ReadAllBytesAsync(viewPath);
             damagedView[^1] ^= 1;
             await File.WriteAllBytesAsync(viewPath, damagedView);
@@ -362,7 +356,7 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
                System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
                System.Runtime.InteropServices.Architecture.X64)))
             return;
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-admission", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);

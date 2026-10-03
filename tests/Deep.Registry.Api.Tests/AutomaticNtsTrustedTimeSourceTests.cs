@@ -288,7 +288,7 @@ public sealed class AutomaticNtsTrustedTimeSourceTests
 
     private sealed class World : IDisposable
     {
-        private readonly ContactResolveAuthoringFixture fixture = ContactResolveAuthoringFixture.Create(currentValue:false);
+        private readonly Did2DirectoryAuthorityFixture fixture = Did2DirectoryAuthorityFixture.Create();
         private readonly string root = Path.Combine(Path.GetTempPath(), "deep-nts-unit-" + Guid.NewGuid().ToString("N"));
         private readonly byte[] key = RandomNumberGenerator.GetBytes(32);
         private readonly DeepIdV2XPointAuthoritySource authoritySource;

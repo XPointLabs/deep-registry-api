@@ -10,7 +10,7 @@ public sealed class DeepIdV2DirectoryStateRestorerTests
     [Fact]
     public void AuthenticatedEmptyAda2RestoresOnlyAgainstItsPinnedV2Genesis()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var exact = fixture.CreateDid2GenesisHead();
         var hash = AccountDirectoryCrypto.ComputeAdh1CoreHash(
             AccountDirectoryAdh1Codec.Decode(exact));

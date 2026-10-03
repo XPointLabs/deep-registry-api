@@ -31,8 +31,7 @@ public sealed class DeepIdV2PostgreSqlLatestHeadFloorTests
             await setup.ExecuteNonQueryAsync();
         try
         {
-            using var fixture = ContactResolveAuthoringFixture.Create(
-                currentValue: false);
+            using var fixture = Did2DirectoryAuthorityFixture.Create();
             var genesis = new AccountDirectoryProtectedLkg(
                 fixture.CreateDid2GenesisHead());
             var firstHead = genesis.Head;

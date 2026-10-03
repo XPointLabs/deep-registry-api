@@ -479,8 +479,8 @@
       "xnode.core": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.5.0-production.e75bfed, 0.5.0-production.e75bfed]",
-          "Deep.Protocol.MembershipRoutes": "[0.5.0-production.e75bfed, 0.5.0-production.e75bfed]",
+          "Deep.Protocol": "[1.0.0, )",
+          "Deep.Protocol.MembershipRoutes": "[0.1.0-p16.local, )",
           "Microsoft.Extensions.Logging.Abstractions": "[8.0.0, )",
           "Rebex.Elliptic.Ed25519": "[1.2.2, )",
           "Sodium.Core": "[1.4.1, )"

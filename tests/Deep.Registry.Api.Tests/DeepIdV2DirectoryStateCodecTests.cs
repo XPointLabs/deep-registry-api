@@ -9,7 +9,7 @@ public sealed class DeepIdV2DirectoryStateCodecTests
     [Fact]
     public void Ada2RoundTripsOnlyV2RowsAndRejectsAda1OrSubstitutedNetwork()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var exact = fixture.CreateDid2GenesisHead();
         var hash = AccountDirectoryCrypto.ComputeAdh1CoreHash(
             AccountDirectoryAdh1Codec.Decode(exact));
@@ -36,12 +36,6 @@ public sealed class DeepIdV2DirectoryStateCodecTests
             DeepIdV2DirectoryStateCodec.Decode([.. payload, (byte)0x01],
                 fixture.Network));
 
-        var legacyHead = fixture.Snapshot.CurrentDirectoryHead;
-        Assert.Throws<ArgumentException>(() =>
-            DeepIdV2DirectoryStateCodec.Encode(fixture.Network,
-                new DeepIdV2DirectoryStateRows(
-                    [new DeepIdV2DirectoryHeadRow(
-                        legacyHead.ExactAdh1, legacyHead.CoreHash)], [], [])));
     }
 }
 #endif

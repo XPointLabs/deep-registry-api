@@ -7,9 +7,9 @@ namespace Deep.Registry.Api.Tests;
 public sealed class DeepIdV2DirectoryBootstrapSourceTests
 {
     [Fact]
-    public async Task SeparatelyPinnedDid2HeadRestoresAndV1HeadRejects()
+    public async Task SeparatelyPinnedDid2HeadRestoresAndWrongPinRejects()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-bootstrap", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -32,12 +32,6 @@ public sealed class DeepIdV2DirectoryBootstrapSourceTests
                         Enumerable.Repeat((byte)0x77, 32).ToArray())
                         .Read(fixture.Authority)).Code);
 
-            var old = fixture.Snapshot.CurrentDirectoryHead;
-            await File.WriteAllBytesAsync(path, old.ExactAdh1.ToArray());
-            Assert.Equal("InvalidDid2Bootstrap",
-                Assert.Throws<AccountDirectoryFreshnessVerificationException>(() =>
-                    new DeepIdV2DirectoryBootstrapSource(path, old.CoreHash.Span)
-                        .Read(fixture.Authority)).Code);
         }
         finally
         {

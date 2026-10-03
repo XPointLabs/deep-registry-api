@@ -40,7 +40,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
                System.Runtime.InteropServices.Architecture.X64)))
             return;
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(), "deep-did2-recovery", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
@@ -48,7 +48,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             var paths = await ProvisionAsync(root, fixture);
             var viewPath = Path.Combine(root, "current.xnv1");
             var proofKey = Path.Combine(root, "proof.key");
-            await File.WriteAllBytesAsync(viewPath, fixture.Snapshot.ExactCurrentXnv1.ToArray());
+            await File.WriteAllBytesAsync(viewPath, fixture.ExactCurrentXnv1.ToArray());
             await File.WriteAllBytesAsync(proofKey, Bytes(32, 0x6b));
             var before = await File.ReadAllBytesAsync(paths.StatePath);
             var floor = new RecoverableTestFloor(new AccountDirectoryProtectedLkg(paths.Head))
@@ -236,8 +236,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
                System.Runtime.InteropServices.Architecture.X64)))
             return;
-        using var fixture = ContactResolveAuthoringFixture.Create(
-            currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-client-registry", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -249,7 +248,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
             var currentView = Path.Combine(root, "current.xnv1");
             var proofKey = Path.Combine(root, "proof-ledger.key");
             await File.WriteAllBytesAsync(currentView,
-                fixture.Snapshot.ExactCurrentXnv1.ToArray());
+                fixture.ExactCurrentXnv1.ToArray());
             await File.WriteAllBytesAsync(proofKey, Bytes(32, 0x6b));
             await using var factory = new WebApplicationFactory<Program>()
                 .WithWebHostBuilder(builder =>
@@ -685,8 +684,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
         Directory.CreateDirectory(root);
         try
         {
-            using var fixture = ContactResolveAuthoringFixture.Create(
-                currentValue: false);
+            using var fixture = Did2DirectoryAuthorityFixture.Create();
             var paths = await ProvisionAsync(root, fixture);
             var oldAda2 = await File.ReadAllBytesAsync(paths.StatePath);
             using var floor = new DeepIdV2PostgreSqlLatestHeadFloor(
@@ -821,7 +819,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
                System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
                System.Runtime.InteropServices.Architecture.X64)))
             return;
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-real-http", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -864,7 +862,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
     [Fact]
     public async Task V2RouteReturnsExactReceiptAndRejectsLegacyMediaType()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-http", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -920,7 +918,7 @@ public sealed class DeepIdV2DirectoryAuthorityHttpTests
     }
 
     private static async Task<Paths> ProvisionAsync(string root,
-        ContactResolveAuthoringFixture fixture)
+        Did2DirectoryAuthorityFixture fixture)
     {
         var paths = new Paths(
             Path.Combine(root, "genesis.xna1"),

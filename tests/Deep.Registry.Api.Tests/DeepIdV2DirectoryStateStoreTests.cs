@@ -11,7 +11,7 @@ public sealed class DeepIdV2DirectoryStateStoreTests
     [Fact]
     public async Task Ada2ExternalHeadFloorRejectsRollbackAndAdvancesBeforeStateWrite()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-ada2-floor", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -63,7 +63,7 @@ public sealed class DeepIdV2DirectoryStateStoreTests
     [Fact]
     public async Task Ada2RequiresExplicitProvisioningAndHmacAuthenticatedState()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-ada2-store", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);

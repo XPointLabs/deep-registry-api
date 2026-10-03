@@ -91,7 +91,8 @@
   <ItemGroup Condition="'$(TrustedTimeUpgradeFocused)' == 'true'">
     <Compile Remove="**\*.cs" />
     <Compile Include="AutomaticNtsTrustedTimeSourceTests.cs" />
-    <Compile Include="ProductionContactResolveDirectoryPackageIssuerTests.cs" />
+    <Compile Include="DirectoryNetworkAuthorityFixture.cs" />
+    <Compile Include="Did2DirectoryAuthorityFixture.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(MailboxSignerFocused)' == 'true'">

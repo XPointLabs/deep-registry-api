@@ -12,7 +12,7 @@ public sealed class DeepIdV2DirectoryOperatorCommandTests
     [Fact]
     public async Task ProvisionsOnlyPinnedEmptyAda2AndNeverOverwritesIt()
     {
-        using var fixture = ContactResolveAuthoringFixture.Create(currentValue: false);
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
         var root = Path.Combine(Path.GetTempPath(),
             "deep-did2-provision", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
