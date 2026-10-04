@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
-    <DefineConstants>$(DefineConstants);DEEP_PROTOCOL_DIRECTORY_V1</DefineConstants>
+    <DefineConstants>$(DefineConstants);DEEP_PROTOCOL_DIRECTORY_V1;DEEP_REGISTRY_MGR1_FIXTURE</DefineConstants>
     <AssemblyName>Deep.Protocol.Tests</AssemblyName>
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
     <NuGetLockFilePath>$(BaseIntermediateOutputPath)source-cutover\packages.lock.json</NuGetLockFilePath>
@@ -126,6 +126,15 @@
           CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures\did2-genesis.dga1v2"
           CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Reuse the actual signed Protocol ceremony; exclude its XNode-internal
+       source interfaces and placement adapters. No replacement proof constructor. -->
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <Compile Include="..\..\..\xnode\tests\XNode.IntegrationTests\Runtime\DeepIdV2PublicationAuthorityFixture.cs"
+             Link="Fixtures\DeepIdV2PublicationAuthorityFixture.cs" />
+    <None Include="..\..\docs\sql\mailbox-revocation-journal.sql"
+          Link="Fixtures\mailbox-revocation-journal.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -76,6 +76,53 @@ transport ceiling without changing PMES framing, its original deadline, exact
 never authorizes a record. Actual MGR1 authoring, protected issuer lineage,
 distribution and renewal are still required; this bound does not implement them.
 
+## Current revocation issuer journal
+
+The source-cutover `MailboxRevocationJournal` implements the durable issuer
+part of [DR-0083](../../docs/survival-program/decisions/DR-0083-current-mailbox-grant-revocation.md).
+It is not yet registered in the hosted issuer/refresh composition. No new
+configuration, distribution endpoint or production readiness claim is activated
+by this provider implementation.
+
+The explicit operator [journal DDL](sql/mailbox-revocation-journal.sql) belongs
+in the independently protected restore-authority PostgreSQL database, not an
+ordinary service snapshot. Provision one scope root for each actual current
+network/PMA2/role/issuer tuple, with an explicit retention capacity and empty
+initial counters/serial ledger. Node ID is not part of this global issuer scope.
+Normal runtime must not execute DDL, provision a missing root, rewrite an
+immutable signing input, prune rows or reset counters. Grant runtime SELECT,
+snapshot INSERT, snapshot `exact_snapshot` UPDATE, and scope counter/serial
+UPDATE privileges only; retain provisioning and repair privileges separately.
+
+Before calling external custody, the provider commits the exact canonical
+signing input and cumulative revocations. A signer failure or uncertain winner
+commit leaves that input recoverable. Retry reopens the same reservation,
+checks it against its actual signed predecessor, and uses the same input;
+newly accepted revocations enter the permanent ledger and the following
+generation rather than changing the pending input. Cross-process writers lock
+the scope while signing and committing the winner. Success requires an actual
+database read-back of the exact winner with Protocol signature/scope checks,
+not a signer response or a process cache.
+
+A call completes exactly one generation. An expired completion is retained
+history, not current admission evidence: a fresh successor is still required.
+Retained history is read one signed record at a time; unsigned pending input
+is never distributed as authority. The consumer must independently validate
+each successor against its protected floor before admitting an operation.
+
+On recovery preserve the scope root, permanent cumulative ledger, all pending
+inputs and all signed history together in independent custody. Missing history,
+invalid signatures, changed inputs, lost revocations or exhausted capacity fail
+closed without silently regenerating authority. Restoring root and history
+together to an older database image is not detected by this provider alone;
+independent restore protection remains an operator prerequisite. Signer and
+node floor custody must also be retained, using the existing role keys.
+
+Provider tests use the isolated DevOps PostgreSQL wrapper and the same signed
+DID2/network/PMA2 ceremony as node tests. They do not prove hosted automatic
+renewal, external production signer custody, PostgreSQL process-crash recovery,
+deployed node refresh or physical Windows/Android delivery.
+
 ## Focused regression lane
 
 The existing pinned Registry Dockerfile provides the optional
