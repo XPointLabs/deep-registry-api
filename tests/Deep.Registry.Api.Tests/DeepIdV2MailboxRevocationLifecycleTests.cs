@@ -1,6 +1,9 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
+extern alias xnode;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Net;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
@@ -8,9 +11,13 @@ using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Sodium;
 
@@ -25,10 +32,15 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     public Task ActualMailboxRenewalRecoversExactIntentAndRetainedCumulativeWinners() =>
         ExerciseRegistryCeremonyAsync(crashMode: 0, mailboxLifecycle: true);
 
+    [Fact]
+    public Task ActualTlsProofAcquisitionAndSignedControlReachNodeConsumers() =>
+        ExerciseRegistryCeremonyAsync(crashMode: 0, mailboxLifecycle: true, socketControl: true);
+
     private static async Task ExerciseMailboxLifecycleAsync(DeepIdV2DurableGenesisAuthority admission, DeepIdV2DirectoryProofIssuer proofs,
         DeepIdV2XPointAuthoritySource roots, XPointNetworkClosureDistribution distribution, Clock clock,
         NpgsqlConnection db, string scoped, byte[] network, ReadOnlyMemory<byte> observer,
-        ReadOnlyMemory<byte> exactPma, string bundlePath, string directory)
+        ReadOnlyMemory<byte> exactPma, string bundlePath, string directory,
+        XPointNetworkGenesisPin genesisPin, ReadOnlyMemory<byte> genesisHeadHash, bool socketControl)
     {
         await using (var ddl = new NpgsqlCommand(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
             "Fixtures", "mailbox-revocation-journal.sql")), db)) await ddl.ExecuteNonQueryAsync();
@@ -53,14 +65,29 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         // Old reserved genesis expired; complete current root/PMA2/PMT2 still valid.
         clock.UnixTime = 1_410; clock.Sample = 410;
         var reopened = new MailboxRevocationAuthority(contexts, custody, scoped, network);
-        var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
+        using var tls = socketControl ? new ControlSocketTls() : null;
+        var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders();
+        if (tls is null) builder.WebHost.UseTestServer();
+        else builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Listen(IPAddress.Loopback, 0, listen => listen.UseHttps(tls.Server));
+            options.Listen(IPAddress.Loopback, 0);
+        });
         builder.Services.AddSingleton(admission); builder.Services.AddSingleton(proofs); builder.Services.AddSingleton(reopened);
+        builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<IDeepIdV2GenesisAuthority>(admission);
         builder.Services.AddSingleton<DeepIdV2IssuanceAdmissionGate>();
         var controlAdmission = new MailboxRevocationDistributionAdmission();
         builder.Services.AddSingleton(controlAdmission);
         await using var app = builder.Build();
+        var proofStatus = 0;
         app.Use((context, next) =>
+        {
+            if (context.Request.Path.Value == DeepIdV2DirectoryAuthorityHostingExtensions.ProofEndpointPath)
+                context.Response.OnStarting(() => { Volatile.Write(ref proofStatus, context.Response.StatusCode); return Task.CompletedTask; });
+            return next(context);
+        });
+        if (!socketControl) app.Use((context, next) =>
         {
             var feature = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()!;
             // TestServer provides decoded Path/Query but no RawTarget. Supply
@@ -72,8 +99,10 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         });
         app.MapDeepIdV2DirectoryAuthorityEndpoint(new(Enabled: true, ProofEnabled: true));
         app.MapMailboxRevocationDistribution(enabled: true); await app.StartAsync();
-        using var http = app.GetTestClient();
-        http.BaseAddress = new Uri("https://authority.example/");
+        using var http = tls is null ? app.GetTestClient() : tls.CreateClient();
+        var addresses = socketControl ? app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses : [];
+        http.BaseAddress = new Uri(socketControl ? addresses.Single(address => address.StartsWith("https://", StringComparison.Ordinal)) : "https://authority.example/");
         http.DefaultRequestHeaders.Accept.Add(new(MailboxRevocationDistributionHosting.MediaType));
         var controlPath = MailboxRevocationDistributionHosting.Prefix + "/" + Convert.ToHexString(network).ToLowerInvariant() +
             "/" + Convert.ToHexString(pma.CoreHash.Span).ToLowerInvariant() + "/1/";
@@ -99,6 +128,50 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         }, default);
         var requestsRoot = Path.Combine(directory, "proof-nonces");
         var nonceCount = Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count();
+        if (socketControl)
+        {
+            using (var untrusted = tls!.CreateClient(trustRoot: false))
+            {
+                var failure = await Assert.ThrowsAsync<HttpRequestException>(() => untrusted.GetAsync(http.BaseAddress));
+                Assert.Equal(HttpRequestError.SecureConnectionError, failure.HttpRequestError);
+                Assert.Equal(nonceCount, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            }
+            // Actual configured node runtime, native verifier and protected head,
+            // not a replacement proof source or a callback granting TLS trust.
+            var node = new XNode.Core.RouterNodeOptions { DataDirectory = Path.Combine(directory, "socket-node") };
+            var settings = new xnode::XNode.DeepIdV2DirectoryProofOptions
+            {
+                Enabled = true, RegistryOrigin = http.BaseAddress.AbsoluteUri,
+                NetworkIdHex = Convert.ToHexString(network),
+                GenesisAuthorityCoreHashHex = Convert.ToHexString(genesisPin.AuthorityCoreHash.Span),
+                ExactAuthorityPaths = [Path.Combine(directory, "root.xna1")],
+                ExactTimePolicyPaths = [Path.Combine(directory, "time.dts1")],
+                GenesisHeadPath = Path.Combine(directory, "genesis.adh1"),
+                GenesisHeadCoreHashHex = Convert.ToHexString(genesisHeadHash.Span),
+                StateRelativeDirectory = "proof-head", DataProtectionKeysRelativeDirectory = "proof-keys",
+                DeploymentProfileId = 1, RequestTimeoutSeconds = 5
+            };
+            using var runtime = new xnode::XNode.DeepIdV2DirectoryProofRuntime(settings.ValidateAndLoad(node, developmentOrUat: true)!,
+                http, clock, new XNode.Core.Mailbox.MailboxStorageSecurity(), new XNode.Core.Mailbox.MailboxDurabilityBarrier());
+            _ = await runtime.RestoreHeadAsync(default);
+            VerifiedDeepIdV2DirectoryFreshness freshness;
+            try { freshness = await runtime.ReadCurrentAsync(DeepIdV2Codec.DecodeDid2(observer.Span), default); }
+            catch (InvalidDataException error) { throw new InvalidDataException($"Proof endpoint status: {Volatile.Read(ref proofStatus)}; transport status: {tls!.LastStatus}.", error); }
+            Assert.NotNull(freshness.CurrentCheckpoint);
+            Assert.True(freshness.IsCurrentAtMonotonic(clock.Boot, clock.Sample));
+            Assert.Equal(nonceCount + 1, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            for (var check = 0; check < 130; check++) await runtime.ValidateObservedAsync(freshness, default);
+            var consumer = new xnode::XNode.HttpsMailboxGrantRevocationArtifactSource(http, http.BaseAddress.AbsoluteUri);
+            Assert.Equal(deposit.ToArray(), (await consumer.FetchAsync(network, reference, MailboxCapabilityDomain.Deposit, null, default)).ToArray());
+            Assert.Equal(historical.ToArray(), (await consumer.FetchAsync(network, reference, MailboxCapabilityDomain.Deposit, 1, default)).ToArray());
+            Assert.Equal(retrieve.ToArray(), (await consumer.FetchAsync(network, reference, MailboxCapabilityDomain.Retrieve, 1, default)).ToArray());
+            // Escaped RawTarget must not become the canonical route after Kestrel decoding.
+            var escapedTarget = new Uri(http.BaseAddress.AbsoluteUri.TrimEnd('/') + controlPath + "%31",
+                new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true });
+            using var escaped = await http.GetAsync(escapedTarget);
+            Assert.Equal(HttpStatusCode.BadRequest, escaped.StatusCode);
+            nonceCount++;
+        }
         foreach (var (selector, expected) in new[] { ("1", historical), ("2", deposit), ("latest", deposit) })
         {
             using var response = await http.GetAsync(controlPath + selector);
@@ -117,7 +190,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         using (var missing = await http.GetAsync(controlPath + "3")) Assert.Equal(HttpStatusCode.ServiceUnavailable, missing.StatusCode);
         using (var foreign = await http.GetAsync(controlPath.Replace(Convert.ToHexString(network).ToLowerInvariant(), new string('f', 32)) + "1"))
             Assert.Equal(HttpStatusCode.ServiceUnavailable, foreign.StatusCode);
-        using (var nonHttps = await http.GetAsync("http://authority.example" + controlPath + "latest"))
+        var plainOrigin = socketControl ? addresses.Single(address => address.StartsWith("http://", StringComparison.Ordinal)) : "http://authority.example";
+        using (var nonHttps = await http.GetAsync(plainOrigin.TrimEnd('/') + controlPath + "latest"))
             Assert.Equal(HttpStatusCode.Forbidden, nonHttps.StatusCode);
         using (var wrongRole = await http.GetAsync(controlPath.Replace("/1/", "/0/") + "latest"))
             Assert.Equal(HttpStatusCode.BadRequest, wrongRole.StatusCode);
@@ -194,6 +268,52 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         await Assert.ThrowsAsync<CryptographicException>(() => restarted.RequireReadyAsync(default).AsTask());
         await Assert.ThrowsAsync<CryptographicException>(() => restarted.RefreshAsync(default).AsTask());
         Assert.Equal(afterStop, custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count);
+    }
+
+    // Test-owned PKI stays in memory and this client only. Standard TLS chain,
+    // validity, server EKU and hostname checks remain enabled; no OS trust import.
+    private sealed class ControlSocketTls : IDisposable
+    {
+        private readonly X509Certificate2 root;
+        internal int LastStatus;
+        internal X509Certificate2 Server { get; }
+        internal ControlSocketTls()
+        {
+            using var rootKey = RSA.Create(2048);
+            var rootRequest = new CertificateRequest("CN=Deep isolated control test root", rootKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            rootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            rootRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
+            root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+            using var serverKey = RSA.Create(2048);
+            var request = new CertificateRequest("CN=localhost", serverKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            var san = new SubjectAlternativeNameBuilder(); san.AddIpAddress(IPAddress.Loopback); request.CertificateExtensions.Add(san.Build());
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+            request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.1") }, true));
+            using var signed = request.Create(root, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(30), RandomNumberGenerator.GetBytes(16));
+            using var withKey = signed.CopyWithPrivateKey(serverKey);
+            var pfx = withKey.Export(X509ContentType.Pfx);
+            try { Server = X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.DefaultKeySet); }
+            finally { CryptographicOperations.ZeroMemory(pfx); }
+        }
+        internal HttpClient CreateClient(bool trustRoot = true)
+        {
+            var policy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust, RevocationMode = X509RevocationMode.NoCheck };
+            if (trustRoot) policy.CustomTrustStore.Add(root);
+            var handler = new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, UseProxy = false, AutomaticDecompression = DecompressionMethods.None };
+            handler.SslOptions.CertificateChainPolicy = policy;
+            return new HttpClient(new StatusHandler(handler, this)) { Timeout = TimeSpan.FromSeconds(10) };
+        }
+        private sealed class StatusHandler(HttpMessageHandler inner, ControlSocketTls owner) : DelegatingHandler(inner)
+        {
+            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            {
+                var response = await base.SendAsync(request, ct);
+                Volatile.Write(ref owner.LastStatus, (int)response.StatusCode);
+                return response;
+            }
+        }
+        public void Dispose() { Server.Dispose(); root.Dispose(); }
     }
 
     private sealed class MailboxTestCustody : IDeepIdV2MailboxGrantSignerCustody, IDisposable

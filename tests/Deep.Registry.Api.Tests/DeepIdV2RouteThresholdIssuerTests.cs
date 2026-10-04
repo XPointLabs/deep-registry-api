@@ -33,7 +33,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     public Task ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(int crashMode) =>
         ExerciseRegistryCeremonyAsync(crashMode, mailboxLifecycle: false);
 
-    private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle)
+    private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle, bool socketControl = false)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -146,7 +146,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             if (mailboxLifecycle)
             {
                 await ExerciseMailboxLifecycleAsync(admission, proofs, rootSource, distribution, clock, db, scoped,
-                    network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, bundlePath, directory);
+                    network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, bundlePath, directory,
+                    bootstrap.GenesisPin, genesis.CoreHash, socketControl);
                 return;
             }
             using var journal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
