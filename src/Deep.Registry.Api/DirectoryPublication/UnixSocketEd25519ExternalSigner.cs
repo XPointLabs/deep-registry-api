@@ -13,6 +13,10 @@ public interface IEd25519ExternalSigner
 /// PMES/v1 request framing and exact 64-byte signature followed by EOF are unchanged.</summary>
 public sealed class UnixSocketEd25519ExternalSigner : IEd25519ExternalSigner
 {
+    // Largest current MGR1 signature input: exact record 65,863 minus
+    // signature field 72, plus SIGINPUT prefix 33. This is an I/O ceiling,
+    // not permission to sign an unverified role or arbitrary protocol record.
+    internal const int MaximumSigningBytes = 65_824;
     private static ReadOnlySpan<byte> Magic => "PMES"u8;
     private readonly string socketPath;
     private readonly TimeSpan timeout;
@@ -34,7 +38,7 @@ public sealed class UnixSocketEd25519ExternalSigner : IEd25519ExternalSigner
             throw new PlatformNotSupportedException("Production issuer signing requires a Unix domain socket.");
         if (string.IsNullOrWhiteSpace(socketPath) || !Path.IsPathFullyQualified(socketPath))
             throw new InvalidOperationException("External signer socket path is missing or relative.");
-        if (signingBytes.IsEmpty || signingBytes.Length > 64 * 1024)
+        if (signingBytes.IsEmpty || signingBytes.Length > MaximumSigningBytes)
             throw new ArgumentOutOfRangeException(nameof(signingBytes));
         using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         await socket.ConnectAsync(new UnixDomainSocketEndPoint(socketPath), boundedCancellation);

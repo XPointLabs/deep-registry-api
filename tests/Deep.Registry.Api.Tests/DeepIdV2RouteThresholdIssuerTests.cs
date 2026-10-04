@@ -185,7 +185,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                     Assert.NotNull(owned);
                     owned.Use(bytes =>
                     {
-                        Assert.Equal((byte)9, bytes[0]);
+                        Assert.Equal(ProtectedDid2ContactRouteJournal.Version, bytes[0]);
                         Assert.Equal(crashMode == 1 ? (byte)1 : (byte)2,
                             bytes[ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32]);
                         return true;

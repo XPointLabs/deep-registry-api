@@ -67,6 +67,15 @@ Polling `Socket.Available` is not a substitute for the response boundary:
 it reports only bytes already queued, not future bytes or successful completion.
 See the [.NET socket contract](https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket.available?view=net-10.0).
 
+The bounded PMES/v1 request can carry at most **65,824 signing bytes**. That
+matches the largest canonical current MGR1 input: encoded record65,863 minus
+the72-byte signature field plus the33-byte SIGINPUT prefix. Empty and larger
+inputs reject before opening a socket. This replaces the insufficient64-KiB
+transport ceiling without changing PMES framing, its original deadline, exact
+64-byte response/EOF rule or role signature verification. The transport alone
+never authorizes a record. Actual MGR1 authoring, protected issuer lineage,
+distribution and renewal are still required; this bound does not implement them.
+
 ## Focused regression lane
 
 The existing pinned Registry Dockerfile provides the optional

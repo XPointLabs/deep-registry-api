@@ -1,6 +1,9 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
 using Deep.Registry.Api.DirectoryPublication;
+#if DEEP_PROTOCOL_DIRECTORY_V1
+using Deep.Protocol.XPointNetworkV1;
+#endif
 
 namespace Deep.Registry.Api.Tests;
 
@@ -87,9 +90,39 @@ public sealed class UnixSocketEd25519ExternalSignerTests
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "absent-signer-" + Guid.NewGuid().ToString("N"));
         var signer = new UnixSocketEd25519ExternalSigner(path, TimeSpan.FromSeconds(5));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => signer.SignAsync(ReadOnlyMemory<byte>.Empty, default).AsTask());
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => signer.SignAsync(new byte[65_537], default).AsTask());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => signer.SignAsync(new byte[UnixSocketEd25519ExternalSigner.MaximumSigningBytes + 1], default).AsTask());
         Assert.False(File.Exists(path));
     }
+
+#if DEEP_PROTOCOL_DIRECTORY_V1
+    [LinuxSocketFact]
+    public async Task MaximumCanonicalMgr1SigningInputCrossesTheActualSocketWithoutTruncation()
+    {
+        var serials = new byte[MailboxGrantRevocationV1Codec.MaximumSerials * 16];
+        for (var index = 0; index < MailboxGrantRevocationV1Codec.MaximumSerials; index++)
+            BinaryPrimitives.WriteUInt32BigEndian(serials.AsSpan(index * 16 + 12), checked((uint)index + 1));
+        var one = Enumerable.Repeat((byte)1, 32).ToArray();
+        ReadOnlyMemory<byte>[] fields = [one.AsMemory(0, 16), new byte[] { (byte)'P', (byte)'M', (byte)'A', (byte)'2', 0, 1 }.Concat(one).ToArray(),
+            new byte[] { 1 }, one, U64(1), new byte[32], U64(1), U64(1), U64(301), U32(4_096), serials];
+        var payload = MailboxGrantRevocationV1Codec.CreateSignatureInput(fields);
+        Assert.Equal(65_824, payload.Length);
+        Assert.Equal(UnixSocketEd25519ExternalSigner.MaximumSigningBytes, payload.Length);
+        // Actual canonical maximum signing input; the response is still
+        // synthetic framing evidence, not an authenticated role signature.
+        await using var peer = new Peer(SendResponseAsync, payload);
+        var signer = new UnixSocketEd25519ExternalSigner(peer.Path, TimeSpan.FromSeconds(5));
+        Assert.Equal(Signature, await signer.SignAsync(payload, default));
+        await peer.Completion;
+    }
+
+    private static async Task SendResponseAsync(Socket socket, CancellationToken ct)
+    {
+        await SendAll(socket, Signature, ct);
+        socket.Shutdown(SocketShutdown.Send);
+    }
+    private static byte[] U64(ulong value) { var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, value); return bytes; }
+    private static byte[] U32(uint value) { var bytes = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(bytes, value); return bytes; }
+#endif
 
     private static async Task SendAll(Socket socket, ReadOnlyMemory<byte> bytes, CancellationToken ct)
     {
@@ -106,20 +139,20 @@ public sealed class UnixSocketEd25519ExternalSignerTests
         private readonly CancellationTokenSource lifetime = new(TimeSpan.FromSeconds(10));
         internal string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "deep-sign-" + Guid.NewGuid().ToString("N"));
         internal Task Completion { get; }
-        internal Peer(Func<Socket, CancellationToken, Task> response)
+        internal Peer(Func<Socket, CancellationToken, Task> response, ReadOnlyMemory<byte>? payload = null)
         {
             listener.Bind(new UnixDomainSocketEndPoint(Path)); listener.Listen(1);
-            Completion = RunAsync(response);
+            Completion = RunAsync(response, (payload ?? Payload).ToArray());
         }
-        private async Task RunAsync(Func<Socket, CancellationToken, Task> response)
+        private async Task RunAsync(Func<Socket, CancellationToken, Task> response, byte[] payload)
         {
             using var accepted = await listener.AcceptAsync(lifetime.Token);
             using var stream = new NetworkStream(accepted, ownsSocket: false);
             var header = new byte[9]; await stream.ReadExactlyAsync(header, lifetime.Token);
             Assert.True(header.AsSpan(0, 4).SequenceEqual("PMES"u8)); Assert.Equal(1, header[4]);
-            Assert.Equal(Payload.Length, checked((int)BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(5))));
-            var body = new byte[Payload.Length]; await stream.ReadExactlyAsync(body, lifetime.Token);
-            Assert.Equal(Payload, body);
+            Assert.Equal(payload.Length, checked((int)BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(5))));
+            var body = new byte[payload.Length]; await stream.ReadExactlyAsync(body, lifetime.Token);
+            Assert.Equal(payload, body);
             await response(accepted, lifetime.Token);
         }
         public async ValueTask DisposeAsync()
