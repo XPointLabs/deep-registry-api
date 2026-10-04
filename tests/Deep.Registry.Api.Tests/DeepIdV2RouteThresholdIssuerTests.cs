@@ -185,7 +185,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                     Assert.NotNull(owned);
                     owned.Use(bytes =>
                     {
-                        Assert.Equal((byte)8, bytes[0]);
+                        Assert.Equal((byte)9, bytes[0]);
                         Assert.Equal(crashMode == 1 ? (byte)1 : (byte)2,
                             bytes[ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32]);
                         return true;
@@ -333,9 +333,9 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                     "UPDATE deep_did2_publication_journal_network SET request_envelope_version=2", db)) await corruptMarker.ExecuteNonQueryAsync();
                 await Assert.ThrowsAsync<InvalidDataException>(async () => await journalRestart.GetOrIssueAsync(publicationExchange.Request!,
                     _ => throw new InvalidOperationException("Unprovisioned marker must not sign."), default));
-                await using (var restore = new NpgsqlCommand("UPDATE deep_did2_publication_journal_network SET request_envelope_version=3; " +
+                await using (var restore = new NpgsqlCommand("UPDATE deep_did2_publication_journal_network SET request_envelope_version=4; " +
                     "ALTER TABLE deep_did2_publication_journal_network ADD CONSTRAINT " +
-                    "did2_publication_request_version_check CHECK(request_envelope_version=3)", db)) await restore.ExecuteNonQueryAsync();
+                    "did2_publication_request_version_check CHECK(request_envelope_version=4)", db)) await restore.ExecuteNonQueryAsync();
             }
             foreach (var url in new[] { "http://authority.example/api/v2/contact-publication-authority", "https://authority.example/api/v2/contact-publication-authority?x=1" })
             {
@@ -446,6 +446,58 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             var shortXpo = PublicationResult(shortRoute, shortPublicationResponse.ExactXpu1, nodes);
             _ = await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(shortRoute, shortObject,
                 shortPublication.WireRequest, shortPublicationResponse.ExactXpu1, shortXpo);
+
+            // DR89: two genuine independently encrypted invitations of the same
+            // account/generation coexist with its reusable publication. Registry
+            // sees only public locators, and exact lost-response retry never signs twice.
+            var oneTimeRoute = await DeepIdV2ContactRouteAuthor.CompleteOneTimeGenesisAsync(recipient, initial.Network,
+                initial.Authority, device!, shortAdvertisement.CanonicalBytes, Threshold(shortResponse), 2, routeTime);
+            using var inviteA = await DeepIdV2ContactObjectAuthor.AuthorOneTimeGenesisAsync(oneTimeRoute, device!, services, "Invitation A QA");
+            using var inviteB = await DeepIdV2ContactObjectAuthor.AuthorOneTimeGenesisAsync(oneTimeRoute, device!, services, "Invitation B QA");
+            var publicationA = await DeepIdV2PublicationAuthorityAuthor.AuthorOneTimeGenesisRequestAsync(oneTimeRoute, inviteA,
+                device!, Bytes(32, 0xa1), Bytes(32, 0xa2), Bytes(32, 0xa3));
+            var publicationB = await DeepIdV2PublicationAuthorityAuthor.AuthorOneTimeGenesisRequestAsync(oneTimeRoute, inviteB,
+                device!, Bytes(32, 0xa4), Bytes(32, 0xa5), Bytes(32, 0xa6));
+            Assert.NotEqual(publicationA.WireRequest.LocatorHash.ToArray(), publicationB.WireRequest.LocatorHash.ToArray());
+            var beforeInvitations = countedPublication.Calls;
+            await Assert.ThrowsAsync<IOException>(async () => await publicationJournal.GetOrIssueAsync(publicationA.WireRequest,
+                _ => throw new IOException("Lose one-time signing after durable scope reservation."), default));
+            var pendingInviteConflict = SignPublicationCopy(publicationA.WireRequest, device!, recipient, Bytes(32, 0xa7));
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await publicationIssuer.IssueAsync(pendingInviteConflict, default));
+            Assert.Equal(beforeInvitations, countedPublication.Calls);
+            admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
+            var inviteExchange = new PublicationHttpExchange(client, admissionTime) { LoseFirstResponse = true };
+            await Assert.ThrowsAsync<IOException>(async () => await inviteExchange.FetchAsync(publicationA.WireRequest, null!, default));
+            var exactInviteWinner = await inviteExchange.FetchAsync(publicationA.WireRequest, null!, default);
+            _ = await publicationA.VerifyResponseAsync(ContactPublicationAuthorityWireCodec.DecodeResponse(publicationA.WireRequest,
+                exactInviteWinner.Span).ExactXpu1);
+            var responseB = await publicationIssuer.IssueAsync(publicationB.WireRequest, default);
+            _ = await publicationB.VerifyResponseAsync(responseB.ExactXpu1);
+            Assert.Equal(beforeInvitations + 2, countedPublication.Calls);
+            using (var inviteRestart = new DeepIdV2PostgreSqlPublicationJournal(scoped, network))
+            {
+                var neverInvite = new ProductionContactPublicationThresholdIssuer(proofs, rootSource, distribution,
+                    new NeverSignPublicationCustody(), clock, inviteRestart);
+                Assert.Equal(exactInviteWinner.ToArray(), ContactPublicationAuthorityWireCodec.EncodeResponse(publicationA.WireRequest,
+                    await neverInvite.IssueAsync(publicationA.WireRequest, default)));
+                var concurrentlyReplayed = await Task.WhenAll(Enumerable.Range(0, 6).Select(async _ =>
+                    await inviteRestart.GetOrIssueAsync(publicationB.WireRequest,
+                        _ => throw new InvalidOperationException("Concurrent exact replay must not sign."), default)));
+                foreach (var replayed in concurrentlyReplayed)
+                    Assert.Equal(ContactPublicationAuthorityWireCodec.EncodeResponse(publicationB.WireRequest, responseB), replayed.ToArray());
+                await using (var corruptOneTimeScope = new NpgsqlCommand("UPDATE deep_did2_publication_journal SET locator_hash=$2 WHERE request_nonce=$1", db))
+                {
+                    corruptOneTimeScope.Parameters.Add(new() { Value = publicationB.WireRequest.RequestNonce.ToArray() });
+                    corruptOneTimeScope.Parameters.Add(new() { Value = Bytes(32, 0xad) }); await corruptOneTimeScope.ExecuteNonQueryAsync();
+                }
+                await Assert.ThrowsAsync<InvalidDataException>(async () => await inviteRestart.GetOrIssueAsync(publicationB.WireRequest,
+                    _ => throw new InvalidOperationException("Corrupted locator projection must not sign."), default));
+                await using (var restore = new NpgsqlCommand("UPDATE deep_did2_publication_journal SET locator_hash=$2 WHERE request_nonce=$1", db))
+                {
+                    restore.Parameters.Add(new() { Value = publicationB.WireRequest.RequestNonce.ToArray() });
+                    restore.Parameters.Add(new() { Value = publicationB.WireRequest.LocatorHash.ToArray() }); await restore.ExecuteNonQueryAsync();
+                }
+            }
             clock.Sample += 40; clock.UnixTime += 40;
             var renewed = await shortSource.VerifyForOwnPreKeyAuthoringAsync(shortAccounts, default);
             recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(renewed.Proof, dca, clock.Boot, clock.Sample);
@@ -550,7 +602,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             Assert.Equal(1UL, (await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(successorRoute, successorObject,
                 successorPublication.WireRequest, successorPublicationResponse.ExactXpu1, successorXpo)).Generation);
             await using (var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id=$1", db))
-            { count.Parameters.Add(new() { Value = network }); Assert.Equal(3L, await count.ExecuteScalarAsync()); }
+            { count.Parameters.Add(new() { Value = network }); Assert.Equal(5L, await count.ExecuteScalarAsync()); }
             CryptographicOperations.ZeroMemory(resolverCapability);
             var competingSuccessor = new ContactRouteAuthorityWireRequest(network, Bytes(32, 0x9a), successorRequest.DirectoryLookupKey.Span,
                 successorRequest.MinimumAdh1Generation, successorRequest.MinimumAdh1CoreHash.Span, successorRequest.ExactDca1.Span,
@@ -696,7 +748,7 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
                 r.MinimumAdh1CoreHash.Span, r.ExactDca1.Span, r.ExactDcr1.Span, r.ExactRouteClosure.Span,
                 r.OperationId.Span, r.Generation, r.PredecessorObjectHash.Span, r.ObjectCiphertext.Span,
                 r.IssuedAtUnixSeconds, r.ExpiresAtUnixSeconds, r.EffectiveExpiresAtUnixSeconds,
-                r.OwnerRetrieveCapability.Span, sig, priorXpo ?? r.ExactPriorXpo1.ToArray());
+                r.OwnerRetrieveCapability.Span, sig, priorXpo ?? r.ExactPriorXpo1.ToArray(), r.OneTimeLocator.Span);
     }
 
     private static byte[] PublicationResult(VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> xpu, Signer[] nodes)

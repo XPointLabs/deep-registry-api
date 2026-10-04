@@ -67,9 +67,12 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
                 if (capacity.Count >= capacity.Maximum) throw new ContactPublicationAuthorityUnavailableException();
                 await using var insert = new NpgsqlCommand("INSERT INTO deep_did2_publication_journal " +
                     "(network_id, request_nonce, exact_request, directory_lookup_key, request_generation, " +
-                    "predecessor_object_hash, object_ciphertext_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)", connection, transaction);
+                    "predecessor_object_hash, object_ciphertext_hash, publication_kind, locator_hash) " +
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection, transaction);
                 Add(insert, network, nonce, exactRequest, request.DirectoryLookupKey.ToArray(), GenerationBytes(request.Generation),
                     request.PredecessorObjectHash.ToArray(), SHA256.HashData(request.ObjectCiphertext.Span));
+                insert.Parameters.Add(new() { Value = (short)request.PublicationKind });
+                insert.Parameters.Add(new() { Value = request.LocatorHash.ToArray() });
                 if (await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
                     throw new InvalidDataException("Publication reservation was not committed.");
                 await using var update = new NpgsqlCommand("UPDATE deep_did2_publication_journal_network " +
@@ -135,7 +138,7 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
         var count = reader.GetInt64(0); var maximum = reader.GetInt64(1);
         if (maximum is < 1 or > 1_048_576 || count < 0 || count > maximum)
             throw new InvalidDataException("Publication journal capacity is corrupt.");
-        if (reader.GetInt16(2) != 3 || reader.GetInt16(3) != 1)
+        if (reader.GetInt16(2) != 4 || reader.GetInt16(3) != 2)
             throw new InvalidDataException("Publication successor journal is not provisioned.");
         return (count, maximum);
     }
@@ -146,7 +149,7 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
         NpgsqlTransaction transaction, ContactPublicationAuthorityWireRequest request, CancellationToken ct)
     {
         if (request.Generation == 0) return null;
-        var prior = await ReadGenerationAsync(connection, transaction, request.DirectoryLookupKey.ToArray(),
+        var prior = await ReadGenerationAsync(connection, transaction, request,
             request.Generation - 1, ct).ConfigureAwait(false);
         if (prior?.Response is null || !Fixed(SHA256.HashData(prior.Parsed.ObjectCiphertext.Span), request.PredecessorObjectHash.Span))
             throw new ContactPublicationAuthorityRejectedException();
@@ -157,27 +160,38 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
     private async ValueTask RequireGenerationAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         ContactPublicationAuthorityWireRequest request, byte[] exactRequest, CancellationToken ct)
     {
-        var retained = await ReadGenerationAsync(connection, transaction, request.DirectoryLookupKey.ToArray(), request.Generation, ct).ConfigureAwait(false);
+        if (request.PublicationKind == 1)
+        {
+            // Old projected permanent reservations remain a fence, never decoded
+            // or adopted as V4 history. A cutover cannot remint their generation.
+            await using var old = new NpgsqlCommand("SELECT 1 FROM deep_did2_publication_journal " +
+                "WHERE network_id=$1 AND directory_lookup_key=$2 AND request_generation=$3 AND publication_kind IS NULL LIMIT 1",
+                connection, transaction);
+            Add(old, network, request.DirectoryLookupKey.ToArray(), GenerationBytes(request.Generation));
+            if (await old.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null)
+                throw new ContactPublicationAuthorityRejectedException();
+        }
+        var retained = await ReadGenerationAsync(connection, transaction, request, request.Generation, ct).ConfigureAwait(false);
         if (retained is not null) RequireRequest(retained.Request, exactRequest);
     }
 
     private ValueTask<RetainedPublication?> ReadGenerationAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, byte[] leaf, ulong generation, CancellationToken ct) =>
-        ReadRowAsync(connection, transaction, "directory_lookup_key = $2 AND request_generation = $3",
-            [network, leaf, GenerationBytes(generation)], ct);
+        NpgsqlTransaction transaction, ContactPublicationAuthorityWireRequest request, ulong generation, CancellationToken ct) =>
+        ReadRowAsync(connection, transaction, "directory_lookup_key = $2 AND request_generation = $3 AND publication_kind = $4 AND locator_hash = $5",
+            [network, request.DirectoryLookupKey.ToArray(), GenerationBytes(generation), (short)request.PublicationKind, request.LocatorHash.ToArray()], ct);
 
     private ValueTask<RetainedPublication?> ReadAsync(NpgsqlConnection connection,
         NpgsqlTransaction? transaction, byte[] nonce, CancellationToken ct)
         => ReadRowAsync(connection, transaction, "request_nonce = $2", [network, nonce], ct);
 
     private async ValueTask<RetainedPublication?> ReadRowAsync(NpgsqlConnection connection,
-        NpgsqlTransaction? transaction, string predicate, byte[][] parameters, CancellationToken ct)
+        NpgsqlTransaction? transaction, string predicate, object[] parameters, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand("SELECT octet_length(exact_request), octet_length(exact_response), " +
-            "exact_request, exact_response, request_nonce, directory_lookup_key, request_generation, predecessor_object_hash, object_ciphertext_hash " +
+            "exact_request, exact_response, request_nonce, directory_lookup_key, request_generation, predecessor_object_hash, object_ciphertext_hash, publication_kind, locator_hash " +
             "FROM deep_did2_publication_journal WHERE network_id = $1 AND " + predicate,
             connection, transaction);
-        Add(command, parameters);
+        foreach (var value in parameters) command.Parameters.Add(new() { Value = value });
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
         var requestLength = reader.GetInt32(0);
@@ -186,7 +200,7 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
             requestLength > ContactPublicationAuthorityWireCodec.MaximumRequestBytes ||
             !reader.IsDBNull(1) && (responseLength < ContactPublicationAuthorityWireCodec.MinimumResponseBytes ||
                 responseLength > ContactPublicationAuthorityWireCodec.MaximumResponseBytes) ||
-            Enumerable.Range(5, 4).Any(reader.IsDBNull))
+            Enumerable.Range(5, 6).Any(reader.IsDBNull))
             throw new InvalidDataException("Publication journal row is malformed.");
         var request = reader.GetFieldValue<byte[]>(2);
         var response = reader.IsDBNull(3) ? null : reader.GetFieldValue<byte[]>(3);
@@ -195,7 +209,8 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
             !Fixed(parsed.DirectoryLookupKey.Span, reader.GetFieldValue<byte[]>(5)) ||
             !Fixed(GenerationBytes(parsed.Generation), reader.GetFieldValue<byte[]>(6)) ||
             !Fixed(parsed.PredecessorObjectHash.Span, reader.GetFieldValue<byte[]>(7)) ||
-            !Fixed(SHA256.HashData(parsed.ObjectCiphertext.Span), reader.GetFieldValue<byte[]>(8)))
+            !Fixed(SHA256.HashData(parsed.ObjectCiphertext.Span), reader.GetFieldValue<byte[]>(8)) ||
+            parsed.PublicationKind != reader.GetInt16(9) || !Fixed(parsed.LocatorHash.Span, reader.GetFieldValue<byte[]>(10)))
             throw new InvalidDataException("Publication journal projections differ from canonical request custody.");
         if (response is not null) _ = ContactPublicationAuthorityWireCodec.DecodeResponse(parsed, response);
         if (await reader.ReadAsync(ct).ConfigureAwait(false)) throw new InvalidDataException("Publication generation fence is ambiguous.");
