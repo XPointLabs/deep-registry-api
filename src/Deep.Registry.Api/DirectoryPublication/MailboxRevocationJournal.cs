@@ -138,6 +138,29 @@ internal sealed class MailboxRevocationJournal : IDisposable
         return winner;
     }
 
+    // Scheduling facts only. Never a floor, freshness capability or health cache.
+    internal async ValueTask<IssuerState> ReadIssuerStateAsync(VerifiedMailboxHostAuthorityV2 host, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(host); ct.ThrowIfCancellationRequested();
+        await host.EnsureCurrentAsync(ct).ConfigureAwait(false);
+        await using var connection = await source.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+        var state = await LockScopeAsync(connection, transaction, ct).ConfigureAwait(false);
+        ReadOnlyMemory<byte> exact = ReadOnlyMemory<byte>.Empty;
+        if (state.Committed != 0)
+        {
+            exact = await VerifyWinnerAsync(host, await RequireEntryAsync(connection, transaction, state.Committed, ct).ConfigureAwait(false),
+                state.Committed, ct).ConfigureAwait(false);
+            RequireLedgerContains(state.Serials, MailboxGrantRevocationV1Codec.Decode(exact.Span));
+        }
+        var dirty = exact.IsEmpty ? state.Serials.Length != 0 :
+            !Fixed(state.Serials, MailboxGrantRevocationV1Codec.Decode(exact.Span).Field(11).Span);
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        await host.EnsureCurrentAsync(ct).ConfigureAwait(false);
+        return new(exact.ToArray(), state.Entries != state.Committed, dirty);
+    }
+    internal sealed record IssuerState(ReadOnlyMemory<byte> ExactWinner, bool HasPending, bool HasUnpublishedRevocations);
+
     private async ValueTask<ReadOnlyMemory<byte>> VerifyWinnerAsync(VerifiedMailboxHostAuthorityV2 host,
         Entry entry, long generation, CancellationToken ct)
     {

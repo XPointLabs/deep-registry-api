@@ -24,13 +24,16 @@ using Sodium;
 
 namespace Deep.Registry.Api.Tests;
 
-public sealed class DeepIdV2RouteThresholdIssuerTests
+public sealed partial class DeepIdV2RouteThresholdIssuerTests
 {
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
-    public async Task ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(int crashMode)
+    public Task ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(int crashMode) =>
+        ExerciseRegistryCeremonyAsync(crashMode, mailboxLifecycle: false);
+
+    private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -140,6 +143,12 @@ public sealed class DeepIdV2RouteThresholdIssuerTests
             await File.WriteAllBytesAsync(bundlePath, networkBytes);
             using var distribution = new XPointNetworkClosureDistribution(new()
                 { NetworkIdHex = Convert.ToHexString(network), BundlePath = bundlePath });
+            if (mailboxLifecycle)
+            {
+                await ExerciseMailboxLifecycleAsync(admission, proofs, rootSource, distribution, clock, db, scoped,
+                    network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, bundlePath, directory);
+                return;
+            }
             using var journal = new DeepIdV2PostgreSqlRouteThresholdJournal(scoped, network);
             var countedCustody = new CountingRouteCustody(custody);
             var issuer = new ProductionContactRouteThresholdIssuer(proofs, rootSource, distribution, countedCustody, clock, journal);

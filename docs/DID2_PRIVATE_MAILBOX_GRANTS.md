@@ -80,9 +80,11 @@ distribution and renewal are still required; this bound does not implement them.
 
 The source-cutover `MailboxRevocationJournal` implements the durable issuer
 part of [DR-0083](../../docs/survival-program/decisions/DR-0083-current-mailbox-grant-revocation.md).
-It is not yet registered in the hosted issuer/refresh composition. No new
-configuration, distribution endpoint or production readiness claim is activated
-by this provider implementation.
+With `DeepIdV2MailboxGrantAuthority:Enabled`, the existing composition now
+registers an MGR1 renewal worker using the same actual service-observer
+proof/network/time context and existing role custody as private grant issuance.
+The default remains disabled. No additional configuration or HTTP distribution
+endpoint is introduced by this composition; node refresh is still required.
 
 The explicit operator [journal DDL](sql/mailbox-revocation-journal.sql) belongs
 in the independently protected restore-authority PostgreSQL database, not an
@@ -118,10 +120,54 @@ together to an older database image is not detected by this provider alone;
 independent restore protection remains an operator prerequisite. Signer and
 node floor custody must also be retained, using the existing role keys.
 
-Provider tests use the isolated DevOps PostgreSQL wrapper and the same signed
-DID2/network/PMA2 ceremony as node tests. They do not prove hosted automatic
-renewal, external production signer custody, PostgreSQL process-crash recovery,
-deployed node refresh or physical Windows/Android delivery.
+Provider and connected worker tests use the isolated DevOps PostgreSQL wrapper
+and the same signed DID2/network/PMA2 ceremony as node tests. They do not prove
+external production signer custody, PostgreSQL process-crash recovery, deployed
+node refresh or physical Windows/Android delivery.
+
+## Hosted renewal and observational readiness
+
+On startup the worker acquires an actual current observer proof and the complete
+signed network/PMA2 context. Internal proof requests use the directory **leaf**
+key, not the ADL1 lookup key: these are different domain-separated hashes.
+Unadmitted observers remain unavailable. Source bytes, independent directory
+floor, protected monotonic time and host capability are checked again around
+external signing and before release; a retained context is not a cached trust flag.
+
+Both roles must have explicit protected journal roots before activation.
+The worker completes an existing exact reservation first, then, if necessary,
+authors one fresh cumulative successor: at most two steps per role per refresh.
+Fresh unchanged state does not consume a new MGR1 generation or signature.
+Changed authority during signing leaves the exact intent recoverable but cannot
+release a winner. Missing roots, invalid history or exhausted capacity do not
+trigger automatic provisioning, pruning, regeneration or repair.
+
+Refresh is single-flight and shares the existing distribution admission gate
+with issuance. Each attempt has the original 30-second deadline. Successful
+attempts are followed by 15–17 seconds of delay; failures use bounded 10–62-second
+backoff with jitter. This requires at most 240 observer proof attempts per hour
+per Registry process, in addition to foreground traffic. Those proofs consume
+the existing durable one-use ledger, whose configured capacity and epoch
+compaction budget must cover the combined load. This bound is not a sustained
+production-load measurement. Renewals use a 60-second lead; a policy with no
+remaining renewal margin requires its authorized successor, never an online
+root key or extended signed lifetime.
+
+When this candidate is enabled, `/health/did2/ready` also reads both actual
+signed database winners and rechecks their current sources/time. It does not
+acquire a proof, sign, advance a generation or enroll a native node floor.
+Cold, busy, pending, corrupt, expired or stopped authority returns unavailable;
+liveness does not imply admission. Stop clears the current observation, and a
+restart reacquires current sources without replacing identities or history.
+
+The internal retained reader releases one verified signed historical generation
+at a time under a current complete host. Expired history is allowed for
+sequential floor catch-up, not admission; unsigned intents are never responses.
+No MGR1 control HTTP route or node automatic refresh is exposed yet. The existing
+eight-chain NCP2 distributor is unchanged and must not be treated as an MGR1
+source. Connected tests cover worker start/stop, exact cold retry, expired
+completion followed by renewal, source-change interruption, cumulative history,
+corruption rejection and HTTP readiness without nonce/signature consumption.
 
 ## Focused regression lane
 

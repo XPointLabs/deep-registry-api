@@ -82,13 +82,19 @@ internal static class DeepIdV2MailboxGrantHosting
         var bytes = new byte[DeepIdV2Codec.Did2Length]; stream.ReadExactly(bytes);
         if (stream.ReadByte() != -1) throw new InvalidDataException("Private observer credential grew while reading.");
         var observer = DeepIdV2Codec.DecodeDid2(bytes);
-        services.AddSingleton<IDeepIdV2MailboxGrantJournal>(_ => new DeepIdV2PostgreSqlMailboxGrantJournal(did2.LatestHeadFloorPostgreSqlConnectionString, network));
+        var journalConnection = did2.LatestHeadFloorPostgreSqlConnectionString;
+        services.AddSingleton<IDeepIdV2MailboxGrantJournal>(_ => new DeepIdV2PostgreSqlMailboxGrantJournal(journalConnection, network));
         services.AddSingleton<IDeepIdV2MailboxGrantSignerCustody>(_ => new DeepIdV2ExternalMailboxGrantCustody(options));
         services.AddSingleton<DeepIdV2MailboxGrantReplayGuard>(); services.AddSingleton<DeepIdV2MailboxGrantAdmission>();
-        services.AddSingleton(provider => new DeepIdV2MailboxGrantIssuer(provider.GetRequiredService<DeepIdV2DirectoryProofIssuer>(),
+        services.AddSingleton(provider => new DeepIdV2MailboxAuthorityContextSource(provider.GetRequiredService<DeepIdV2DirectoryProofIssuer>(),
             provider.GetRequiredService<DeepIdV2XPointAuthoritySource>(), provider.GetRequiredService<XPointNetworkClosureDistribution>(),
-            provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(), provider.GetRequiredService<IDeepIdV2MailboxGrantJournal>(),
-            provider.GetRequiredService<IDeepIdV2MailboxGrantSignerCustody>(), provider.GetRequiredService<DeepIdV2MailboxGrantReplayGuard>(), observer));
+            provider.GetRequiredService<IContactResolveTrustedTimeContextSource>(), observer));
+        services.AddSingleton(provider => new DeepIdV2MailboxGrantIssuer(provider.GetRequiredService<DeepIdV2MailboxAuthorityContextSource>(),
+            provider.GetRequiredService<IDeepIdV2MailboxGrantJournal>(), provider.GetRequiredService<IDeepIdV2MailboxGrantSignerCustody>(),
+            provider.GetRequiredService<DeepIdV2MailboxGrantReplayGuard>()));
+        services.AddSingleton(provider => new MailboxRevocationAuthority(provider.GetRequiredService<DeepIdV2MailboxAuthorityContextSource>(),
+            provider.GetRequiredService<IDeepIdV2MailboxGrantSignerCustody>(), journalConnection, network));
+        services.AddHostedService<MailboxRevocationRenewalWorker>();
         return true;
     }
 

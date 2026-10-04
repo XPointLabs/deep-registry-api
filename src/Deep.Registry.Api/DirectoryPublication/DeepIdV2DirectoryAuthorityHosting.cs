@@ -181,6 +181,9 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 if (state.ProofEnabled)
                     await app.Services.GetRequiredService<DeepIdV2DirectoryProofIssuer>()
                         .RequireReadyAsync(cancellationToken).ConfigureAwait(false);
+                var mailbox = app.Services.GetService<MailboxRevocationAuthority>();
+                if (mailbox is not null)
+                    await mailbox.RequireReadyAsync(cancellationToken).ConfigureAwait(false);
                 return Results.Ok(new { ok = true });
             }
             catch (OperationCanceledException) when (
@@ -193,7 +196,7 @@ internal static class DeepIdV2DirectoryAuthorityHostingExtensions
                 InvalidOperationException or PlatformNotSupportedException or
                 UnauthorizedAccessException or NpgsqlException or TimeoutException or
                 FormatException or OverflowException or ArgumentException or
-                OperationCanceledException)
+                OperationCanceledException or Deep.Protocol.DeepExtension.PrivacyRouting.OnionBoundaryException)
             {
                 logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory authority is not ready ({Category}; {Reason}).",
                     exception.GetType().Name, DirectoryPublicationDiagnostics.UnavailableReason(exception));
