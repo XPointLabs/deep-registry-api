@@ -57,15 +57,33 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         builder.Services.AddSingleton(admission); builder.Services.AddSingleton(proofs); builder.Services.AddSingleton(reopened);
         builder.Services.AddSingleton<IDeepIdV2GenesisAuthority>(admission);
         builder.Services.AddSingleton<DeepIdV2IssuanceAdmissionGate>();
+        var controlAdmission = new MailboxRevocationDistributionAdmission();
+        builder.Services.AddSingleton(controlAdmission);
         await using var app = builder.Build();
-        app.MapDeepIdV2DirectoryAuthorityEndpoint(new(Enabled: true, ProofEnabled: true)); await app.StartAsync();
+        app.Use((context, next) =>
+        {
+            var feature = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()!;
+            // TestServer provides decoded Path/Query but no RawTarget. Supply
+            // this transport field for ordinary canonical fixture requests;
+            // this is not real-socket/escaped-target qualification.
+            Assert.True(string.IsNullOrEmpty(feature.RawTarget), "TestServer raw-target behavior changed.");
+            feature.RawTarget = context.Request.Path.Value + context.Request.QueryString.Value;
+            return next(context);
+        });
+        app.MapDeepIdV2DirectoryAuthorityEndpoint(new(Enabled: true, ProofEnabled: true));
+        app.MapMailboxRevocationDistribution(enabled: true); await app.StartAsync();
         using var http = app.GetTestClient();
+        http.BaseAddress = new Uri("https://authority.example/");
+        http.DefaultRequestHeaders.Accept.Add(new(MailboxRevocationDistributionHosting.MediaType));
+        var controlPath = MailboxRevocationDistributionHosting.Prefix + "/" + Convert.ToHexString(network).ToLowerInvariant() +
+            "/" + Convert.ToHexString(pma.CoreHash.Span).ToLowerInvariant() + "/1/";
         async Task RequireHttpReadinessAsync(bool ready)
         {
             using var response = await http.GetAsync(DeepIdV2DirectoryAuthorityHostingExtensions.ReadinessEndpointPath);
             Assert.Equal(ready ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable, response.StatusCode);
         }
         await RequireHttpReadinessAsync(false); // Cold context is not authority.
+        using (var cold = await http.GetAsync(controlPath + "latest")) Assert.Equal(HttpStatusCode.ServiceUnavailable, cold.StatusCode);
         await reopened.RefreshAsync(default);
         Assert.Equal(3, custody.Deposit.Inputs.Count); Assert.Equal(intent, custody.Deposit.Inputs[1]);
         Assert.Single(custody.Retrieve.Inputs);
@@ -81,6 +99,33 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         }, default);
         var requestsRoot = Path.Combine(directory, "proof-nonces");
         var nonceCount = Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count();
+        foreach (var (selector, expected) in new[] { ("1", historical), ("2", deposit), ("latest", deposit) })
+        {
+            using var response = await http.GetAsync(controlPath + selector);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(MailboxRevocationDistributionHosting.MediaType, response.Content.Headers.ContentType!.ToString());
+            Assert.Equal(expected.Length, response.Content.Headers.ContentLength);
+            Assert.True(response.Headers.CacheControl!.NoStore);
+            Assert.Equal("nosniff", Assert.Single(response.Headers.GetValues("X-Content-Type-Options")));
+            Assert.Equal(expected.ToArray(), await response.Content.ReadAsByteArrayAsync());
+        }
+        foreach (var bad in new[] { "0", "01", "1048577", "Latest", "1?alias=1" })
+        {
+            using var response = await http.GetAsync(controlPath + bad);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+        using (var missing = await http.GetAsync(controlPath + "3")) Assert.Equal(HttpStatusCode.ServiceUnavailable, missing.StatusCode);
+        using (var foreign = await http.GetAsync(controlPath.Replace(Convert.ToHexString(network).ToLowerInvariant(), new string('f', 32)) + "1"))
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, foreign.StatusCode);
+        using (var nonHttps = await http.GetAsync("http://authority.example" + controlPath + "latest"))
+            Assert.Equal(HttpStatusCode.Forbidden, nonHttps.StatusCode);
+        using (var wrongRole = await http.GetAsync(controlPath.Replace("/1/", "/0/") + "latest"))
+            Assert.Equal(HttpStatusCode.BadRequest, wrongRole.StatusCode);
+        using (var bodyRequest = new HttpRequestMessage(HttpMethod.Get, controlPath + "latest") { Content = new ByteArrayContent([1]) })
+        using (var badBody = await http.SendAsync(bodyRequest)) Assert.Equal(HttpStatusCode.BadRequest, badBody.StatusCode);
+        Assert.True(controlAdmission.TryEnter());
+        try { using var busy = await http.GetAsync(controlPath + "latest"); Assert.Equal(HttpStatusCode.TooManyRequests, busy.StatusCode); }
+        finally { controlAdmission.Exit(); }
         for (var check = 0; check < 5; check++)
         { await reopened.RequireReadyAsync(default); await RequireHttpReadinessAsync(true); }
         Assert.Equal(nonceCount, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
@@ -106,6 +151,9 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var pending = custody.Deposit.Inputs[^1];
         await Assert.ThrowsAsync<IOException>(() => reopened.RequireReadyAsync(default).AsTask());
         await RequireHttpReadinessAsync(false);
+        // A pending unsigned successor must not replace the last signed response.
+        using (var response = await http.GetAsync(controlPath + "latest"))
+        { Assert.Equal(HttpStatusCode.OK, response.StatusCode); Assert.Equal(deposit.ToArray(), await response.Content.ReadAsByteArrayAsync()); }
         custody.Deposit.BeforeSign = null;
         await reopened.RefreshAsync(default);
         Assert.Equal(pending, custody.Deposit.Inputs[^1]);
@@ -131,6 +179,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         }
         await Assert.ThrowsAsync<IOException>(() => reopened.RequireReadyAsync(default).AsTask());
         await RequireHttpReadinessAsync(false);
+        using (var stopped = await http.GetAsync(controlPath + "latest")) Assert.Equal(HttpStatusCode.ServiceUnavailable, stopped.StatusCode);
         var afterStop = custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count;
         await Assert.ThrowsAsync<IOException>(() => reopened.RefreshAsync(default).AsTask());
         Assert.Equal(afterStop, custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count);

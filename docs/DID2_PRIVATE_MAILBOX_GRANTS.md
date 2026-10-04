@@ -83,8 +83,11 @@ part of [DR-0083](../../docs/survival-program/decisions/DR-0083-current-mailbox-
 With `DeepIdV2MailboxGrantAuthority:Enabled`, the existing composition now
 registers an MGR1 renewal worker using the same actual service-observer
 proof/network/time context and existing role custody as private grant issuance.
-The default remains disabled. No additional configuration or HTTP distribution
-endpoint is introduced by this composition; node refresh is still required.
+The default remains disabled. The same explicit activation also maps the
+read-only signed node-control route defined by
+[CONTACT-RESOLVER §3.8](../../docs/architecture/CONTACT-RESOLVER-V1.md#38-current-mailbox-grant-revocation).
+There are no additional configuration options. This route is not the private
+grant endpoint or a direct client contact/message fallback.
 
 The explicit operator [journal DDL](sql/mailbox-revocation-journal.sql) belongs
 in the independently protected restore-authority PostgreSQL database, not an
@@ -163,11 +166,22 @@ restart reacquires current sources without replacing identities or history.
 The internal retained reader releases one verified signed historical generation
 at a time under a current complete host. Expired history is allowed for
 sequential floor catch-up, not admission; unsigned intents are never responses.
-No MGR1 control HTTP route or node automatic refresh is exposed yet. The existing
-eight-chain NCP2 distributor is unchanged and must not be treated as an MGR1
-source. Connected tests cover worker start/stop, exact cold retry, expired
+The enabled composition exposes the bounded read-only control route under that
+same current context. Numeric reads return one signed retained generation;
+`latest` returns the highest committed signed winner, possibly expired while
+renewal is pending, never an unsigned intent. Consumers still independently
+verify current host, role signatures, freshness and native sequential floors.
+No query creates a proof/nonce, signs, provisions or repairs state. Missing scope,
+history or current context is unavailable, not authoritative absence; contention
+does not queue. The existing eight-chain NCP2 distributor is unchanged and must
+not be treated as an MGR1 source. Connected tests cover worker start/stop, exact cold retry, expired
 completion followed by renewal, source-change interruption, cumulative history,
 corruption rejection and HTTP readiness without nonce/signature consumption.
+
+The local HTTP fixture uses TestServer, which omits raw request-target metadata;
+its test-only middleware supplies that metadata for ordinary canonical requests.
+It does not qualify actual HTTPS socket ingress, escaped-target handling or
+configured issuer-to-node-to-client delivery. Those remain acceptance gates.
 
 ## Focused regression lane
 

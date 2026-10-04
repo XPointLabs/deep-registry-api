@@ -132,7 +132,8 @@
        source interfaces and placement adapters. No replacement proof constructor. -->
   <ItemGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
     <Compile Include="..\..\..\xnode\tests\XNode.IntegrationTests\Runtime\DeepIdV2PublicationAuthorityFixture.cs"
-             Link="Fixtures\DeepIdV2PublicationAuthorityFixture.cs" />
+             Link="Fixtures\DeepIdV2PublicationAuthorityFixture.cs"
+             Condition="'$(MailboxSignerFocused)' != 'true'" />
     <None Include="..\..\docs\sql\mailbox-revocation-journal.sql"
           Link="Fixtures\mailbox-revocation-journal.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

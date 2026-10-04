@@ -95,6 +95,7 @@ internal static class DeepIdV2MailboxGrantHosting
         services.AddSingleton(provider => new MailboxRevocationAuthority(provider.GetRequiredService<DeepIdV2MailboxAuthorityContextSource>(),
             provider.GetRequiredService<IDeepIdV2MailboxGrantSignerCustody>(), journalConnection, network));
         services.AddHostedService<MailboxRevocationRenewalWorker>();
+        services.AddSingleton<MailboxRevocationDistributionAdmission>();
         return true;
     }
 
@@ -102,6 +103,7 @@ internal static class DeepIdV2MailboxGrantHosting
     {
         if (!enabled) return;
         _ = app.Services.GetRequiredService<DeepIdV2MailboxGrantIssuer>();
+        app.MapMailboxRevocationDistribution(enabled);
         app.MapPost(EndpointPath, HandleAsync).WithMetadata(new RequestSizeLimitAttribute(MaximumBodyBytes));
     }
 

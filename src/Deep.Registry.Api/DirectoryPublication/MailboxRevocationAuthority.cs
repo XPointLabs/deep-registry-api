@@ -78,7 +78,20 @@ internal sealed class MailboxRevocationAuthority(
 
     // One signed historical record; a pending input is never a response.
     // This does not require the latest MGR1 to be fresh, but the complete host is current.
-    internal async ValueTask<ReadOnlyMemory<byte>> ReadRetainedAsync(MailboxCapabilityDomain role, ulong generation, CancellationToken ct)
+    internal ValueTask<ReadOnlyMemory<byte>> ReadRetainedAsync(MailboxCapabilityDomain role, ulong generation, CancellationToken ct) =>
+        ReadRetainedCoreAsync(role, generation, default, default, ct);
+
+    internal ValueTask<ReadOnlyMemory<byte>> ReadForDistributionAsync(ReadOnlyMemory<byte> requestedNetwork,
+        ReadOnlyMemory<byte> requestedPolicy, MailboxCapabilityDomain role, ulong? generation, CancellationToken ct)
+    {
+        if (requestedNetwork.Length != 16 || requestedPolicy.Length != 32 ||
+            requestedNetwork.Span.IndexOfAnyExcept((byte)0) < 0 || requestedPolicy.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("Mailbox distribution scope is invalid.");
+        return ReadRetainedCoreAsync(role, generation, requestedNetwork.ToArray(), requestedPolicy.ToArray(), ct);
+    }
+
+    private async ValueTask<ReadOnlyMemory<byte>> ReadRetainedCoreAsync(MailboxCapabilityDomain role, ulong? generation,
+        ReadOnlyMemory<byte> requestedNetwork, ReadOnlyMemory<byte> requestedPolicy, CancellationToken ct)
     {
         RequireRunning(); ct.ThrowIfCancellationRequested();
         if (role is not (MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve) || generation is 0 or > 1_048_576)
@@ -91,8 +104,14 @@ internal sealed class MailboxRevocationAuthority(
             var context = Volatile.Read(ref observedContext) ?? throw new IOException("Mailbox authority has not observed current sources.");
             RequireNetwork(context);
             var current = await context.ReadIntervalAsync(deadline.Token).ConfigureAwait(false);
+            if (!requestedNetwork.IsEmpty && (!CryptographicOperations.FixedTimeEquals(requestedNetwork.Span, context.Host.NetworkId.Span) ||
+                !CryptographicOperations.FixedTimeEquals(requestedPolicy.Span, current.Policy.CoreHash.Span)))
+                throw new CryptographicException("Mailbox distribution scope differs from current authority.");
             using var journal = Open(context, current.Policy, role);
-            var exact = await journal.ReadSignedStepAsync(context.Host, generation, deadline.Token).ConfigureAwait(false);
+            var exact = generation is { } step
+                ? await journal.ReadSignedStepAsync(context.Host, step, deadline.Token).ConfigureAwait(false)
+                : (await journal.ReadIssuerStateAsync(context.Host, deadline.Token).ConfigureAwait(false)).ExactWinner;
+            if (exact.IsEmpty) throw new IOException("Mailbox signed history is unavailable.");
             await context.RequireCurrentAsync(deadline.Token).ConfigureAwait(false);
             RequireRunning(); deadline.Token.ThrowIfCancellationRequested(); return exact;
         }
@@ -150,7 +169,7 @@ internal sealed class MailboxRevocationRenewalWorker(MailboxRevocationAuthority 
             {
                 try { await authority.RefreshAsync(stoppingToken).ConfigureAwait(false); failures = 0; }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-                catch (Exception error) when (error is IOException or CryptographicException or InvalidOperationException or
+                catch (Exception error) when (error is IOException or InvalidDataException or CryptographicException or InvalidOperationException or
                     UnauthorizedAccessException or ArgumentException or FormatException or OverflowException or
                     OnionBoundaryException or Npgsql.NpgsqlException or OperationCanceledException or TimeoutException)
                 {
