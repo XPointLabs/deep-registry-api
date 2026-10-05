@@ -90,3 +90,36 @@ package cleanup and Windows/Android physical contacts/messages/attachments/group
 remain open. Physical qualification is0/4. Work follows the single
 [implementation plan](../../../docs/architecture/IMPLEMENTATION-PLAN-V1.md),
 not another isolated release claim or a parallel backlog.
+
+## Connected private grant exchange (2026-10-05)
+
+The existing real PQ account/ADA2/protected floor/witness route ceremony now
+feeds the actual `DeepIdV2MailboxGrantIssuer`, permanent PostgreSQL journal and
+mapped private HTTP endpoint over real Kestrel HTTPS. The compiled XNode
+`HttpsMailboxGrantAuthorityClient` constructs and signs the actual forwarding
+request; the independent client Protocol verifier authenticates its exact winner
+under the original verified route and PMA2. Exact XMG1 retry returns the same
+winner with one role signature and one permanent reservation.
+
+Untrusted TLS and corrupt two-store evidence reject without signing or reserving;
+a changed returned grant fails independent client verification. No permissive
+TLS callback, production signer/key, new wire or public client endpoint is added.
+The fixture uses owned PKI/time, synthetic holder/role custody and synthetic
+signed resolver attestations. Its prior route/proof transport is TestServer.
+It does **not** qualify actual resolver storage, native mailbox admission/data,
+protected Shared grant installation, selected ONION transport or physical E2E.
+The three original route crash cases retain their assertions unchanged.
+
+An initial compile failed on the missing ApplicationCore namespace import;
+correcting that fixture import produced focused1/0/0, terminal0. After adding
+the untrusted TLS and zero-reservation assertions, the normal whole Registry
+Release build passed with0 warnings/errors and the approved unfiltered provider
+lane passed **348/0/7**, terminal0,1m43s. Seven Windows platform skips remain
+skips. Each owned tmpfs PostgreSQL database was removed. Product source is
+unchanged; this test-only continuation does not transfer old full-gate evidence
+to changed runtime bodies or close S05. Stage0/14, physical0/4 remain.
+
+| Receipt under `artifacts/s00/` | Outcome | SHA-256 |
+| --- | --- | --- |
+| `s05-connected-grant-7fb09e3a4f474c1e944877abe335a819/nikit_SURFACE-LT_2026-10-05_05_59_38_net10.0.trx` | 1/0/0 before final negative assertions | `3d6e6b50e51f6ce65343a9865181cd5d3d54e84fd0f1e4bc90c13e285c8cba3a` |
+| `s05-connected-grant-full-614835f9a7c54170831be973891656aa/nikit_SURFACE-LT_2026-10-05_06_00_39_net10.0.trx` | final348/0/7 | `a96b07c67054dc5a10a4362851c9001cdac88d319b28fd6f80f4b2df5028a5e6` |

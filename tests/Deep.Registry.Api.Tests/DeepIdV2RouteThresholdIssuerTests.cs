@@ -33,7 +33,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     public Task ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(int crashMode) =>
         ExerciseRegistryCeremonyAsync(crashMode, mailboxLifecycle: false);
 
-    private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle, bool socketControl = false)
+    private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle, bool socketControl = false,
+        bool grantExchange = false)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -243,6 +244,12 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             var route = await accounts.EnsureOwnContactRouteAsync(Bytes(32, 0xd1), source,
                 new(100, 2, Bytes(32, 0xd2)), exchange);
             await route.EnsureCurrentAsync();
+            if (grantExchange)
+            {
+                await ExercisePrivateGrantExchangeAsync(route, proofs, rootSource, distribution, clock, db, scoped,
+                    network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, nodes);
+                return;
+            }
             Assert.Equal(crashMode == 0 ? 1UL : 2UL, route.Recipient.Freshness.NextProtectedLkg.LogGeneration);
             Assert.NotNull(exchange.Request); Assert.NotNull(exchange.Response);
             var conflictingRoute = new ContactRouteAuthorityWireRequest(exchange.Request.NetworkId.Span,
