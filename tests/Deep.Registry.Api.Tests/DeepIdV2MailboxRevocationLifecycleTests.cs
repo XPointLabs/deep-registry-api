@@ -11,6 +11,8 @@ using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -235,6 +237,11 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         Assert.Equal(Bytes(16, 0x51), revoked.Field(11).ToArray());
         await reopened.RequireReadyAsync(default);
 
+        if (socketControl)
+            await ExerciseConfiguredNodeEnrollmentAsync(tls!, http.BaseAddress, clock, network, observer,
+                genesisPin, genesisHeadHash, bundlePath, directory, pma.CoreHash,
+                deposit, retrieve, revoked.CanonicalBytes);
+
         // Actual BackgroundService start/observe/stop, not a fake renewal loop.
         var requestsBeforeWorker = Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count();
         using (var worker = new MailboxRevocationRenewalWorker(reopened, NullLogger<MailboxRevocationRenewalWorker>.Instance))
@@ -270,6 +277,119 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         Assert.Equal(afterStop, custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count);
     }
 
+    private static async Task ExerciseConfiguredNodeEnrollmentAsync(ControlSocketTls tls, Uri origin, Clock clock,
+        byte[] network, ReadOnlyMemory<byte> observer, XPointNetworkGenesisPin genesisPin,
+        ReadOnlyMemory<byte> genesisHeadHash, string bundlePath, string directory, ReadOnlyMemory<byte> pmaHash,
+        ReadOnlyMemory<byte> deposit, ReadOnlyMemory<byte> retrieve, ReadOnlyMemory<byte> latestDeposit)
+    {
+        var node = new XNode.Core.RouterNodeOptions
+        {
+            DataDirectory = Path.Combine(directory, "native-socket-node"), RouterId = Convert.ToHexString(PublicKey(0x70)),
+            Ed25519PrivateKey = Convert.ToHexString(Bytes(32, 0x70))
+        };
+        var security = new XNode.Core.Mailbox.MailboxStorageSecurity();
+        var mailbox = new XNode.Core.Mailbox.ReplicatedMailboxOptions { Enabled = true };
+        var custodyOptions = new xnode::XNode.CurrentMailboxCustodyOptions
+        {
+            NetworkIdHex = Convert.ToHexString(network).ToLowerInvariant(),
+            MailboxAuthorityCoreHashHex = Convert.ToHexString(pmaHash.Span).ToLowerInvariant(),
+            IndependentCustodyDirectory = Path.Combine(directory, "native-socket-custody"),
+            DataProtectionKeysDirectory = Path.Combine(directory, "native-socket-keys")
+        };
+        var custody = custodyOptions.Validate(node, mailbox)!;
+        var proof = new xnode::XNode.DeepIdV2DirectoryProofOptions
+        {
+            Enabled = true, RegistryOrigin = origin.AbsoluteUri, NetworkIdHex = Convert.ToHexString(network),
+            GenesisAuthorityCoreHashHex = Convert.ToHexString(genesisPin.AuthorityCoreHash.Span),
+            ExactAuthorityPaths = [Path.Combine(directory, "root.xna1")], ExactTimePolicyPaths = [Path.Combine(directory, "time.dts1")],
+            GenesisHeadPath = Path.Combine(directory, "genesis.adh1"), GenesisHeadCoreHashHex = Convert.ToHexString(genesisHeadHash.Span),
+            StateRelativeDirectory = "proof-head", DataProtectionKeysRelativeDirectory = "proof-keys", DeploymentProfileId = 1, RequestTimeoutSeconds = 5
+        }.ValidateAndLoad(node, developmentOrUat: true)!;
+        var observerPath = Path.Combine(directory, "native-socket-observer.did2");
+        await File.WriteAllBytesAsync(observerPath, observer.ToArray());
+        var placement = new xnode::XNode.DeepIdV2NetworkPlacementOptions
+        { Enabled = true, PublicBundlePath = bundlePath, PublicObservationDid2Path = observerPath }
+            .ValidateAndLoad(did2ProofEnabled: true, developmentOrUat: true)!;
+        security.SecureDirectory(custodyOptions.DataProtectionKeysDirectory);
+        var provisionServices = new ServiceCollection();
+        provisionServices.AddDataProtection().PersistKeysToFileSystem(new DirectoryInfo(custodyOptions.DataProtectionKeysDirectory))
+            .SetApplicationName(xnode::XNode.CurrentMailboxHostComposition.ProtectionApplication).DisableAutomaticKeyGeneration();
+        using (var provision = provisionServices.BuildServiceProvider())
+            provision.GetRequiredService<IKeyManager>().CreateNewKey(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(90));
+        foreach (var key in Directory.GetFiles(custodyOptions.DataProtectionKeysDirectory)) security.SecureFile(key);
+        ServiceProvider Open()
+        {
+            var services = new ServiceCollection(); services.AddLogging(logging => logging.ClearProviders());
+            services.AddSingleton(node); services.AddSingleton(mailbox);
+            services.AddSingleton<Deep.Protocol.DeepExtension.PrivacyRouting.IOnionMonotonicClock>(clock);
+            services.AddSingleton<XNode.Core.Mailbox.IMailboxStorageSecurity>(security);
+            services.AddSingleton<XNode.Core.Mailbox.IMailboxDurabilityBarrier, XNode.Core.Mailbox.MailboxDurabilityBarrier>();
+            xnode::XNode.DeepIdV2DirectoryProofHostComposition.AddDeepIdV2DirectoryProof(services, proof);
+            services.AddHttpClient("did2-directory-proof").ConfigurePrimaryHttpMessageHandler(() => tls.CreateHandler());
+            xnode::XNode.DeepIdV2NetworkPlacementHostComposition.AddDeepIdV2NetworkPlacement(services, placement);
+            xnode::XNode.CurrentMailboxHostComposition.AddCurrentMailboxHost(services, custody, node, mailbox);
+            xnode::XNode.CurrentMailboxHostRecoveryComposition.AddCurrentMailboxHostRecovery(services);
+            return services.BuildServiceProvider();
+        }
+        var requestsRoot = Path.Combine(directory, "proof-nonces");
+        var before = Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count();
+        await using (var first = Open())
+        {
+            var receiver = first.GetRequiredService<xnode::XNode.CurrentMailboxReplicaReceiver>();
+            await Assert.ThrowsAsync<CryptographicException>(() => receiver.InitializeHostAsync().AsTask());
+            var recovery = first.GetRequiredService<xnode::XNode.CurrentMailboxHostRecovery>();
+            await recovery.StartAsync(default);
+            Assert.False((await recovery.CheckAsync()).Recovered);
+            Assert.Equal(before, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            Assert.Empty(Directory.GetFiles(custodyOptions.IndependentCustodyDirectory, "enrollment.bin", SearchOption.AllDirectories));
+            using (var cancelled = new CancellationTokenSource())
+            {
+                cancelled.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                    xnode::XNode.CurrentMailboxEnrollmentCommand.EnrollConfiguredAsync(first, deposit, retrieve, cancelled.Token).AsTask());
+            }
+            await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
+                xnode::XNode.CurrentMailboxEnrollmentCommand.EnrollConfiguredAsync(first, new byte[1], retrieve, default).AsTask());
+            Assert.Equal(before, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            Assert.False(File.Exists(Path.Combine(node.DataDirectory, "proof-head", "latest.floor")));
+            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var callerDeposit = deposit.ToArray(); var callerRetrieve = retrieve.ToArray();
+            clock.OnMonotonicRead = () => { Array.Clear(callerDeposit); Array.Clear(callerRetrieve); };
+            try { await xnode::XNode.CurrentMailboxEnrollmentCommand.EnrollConfiguredAsync(first, callerDeposit, callerRetrieve, budget.Token); }
+            finally { clock.OnMonotonicRead = null; }
+            Assert.All(callerDeposit, value => Assert.Equal((byte)0, value));
+            Assert.All(callerRetrieve, value => Assert.Equal((byte)0, value));
+            Assert.Equal(before + 1, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            await receiver.InitializeHostAsync();
+            var admission = first.GetRequiredService<xnode::XNode.CurrentMailboxAdmission>();
+            await admission.RefreshRevocationsAsync(first.GetRequiredService<xnode::XNode.IMailboxGrantRevocationArtifactSource>(), default);
+            Assert.Equal(latestDeposit.ToArray(), (await first.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Deposit).ReadProtectedAsync()).ToArray());
+            Assert.Equal(retrieve.ToArray(), (await first.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Retrieve).ReadProtectedAsync()).ToArray());
+            await receiver.InitializeHostAsync();
+            Assert.True((await recovery.CheckAsync()).Recovered);
+            Assert.Equal(before + 1, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            await recovery.StopAsync(default);
+        }
+        await using (var cold = Open())
+        {
+            var recovery = cold.GetRequiredService<xnode::XNode.CurrentMailboxHostRecovery>();
+            await recovery.StartAsync(default);
+            Assert.False((await recovery.CheckAsync()).Recovered);
+            Assert.Equal(before + 1, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            var source = cold.GetRequiredService<xnode::XNode.DeepIdV2NetworkPlacementRuntime>();
+            await source.AcquireObservationAsync(default);
+            Assert.True((await recovery.CheckAsync()).Recovered);
+            Assert.Equal(latestDeposit.ToArray(), (await cold.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Deposit).ReadProtectedAsync()).ToArray());
+            Assert.Equal(retrieve.ToArray(), (await cold.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Retrieve).ReadProtectedAsync()).ToArray());
+            Assert.Equal(before + 2, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            source.StopObservations();
+            Assert.False((await recovery.CheckAsync()).Recovered);
+            Assert.Equal(latestDeposit.ToArray(), (await cold.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Deposit).ReadProtectedAsync()).ToArray());
+            Assert.Equal(before + 2, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+            await recovery.StopAsync(default);
+        }
+    }
+
     // Test-owned PKI stays in memory and this client only. Standard TLS chain,
     // validity, server EKU and hostname checks remain enabled; no OS trust import.
     private sealed class ControlSocketTls : IDisposable
@@ -296,14 +416,16 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             try { Server = X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.DefaultKeySet); }
             finally { CryptographicOperations.ZeroMemory(pfx); }
         }
-        internal HttpClient CreateClient(bool trustRoot = true)
+        internal SocketsHttpHandler CreateHandler(bool trustRoot = true)
         {
             var policy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust, RevocationMode = X509RevocationMode.NoCheck };
             if (trustRoot) policy.CustomTrustStore.Add(root);
             var handler = new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, UseProxy = false, AutomaticDecompression = DecompressionMethods.None };
             handler.SslOptions.CertificateChainPolicy = policy;
-            return new HttpClient(new StatusHandler(handler, this)) { Timeout = TimeSpan.FromSeconds(10) };
+            return handler;
         }
+        internal HttpClient CreateClient(bool trustRoot = true) =>
+            new(new StatusHandler(CreateHandler(trustRoot), this)) { Timeout = TimeSpan.FromSeconds(10) };
         private sealed class StatusHandler(HttpMessageHandler inner, ControlSocketTls owner) : DelegatingHandler(inner)
         {
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

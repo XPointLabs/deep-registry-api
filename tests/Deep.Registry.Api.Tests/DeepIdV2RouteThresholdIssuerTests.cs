@@ -784,10 +784,11 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         internal byte[] Boot { get; } = Bytes(16, 0xf3);
         internal ulong UnixTime { get; set; } = 1_100;
         internal ulong Sample { get; set; } = 100;
+        internal Action? OnMonotonicRead;
         ValueTask<ContactResolveTrustedTimeContext> IContactResolveTrustedTimeContextSource.ReadAsync(CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); return ValueTask.FromResult(new ContactResolveTrustedTimeContext(Boot, Sample, UnixTime, 5)); }
         public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken ct)
-        { ct.ThrowIfCancellationRequested(); return ValueTask.FromResult(new OnionMonotonicReading(Boot, Sample)); }
+        { ct.ThrowIfCancellationRequested(); OnMonotonicRead?.Invoke(); return ValueTask.FromResult(new OnionMonotonicReading(Boot, Sample)); }
     }
     private sealed class DelayedCustody(IContactRouteAuthorityWitnessCustody source, Action delay) : IContactRouteAuthorityWitnessCustody
     {
