@@ -3,6 +3,8 @@ extern alias xnode;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Net;
+using System.Net.Sockets;
+using System.Text.Json;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
@@ -16,8 +18,12 @@ using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -388,10 +394,126 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             Assert.Equal(before + 2, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
             await recovery.StopAsync(default);
         }
+        // Reuse the enrolled custody in the actual Program. No native endpoint,
+        // authority source or hosted service is replaced. Only fixture time and
+        // isolated TLS trust are supplied; Xray/heartbeat are explicitly disabled,
+        // so this closes host composition, not carrier/physical qualification.
+        var privacyKeyPath = Path.Combine(directory, "program-onion.key");
+        await File.WriteAllTextAsync(privacyKeyPath, Convert.ToHexString(Bytes(32, 0xe0)).ToLowerInvariant());
+        security.SecureFile(privacyKeyPath);
+        var nextPrivacyKeyPath = Path.Combine(directory, "program-onion-next.key");
+        await File.WriteAllTextAsync(nextPrivacyKeyPath, Convert.ToHexString(Bytes(32, 0xe8)).ToLowerInvariant());
+        security.SecureFile(nextPrivacyKeyPath);
+        var privacyProtectionPath = Path.Combine(directory, "program-onion-protection.key");
+        await File.WriteAllBytesAsync(privacyProtectionPath, RandomNumberGenerator.GetBytes(32));
+        security.SecureFile(privacyProtectionPath);
+        var certificatePath = Path.Combine(directory, "program-tls.pfx");
+        var certificateBytes = tls.Server.Export(X509ContentType.Pfx);
+        try { await File.WriteAllBytesAsync(certificatePath, certificateBytes); }
+        finally { CryptographicOperations.ZeroMemory(certificateBytes); }
+        security.SecureFile(certificatePath);
+        var reservations = Enumerable.Range(0, 3).Select(_ => new TcpListener(IPAddress.Loopback, 0)).ToArray();
+        int[] ports;
+        try
+        {
+            foreach (var listener in reservations) listener.Start();
+            ports = reservations.Select(listener => ((IPEndPoint)listener.LocalEndpoint).Port).ToArray();
+        }
+        finally { foreach (var listener in reservations) listener.Stop(); }
+        var settings = new Dictionary<string, string?>
+        {
+            ["Node:DataDirectory"] = node.DataDirectory, ["Node:RouterId"] = node.RouterId,
+            ["Node:Ed25519PrivateKey"] = node.Ed25519PrivateKey,
+            ["Node:ApiListenUrl"] = "http://127.0.0.1:" + ports[0],
+            ["Node:PeerRpcListenUrl"] = "http://127.0.0.1:" + ports[1],
+            ["Node:PrivacyPeerH2ListenUrl"] = "https://127.0.0.1:" + ports[2],
+            ["Kestrel:Certificates:Default:Path"] = certificatePath,
+            ["Vless:Enabled"] = "false", ["RegistryHeartbeat:Enabled"] = "false",
+            ["Mailbox:Enabled"] = "true",
+            ["CurrentMailboxCustody:NetworkIdHex"] = custodyOptions.NetworkIdHex,
+            ["CurrentMailboxCustody:MailboxAuthorityCoreHashHex"] = custodyOptions.MailboxAuthorityCoreHashHex,
+            ["CurrentMailboxCustody:IndependentCustodyDirectory"] = custodyOptions.IndependentCustodyDirectory,
+            ["CurrentMailboxCustody:DataProtectionKeysDirectory"] = custodyOptions.DataProtectionKeysDirectory,
+            ["DeepIdV2DirectoryProof:Enabled"] = "true",
+            ["DeepIdV2DirectoryProof:RegistryOrigin"] = origin.AbsoluteUri,
+            ["DeepIdV2DirectoryProof:NetworkIdHex"] = Convert.ToHexString(network),
+            ["DeepIdV2DirectoryProof:GenesisAuthorityCoreHashHex"] = Convert.ToHexString(genesisPin.AuthorityCoreHash.Span),
+            ["DeepIdV2DirectoryProof:ExactAuthorityPaths:0"] = Path.Combine(directory, "root.xna1"),
+            ["DeepIdV2DirectoryProof:ExactTimePolicyPaths:0"] = Path.Combine(directory, "time.dts1"),
+            ["DeepIdV2DirectoryProof:GenesisHeadPath"] = Path.Combine(directory, "genesis.adh1"),
+            ["DeepIdV2DirectoryProof:GenesisHeadCoreHashHex"] = Convert.ToHexString(genesisHeadHash.Span),
+            ["DeepIdV2DirectoryProof:StateRelativeDirectory"] = "proof-head",
+            ["DeepIdV2DirectoryProof:DataProtectionKeysRelativeDirectory"] = "proof-keys",
+            ["DeepIdV2DirectoryProof:DeploymentProfileId"] = "1",
+            ["DeepIdV2DirectoryProof:RequestTimeoutSeconds"] = "5",
+            ["DeepIdV2NetworkPlacement:Enabled"] = "true",
+            ["DeepIdV2NetworkPlacement:PublicBundlePath"] = bundlePath,
+            ["DeepIdV2NetworkPlacement:PublicObservationDid2Path"] = observerPath,
+            ["PrivacyRouting:Enabled"] = "true",
+            ["PrivacyRouting:X25519PrivateKeyPath"] = privacyKeyPath,
+            ["PrivacyRouting:NextX25519PrivateKeyPath"] = nextPrivacyKeyPath,
+            ["PrivacyRouting:StateProtectionKeyPath"] = privacyProtectionPath,
+            ["PrivacyRouting:PublicPeerBaseUrl"] = "https://127.0.0.1:" + ports[2],
+            ["PrivacyRouting:ReplayStateRelativePath"] = "program-onion/replay",
+            ["PrivacyRouting:EntropyStateRelativePath"] = "program-onion/entropy",
+            ["PrivacyRouting:KeyVaultDirectoryRelativePath"] = "program-onion/vault",
+            ["PrivacyRouting:Peers:0:RouterId"] = Convert.ToHexString(PublicKey(0x71)).ToLowerInvariant(),
+            ["PrivacyRouting:Peers:0:BaseUrl"] = "https://192.0.2.2/",
+            ["PrivacyRouting:Peers:0:CurrentSpkiSha256"] = Convert.ToHexString(Bytes(32, 0xd1)).ToLowerInvariant(),
+            ["PrivacyRouting:Peers:0:NextSpkiSha256"] = Convert.ToHexString(Bytes(32, 0xd9)).ToLowerInvariant()
+        };
+        var beforeProgram = Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count();
+        await using var program = new ConfiguredNodeProgram(settings, tls, clock);
+        program.UseKestrel(); program.StartServer();
+        Assert.True(program.Services.GetRequiredService<xnode::XNode.PrivacyRoutingRuntime>().ProductionCapabilityAvailable);
+        Assert.Equal(beforeProgram + 1, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+        using var health = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(10) };
+        var healthUri = new Uri("http://127.0.0.1:" + ports[0] + "/health/ready");
+        using (var ready = await health.GetAsync(healthUri))
+        {
+            Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+            using var json = JsonDocument.Parse(await ready.Content.ReadAsByteArrayAsync());
+            Assert.True(json.RootElement.GetProperty("currentMailboxHost").GetProperty("recovered").GetBoolean());
+            Assert.Equal("ready", json.RootElement.GetProperty("privacyRouting").GetString());
+            Assert.Equal("disabled", json.RootElement.GetProperty("transportMode").GetString());
+        }
+        var sample = clock.Sample;
+        try
+        {
+            clock.Sample = checked(sample - 1);
+            using var unavailable = await health.GetAsync(healthUri);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+            Assert.Equal(latestDeposit.ToArray(), (await program.Services.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Deposit).ReadProtectedAsync()).ToArray());
+            Assert.Equal(retrieve.ToArray(), (await program.Services.GetRequiredKeyedService<xnode::XNode.FileMailboxGrantRevocationStore>(MailboxCapabilityDomain.Retrieve).ReadProtectedAsync()).ToArray());
+        }
+        finally { clock.Sample = sample; }
+        Assert.Equal(beforeProgram + 1, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
     }
 
-    // Test-owned PKI stays in memory and this client only. Standard TLS chain,
-    // validity, server EKU and hostname checks remain enabled; no OS trust import.
+    private sealed class ConfiguredNodeProgram(Dictionary<string, string?> settings, ControlSocketTls tls, Clock clock)
+        : WebApplicationFactory<xnode::Program>
+    {
+        protected override IHost CreateHost(IHostBuilder builder)
+        {
+            builder.ConfigureHostConfiguration(configuration => configuration.AddInMemoryCollection(settings));
+            return base.CreateHost(builder);
+        }
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Development");
+            builder.ConfigureLogging(logging => logging.ClearProviders());
+            builder.ConfigureServices(services =>
+            {
+                services.Replace(ServiceDescriptor.Singleton<Deep.Protocol.DeepExtension.PrivacyRouting.IOnionMonotonicClock>(clock));
+                services.AddHttpClient("did2-directory-proof").ConfigurePrimaryHttpMessageHandler(() => tls.CreateHandler());
+            });
+        }
+    }
+
+    // Test-owned PKI is confined to this client and the owned temporary Program
+    // certificate file. Standard chain/validity/EKU/name checks remain enabled;
+    // no OS trust import. Its fresh synthetic server key is exportable only to
+    // supply the real Program's file-based listener configuration.
     private sealed class ControlSocketTls : IDisposable
     {
         private readonly X509Certificate2 root;
@@ -413,7 +535,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             using var signed = request.Create(root, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(30), RandomNumberGenerator.GetBytes(16));
             using var withKey = signed.CopyWithPrivateKey(serverKey);
             var pfx = withKey.Export(X509ContentType.Pfx);
-            try { Server = X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.DefaultKeySet); }
+            try { Server = X509CertificateLoader.LoadPkcs12(pfx, null,
+                X509KeyStorageFlags.DefaultKeySet | X509KeyStorageFlags.Exportable); }
             finally { CryptographicOperations.ZeroMemory(pfx); }
         }
         internal SocketsHttpHandler CreateHandler(bool trustRoot = true)
