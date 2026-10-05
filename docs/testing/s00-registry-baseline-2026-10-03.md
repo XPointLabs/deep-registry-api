@@ -112,7 +112,7 @@ All three disposable PostgreSQL instances and the unstarted signer artifact-expo
 container were removed after exact ownership verification. No named DB volume
 was created. The local signer test image/cache remains; it is not published.
 
-## Still open
+## Checkpoint C remaining work (historical)
 
 Registry's reader/isolated-provider baseline is closed, **S00 as a whole is not**.
 XNode has a current signed one-time-invite prerequisite gap; current XPP fixture
@@ -120,3 +120,43 @@ migration and root governance drift remain. This checkpoint makes no claim about
 revocation source/floor, current mailbox node admission/peer proof, shipping
 Release composition, contact/message device E2E, remote files or groups.
 No production deployment, device install/reset or Release publication ran.
+
+## Current source baseline — 2026-10-05
+
+Inputs: Registry `f47ca7510dcf04ff59235387ccce66662c19f620`, Protocol
+`ed7153e12cc0749e875a047705566bf0a99338b9`. The source-cutover solution build
+finishes terminal0 with zero warnings/errors. External Protocol builds in Debug
+under this existing solution graph; this is not a uniform Release package matrix.
+The first provider invocation did not start tests because the local Docker engine
+was unavailable. After the local engine was ready, the existing disposable tmpfs
+PostgreSQL lane completes **348 passed / 0 failed / 7 skipped**, terminal0.
+All **31** historical failures in the table above match exact Passed results in
+this fresh full receipt, including each theory argument; no case was omitted.
+
+The existing actual Linux signer target completes **7 passed / 0 failed /
+0 skipped**, terminal0. Comparing exact case names gives no difference between
+these seven passes and the seven Windows platform skips. They are alternate
+platform execution of the same cases, not additive unique coverage. Socket
+framing with synthetic signatures is not cryptographic issuance qualification.
+Both the owned temporary PostgreSQL container and never-started signer artifact
+export container were removed after ownership checks. No production resources
+or registered keys were read or modified.
+
+| Ignored current receipt | SHA-256 |
+| --- | --- |
+| Windows full348/0/7 | `e8a8fca096c8f31ec2dff6710d8790d24bcecbd4c3109b1c8c3d98ec4b38bec8` |
+| Linux signer7/0/0 | `7970108072c2c2fa1feeff7fe30eab2a6b1de7c2c80d29cf565329fa2c8145ab` |
+
+The Windows receipt is under `artifacts/s00/s00-final-source-28141ffc04bd4a8db866c2ba7610bb08`;
+Linux under `artifacts/s00/s00-final-source-linux-ed7153e`. Both remain ignored.
+Linux test image: `sha256:94daf442a95937ff911a68926b7f1f18654a19c49f427903eaff3087d81a11c1`.
+Commands remain the supported lane and signer target described above; the
+isolated lane's current full invocation uses both source-cutover flags.
+
+This closes the Registry component baseline only. The old checkpoint's one-time
+producer gap was subsequently addressed in the
+[signed publication checkpoint](s00-one-time-publication-2026-10-04.md);
+it is not a new task to reimplement. Overall S00 acceptance and remaining work
+are owned solely by [NEXT-SPRINT](../../../docs/NEXT-SPRINT.md). No shipping
+composition, deployed issuer renewal, physical contact/message path or Release
+qualification is inferred from this component receipt.
