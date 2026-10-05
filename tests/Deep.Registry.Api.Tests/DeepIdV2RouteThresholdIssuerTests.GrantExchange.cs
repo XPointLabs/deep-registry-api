@@ -23,17 +23,20 @@ namespace Deep.Registry.Api.Tests;
 public sealed partial class DeepIdV2RouteThresholdIssuerTests
 {
     [Fact]
-    public Task ActualPrivateGrantHttpsProducerNodeForwarderAndClientVerifierShareWinner() =>
+    public Task ActualPrivateIssuerHttpsForwarderClientVerifierAndConfiguredNativeMailboxCycle() =>
         ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, grantExchange: true);
 
     // Actual Registry issuer/journal, compiled XNode HTTPS forwarder and independent
     // client verifier. The route comes from the real PQ account ceremony. Replica
     // attestations and holder custody are test-owned: this is NOT resolver storage,
-    // native mailbox acceptance, owned client dispatch, ONION or device E2E.
+    // owned client dispatch, ONION or device E2E. The continuation uses actual
+    // configured/native Store/Retrieve/ACK, including real peer TLS/H2.
     private static async Task ExercisePrivateGrantExchangeAsync(VerifiedDeepIdV2ContactRouteClosure route,
-        DeepIdV2DirectoryProofIssuer proofs, DeepIdV2XPointAuthoritySource roots,
+        DeepIdV2DurableGenesisAuthority admission, DeepIdV2DirectoryProofIssuer proofs, DeepIdV2XPointAuthoritySource roots,
         XPointNetworkClosureDistribution distribution, Clock clock, NpgsqlConnection db, string scoped,
-        byte[] network, ReadOnlyMemory<byte> observer, ReadOnlyMemory<byte> exactPma, Signer[] nodes)
+        byte[] network, ReadOnlyMemory<byte> observer, ReadOnlyMemory<byte> exactPma, Signer[] nodes,
+        GrantPeerLayout peers, string directory, string bundlePath, XPointNetworkGenesisPin genesisPin,
+        ReadOnlyMemory<byte> genesisHeadHash)
     {
         await using (var ddl = new NpgsqlCommand(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
             "Fixtures", "did2-mailbox-grant-journal.sql")), db)) await ddl.ExecuteNonQueryAsync();
@@ -46,16 +49,20 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var contexts = new DeepIdV2MailboxAuthorityContextSource(proofs, roots, distribution, clock,
             DeepIdV2Codec.DecodeDid2(observer.Span));
         var issuer = new DeepIdV2MailboxGrantIssuer(contexts, journal, custody, new());
+        using var revocationCustody = new MailboxTestCustody();
+        var revocations = await ProvisionGrantRevocationsAsync(contexts, revocationCustody, db, scoped, network, exactPma);
         using var tls = new ControlSocketTls();
         var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,
             listen => listen.UseHttps(tls.Server)));
         builder.Services.AddSingleton(issuer); builder.Services.AddSingleton<DeepIdV2MailboxGrantAdmission>();
-        // Mapping also requires the real revocation authority, though this test
-        // does not request its distribution or start a renewal worker.
-        builder.Services.AddSingleton(new MailboxRevocationAuthority(contexts, custody, scoped, network));
+        builder.Services.AddSingleton(revocations);
         builder.Services.AddSingleton<MailboxRevocationDistributionAdmission>();
-        await using var app = builder.Build(); app.MapDeepIdV2MailboxGrants(enabled: true); await app.StartAsync();
+        builder.Services.AddSingleton(admission); builder.Services.AddSingleton<IDeepIdV2GenesisAuthority>(admission);
+        builder.Services.AddSingleton(proofs); builder.Services.AddSingleton<DeepIdV2IssuanceAdmissionGate>();
+        builder.Services.AddSingleton(TimeProvider.System);
+        await using var app = builder.Build(); app.MapDeepIdV2MailboxGrants(enabled: true);
+        app.MapDeepIdV2DirectoryAuthorityEndpoint(new(Enabled: true, ProofEnabled: true)); await app.StartAsync();
         var origin = new Uri(app.Services.GetRequiredService<IServer>().Features
             .Get<IServerAddressesFeature>()!.Addresses.Single());
         using var http = tls.CreateClient();
@@ -111,6 +118,26 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var changed = exact.ToArray(); changed[^1] ^= 1;
         await Assert.ThrowsAsync<CryptographicException>(async () =>
             await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, authored, changed, exactPma));
+        // Test-owned resolver attestations authorize this retrieval capability.
+        // This does not prove real resolver authorization or Shared holder custody.
+        var readRequest = await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route,
+            authored.Record.Field(3), Bytes(32, 0x56), holder);
+        var readTuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(readRequest.ExactXmg1.Span),
+            readRequest.Record.Field(3).Span, MailboxGrantCapabilityDigest.Compute(readRequest.Record.Field(4).Span, readRequest.Domain),
+            (byte)readRequest.Domain, 1, route.Route.ExactHash.Span, effective);
+        var readSigning = MailboxGrantRouteEvidenceAuthentication.GetSigningBytes(readTuple);
+        var readEvidence = placement.RankedReplicaNodeIds.Select(id => new xnode::XNode.MailboxGrantReplicaEvidence(id,
+            nodes.Single(node => node.SignerId.Span.SequenceEqual(id.Span)).SignReceipt(readSigning))).ToArray();
+        var readResult = await client.AuthorizeAsync(request with
+        {
+            ExactXmg1 = readRequest.ExactXmg1, ReplicaEvidence = readEvidence,
+            ResultExpiresAtUnixSeconds = BinaryPrimitives.ReadUInt64BigEndian(readRequest.Record.Field(10).Span)
+        }, default);
+        var readGrant = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, readRequest, readResult, exactPma);
+        Assert.Equal(MailboxCapabilityDomain.Retrieve, readGrant.Domain); Assert.Single(custody.Retrieve.Inputs);
+        Assert.Equal(2L, await count.ExecuteScalarAsync());
+        await ExerciseIssuedGrantsNativeCycleAsync(verified, readGrant, tls, origin, clock, peers, nodes, revocations,
+            network, observer, directory, bundlePath, genesisPin, genesisHeadHash);
     }
 
     private sealed class GrantClock(Clock source) : XNode.Core.IClock

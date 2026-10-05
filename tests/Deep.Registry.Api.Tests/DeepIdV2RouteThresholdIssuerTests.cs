@@ -50,6 +50,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             await create.ExecuteNonQueryAsync();
         try
         {
+            using var grantPeers = grantExchange ? new GrantPeerLayout() : null;
             await using var db = new NpgsqlConnection(scoped);
             await db.OpenAsync();
             foreach (var name in new[] { "did2-latest-head-floor.sql", "did2-route-threshold-journal.sql", "did2-publication-journal.sql" })
@@ -75,7 +76,9 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             var descriptors = nodes.Select((node, i) => new XPointNetworkOperationalNode(node,
                 Bytes(32, (byte)(0x80 + i)), Bytes(32, (byte)(0x90 + i)), Bytes(32, (byte)(0xa0 + i)),
                 Bytes(32, (byte)(0xb0 + i)), (uint)(64_500 + i), 840, Bytes(32, (byte)(0xc0 + i)),
-                IPAddress.Parse($"192.0.2.{i + 1}"), 443, Bytes(32, (byte)(0xd0 + i)),
+                grantPeers is null ? IPAddress.Parse($"192.0.2.{i + 1}") : IPAddress.Loopback,
+                grantPeers is null ? (ushort)443 : checked((ushort)grantPeers.Ports[i]),
+                grantPeers is null ? Bytes(32, (byte)(0xd0 + i)) : grantPeers.Pins[i],
                 Bytes(32, (byte)(0xd8 + i)), ScalarMult.Base(Bytes(32, (byte)(0xe0 + i))),
                 ScalarMult.Base(Bytes(32, (byte)(0xe8 + i))), Enumerable.Range(0, 5).Select(role =>
                     (ReadOnlyMemory<byte>)PublicKey((byte)(0x10 + i * 5 + role))).ToArray())).ToArray();
@@ -246,8 +249,9 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             await route.EnsureCurrentAsync();
             if (grantExchange)
             {
-                await ExercisePrivateGrantExchangeAsync(route, proofs, rootSource, distribution, clock, db, scoped,
-                    network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, nodes);
+                await ExercisePrivateGrantExchangeAsync(route, admission, proofs, rootSource, distribution, clock, db, scoped,
+                    network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, nodes, grantPeers!,
+                    directory, bundlePath, bootstrap.GenesisPin, genesis.CoreHash);
                 return;
             }
             Assert.Equal(crashMode == 0 ? 1UL : 2UL, route.Recipient.Freshness.NextProtectedLkg.LogGeneration);
