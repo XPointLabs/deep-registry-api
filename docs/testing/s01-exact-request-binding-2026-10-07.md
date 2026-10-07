@@ -47,3 +47,22 @@ This qualifies the bounded source change, not actual deployed HTTPS/external
 custody, retained route availability, process-crash PostgreSQL protection,
 renewed retained issuance or device delivery. No deployment/reset, registered
 key/genesis change, GitHub Release or main merge was performed. S01 stays open.
+
+## Matched CI provider configuration
+
+Inspection before push found the same isolation mismatch in both existing
+workflows: `registry-api.yml` and `publish-image.yml` provisioned `deep_ci`,
+while the unchanged native test guard requires `deep_s00`. Both now use the
+already-qualified loopback synthetic database/user in the service, health probe
+and all three provider variables. The existing CI-only password, PostgreSQL
+image, schema isolation and product/test assertions are unchanged. No new
+dependency, endpoint, workflow trigger or production deployment is added.
+
+Bounded scalar checks plus the framework connection-string parser passed both
+service/health scopes and all six provider strings. This is not general YAML
+validation or executed GitHub CI. No product/test/binary input was rebuilt or
+edited: the native349/0/7 provider gate above remains the source evidence.
+Actual Linux CI/signing results remain pending the authorized matched push.
+Regular CI may publish its existing immutable candidate image after successful
+tests; it does not deploy production or create a GitHub Release. The separate
+image publication workflow remains manual.

@@ -17,20 +17,20 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_USER: deep_ci
+          POSTGRES_USER: deep_s00
           POSTGRES_PASSWORD: isolated_ci_only
-          POSTGRES_DB: deep_ci
+          POSTGRES_DB: deep_s00
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U deep_ci -d deep_ci"
+          --health-cmd "pg_isready -U deep_s00 -d deep_s00"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
-      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_ci;Password=isolated_ci_only;Database=deep_ci
-      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_ci;Password=isolated_ci_only;Database=deep_ci
-      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_ci;Password=isolated_ci_only;Database=deep_ci
+      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Password=isolated_ci_only;Database=deep_s00
+      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Password=isolated_ci_only;Database=deep_s00
+      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Password=isolated_ci_only;Database=deep_s00
 
     steps:
       - name: Checkout
