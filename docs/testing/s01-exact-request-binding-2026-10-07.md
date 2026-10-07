@@ -68,7 +68,18 @@ Bounded scalar checks plus the framework connection-string parser passed both
 service/health scopes and all six provider strings. This is not general YAML
 validation or executed GitHub CI. No product/test/binary input was rebuilt or
 edited: the native349/0/7 provider gate above remains the source evidence.
-Actual Linux CI/signing results remain pending the authorized matched push.
+The authorized exact-HEAD Linux CI run
+[37599715974](https://github.com/XPointLabs/deep-registry-api/actions/runs/37599715974)
+for `e694282127fce2e612919492d1f1751813d49404` restored and built successfully,
+then completed **352/4/0, terminal1**. All four failures occur while generating
+initial client prekeys: no release-approved ML-KEM asset exists for the Linux
+process RID. They are the three crash modes of the actual route ceremony and
+`ActualPrivateIssuerHttpsForwarderClientVerifierAndConfiguredNativeMailboxCycle`.
+This is a platform/approved-asset qualification gap, not the Windows file-write
+failure below or an accepted pass. No tests are filtered/skipped and no candidate
+provider is substituted to hide it. Candidate image publication was skipped
+because tests failed. The Windows native source receipt above does not qualify
+these Linux crypto paths.
 An additional frozen-binary full run with explicit host SCRAM authentication
 and PGPASSWORD completed **348/1/7, terminal1**. PostgreSQL authentication worked;
 the new failure is `ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(crashMode: 1)`:
