@@ -21,6 +21,7 @@ jobs:
         env:
           POSTGRES_USER: deep_s00
           POSTGRES_PASSWORD: isolated_ci_only
+          POSTGRES_HOST_AUTH_METHOD: scram-sha-256
           POSTGRES_DB: deep_s00
         ports:
           - 5432:5432
@@ -30,9 +31,11 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
-      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Password=isolated_ci_only;Database=deep_s00
-      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Password=isolated_ci_only;Database=deep_s00
-      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Password=isolated_ci_only;Database=deep_s00
+      # Synthetic disposable CI auth only; no password in logged connection strings.
+      PGPASSWORD: isolated_ci_only
+      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00
+      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00
+      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00
     steps:
       - uses: actions/checkout@v4
         with:

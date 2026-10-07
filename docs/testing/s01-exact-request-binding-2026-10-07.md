@@ -55,7 +55,13 @@ workflows: `registry-api.yml` and `publish-image.yml` provisioned `deep_ci`,
 while the unchanged native test guard requires `deep_s00`. Both now use the
 already-qualified loopback synthetic database/user in the service, health probe
 and all three provider variables. The existing CI-only password, PostgreSQL
-image, schema isolation and product/test assertions are unchanged. No new
+image, schema isolation and product/test assertions are unchanged. The selected
+scanner initially flagged the old inline synthetic password in six connection
+strings; that failed report is preserved. Those strings no longer contain a
+password. Npgsql's documented [PGPASSWORD channel](https://www.npgsql.org/doc/connection-string-parameters#environment-variables)
+supplies only the same disposable CI credential, not production key material.
+Environment credentials are not the recommended production secret mechanism;
+this exception is scoped to synthetic, short-lived CI authentication. No new
 dependency, endpoint, workflow trigger or production deployment is added.
 
 Bounded scalar checks plus the framework connection-string parser passed both
@@ -63,6 +69,21 @@ service/health scopes and all six provider strings. This is not general YAML
 validation or executed GitHub CI. No product/test/binary input was rebuilt or
 edited: the native349/0/7 provider gate above remains the source evidence.
 Actual Linux CI/signing results remain pending the authorized matched push.
+An additional frozen-binary full run with explicit host SCRAM authentication
+and PGPASSWORD completed **348/1/7, terminal1**. PostgreSQL authentication worked;
+the new failure is `ActualPqAccountAda2FloorWitnessCustodyAndJournalCloseOwnedRouteOverHttp(crashMode: 1)`:
+`UnauthorizedAccessException` at protected one-use ledger `WriteState` during
+publication issuer replay. It is not reclassified as an accepted baseline,
+proof of a password-provider fault, or a fixed product defect. Cause remains
+under investigation; no retry/ACL/crypto guard was weakened.
+Receipt `full-ci-provider/nikit_SURFACE-LT_2026-10-07_14_04_35_net10.0.trx`, SHA256
+`0CD32DA52B290CD92C8BC41EA26B573D51179D847BFD7E3179AB66F4BF6E409B`.
+One bounded repeat of all three crash modes on the same frozen binaries and
+SCRAM provider completed **3/0/0, terminal0**. The file-write failure did not
+reproduce; this does not establish its cause or fix and does not supersede the
+failed full run. No product, fixture, retry budget or permissions changed.
+Receipt `ci-provider-file-triage/nikit_SURFACE-LT_2026-10-07_14_14_23_net10.0.trx`, SHA256
+`4BC15592143EACF42AD3B66DD884F70ADD53265B4042D7F06736A08545ED5131`.
 Regular CI may publish its existing immutable candidate image after successful
 tests; it does not deploy production or create a GitHub Release. The separate
 image publication workflow remains manual.
