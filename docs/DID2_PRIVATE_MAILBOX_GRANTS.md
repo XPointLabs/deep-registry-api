@@ -46,6 +46,18 @@ and rejects any incompatible retained winner before changing the constraint.
 The runtime does not execute DDL or repair retained state. Do not roll out this
 source against the previous signed policy/bundle or publish a delivery claim.
 
+The matched current request follows
+[DR-0102](../../docs/survival-program/decisions/DR-0102-exact-mailbox-request-route-binding.md).
+The node-private JSON admits only `exactXmg2`; `exactXmg1` is unknown and rejects.
+The issuer checks the signed exact route commitment before reserving a journal
+entry or invoking either external role signer. Result framing and signer keys
+are unchanged. Rebuild/repin Protocol, Node and Shared/client consumers together;
+old pending/winner requests cannot be converted or reminted by the runtime.
+Do not delete the journal, replace genesis/keys or provision a new authority to
+repair this source mismatch. No deployment or reset is performed by this
+increment; retained-route eligibility/renewed issuance remains unfinished.
+[Exact source-gate evidence](testing/s01-exact-request-binding-2026-10-07.md).
+
 The endpoint is node-private, not a client entry point. Deploy its ingress and
 external signer processes only as part of the matched node/Registry composition.
 An absent/unavailable signer must stay unavailable; do not fall back to a

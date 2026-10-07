@@ -21,7 +21,7 @@ internal sealed class DeepIdV2MailboxGrantInput
         if (exactXmg.Length != 435 || exactRoute.Length is < ContactRouteClosureCodec.MinimumEncodedBytes or > ContactRouteClosureCodec.MaximumEncodedBytes ||
             evidence.Count != 2 || forwarder.Length != 32 || nonce.Length != 32 || signature.Length != 64)
             throw new ArgumentException("Private grant inputs exceed their exact bounds.");
-        Request = ContactCodec.Decode("XMG1", exactXmg); Route = ContactRouteClosureCodec.Decode(exactRoute);
+        Request = ContactCodec.Decode("XMG2", exactXmg); Route = ContactRouteClosureCodec.Decode(exactRoute);
         EffectiveExpiry = effectiveExpiry; Evidence = evidence.Select(item => new DeepIdV2MailboxGrantReplicaEvidence(item.NodeId.Span, item.Signature.Span)).ToArray();
         Forwarder = forwarder.ToArray(); AdmissionTime = admissionTime; Nonce = nonce.ToArray(); Signature = signature.ToArray();
     }

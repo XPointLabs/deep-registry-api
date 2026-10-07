@@ -149,11 +149,11 @@ internal static class DeepIdV2MailboxGrantHosting
         if (body.Length is < 1 or > MaximumBodyBytes) throw new JsonException("Private grant body exceeds bounds.");
         using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 8 });
         var root = document.RootElement;
-        RequireFields(root, ["exactXmg1", "resultCode", "exactRouteClosure", "routeDisposition", "routeEffectiveExpiresAtUnixSeconds",
+        RequireFields(root, ["exactXmg2", "resultCode", "exactRouteClosure", "routeDisposition", "routeEffectiveExpiresAtUnixSeconds",
             "resultExpiresAtUnixSeconds", "nodeId", "issuedAtUnixSeconds", "nonce", "signature", "replicaEvidence"]);
         if (root.GetProperty("resultCode").GetUInt16() != 1 || root.GetProperty("routeDisposition").GetUInt16() != 1)
             throw new JsonException("Only current-route issuance is supported.");
-        var request = Base64(root.GetProperty("exactXmg1").GetString(), 435, 435);
+        var request = Base64(root.GetProperty("exactXmg2").GetString(), 435, 435);
         var route = Base64(root.GetProperty("exactRouteClosure").GetString(), 4_143, 23_295);
         var replicas = root.GetProperty("replicaEvidence");
         if (replicas.ValueKind != JsonValueKind.Array || replicas.GetArrayLength() != 2) throw new JsonException("Two-store evidence is required.");
@@ -164,7 +164,7 @@ internal static class DeepIdV2MailboxGrantHosting
         }).ToArray();
         // Stable envelope deadline is signed by the forwarding node and journalled implicitly by XMG hash.
         if (root.GetProperty("resultExpiresAtUnixSeconds").GetUInt64() !=
-            BinaryPrimitives.ReadUInt64BigEndian(Deep.Protocol.ContactV1.ContactCodec.Decode("XMG1", request).Field(10).Span))
+            BinaryPrimitives.ReadUInt64BigEndian(Deep.Protocol.ContactV1.ContactCodec.Decode("XMG2", request).Field(10).Span))
             throw new JsonException("Private result deadline differs from the original request.");
         return new(request, route, root.GetProperty("routeEffectiveExpiresAtUnixSeconds").GetUInt64(), evidence,
             Hex(root.GetProperty("nodeId").GetString()), root.GetProperty("issuedAtUnixSeconds").GetUInt64(),

@@ -8,7 +8,7 @@ namespace Deep.Registry.Api.DirectoryPublication;
 
 internal interface IDeepIdV2MailboxGrantJournal
 {
-    ValueTask<ReadOnlyMemory<byte>> GetOrIssueAsync(ReadOnlyMemory<byte> exactXmg1,
+    ValueTask<ReadOnlyMemory<byte>> GetOrIssueAsync(ReadOnlyMemory<byte> exactXmg2,
         ReadOnlyMemory<byte> scopeHash, Func<CancellationToken, ValueTask<ReadOnlyMemory<byte>>> issue,
         CancellationToken cancellationToken);
 }
@@ -26,13 +26,13 @@ internal sealed class DeepIdV2PostgreSqlMailboxGrantJournal : IDeepIdV2MailboxGr
         network = networkId.ToArray(); source = NpgsqlDataSource.Create(connectionString);
     }
 
-    public async ValueTask<ReadOnlyMemory<byte>> GetOrIssueAsync(ReadOnlyMemory<byte> exactXmg1,
+    public async ValueTask<ReadOnlyMemory<byte>> GetOrIssueAsync(ReadOnlyMemory<byte> exactXmg2,
         ReadOnlyMemory<byte> scopeHash, Func<CancellationToken, ValueTask<ReadOnlyMemory<byte>>> issue, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(issue); ct.ThrowIfCancellationRequested();
-        if (exactXmg1.Length != 435 || scopeHash.Length != 32 || scopeHash.Span.IndexOfAnyExcept((byte)0) < 0)
+        if (exactXmg2.Length != 435 || scopeHash.Length != 32 || scopeHash.Span.IndexOfAnyExcept((byte)0) < 0)
             throw new ArgumentException("DID2 grant journal requires exact bounded request/scope.");
-        var request = ContactCodec.Decode("XMG1", exactXmg1.Span);
+        var request = ContactCodec.Decode("XMG2", exactXmg2.Span);
         ContactCodec.VerifyMailboxGrantHolderSignature(request);
         if (!Fixed(network, request.Field(1).Span)) throw new CryptographicException("Grant journal network differs.");
         var operation = request.Field(2).ToArray();

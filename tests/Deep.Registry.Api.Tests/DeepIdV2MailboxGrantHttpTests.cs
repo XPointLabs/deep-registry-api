@@ -35,8 +35,9 @@ public sealed class DeepIdV2MailboxGrantHttpTests
     [InlineData("[]")]
     [InlineData("null")]
     [InlineData("{\"extra\":1}")]
-    [InlineData("{\"exactXmg1\":\"a\",\"exactXmg1\":\"b\"}")]
-    [InlineData("{\"ExactXmg1\":\"a\"}")]
+    [InlineData("{\"exactXmg2\":\"a\",\"exactXmg2\":\"b\"}")]
+    [InlineData("{\"ExactXmg2\":\"a\"}")]
+    [InlineData("{\"exactXmg1\":\"a\"}")]
     public void ClosedJsonRejectsMissingUnknownDuplicateForeignCaseAndMalformedObjects(string json) =>
         Assert.Throws<JsonException>(() => DeepIdV2MailboxGrantHosting.DecodeRequest(Encoding.UTF8.GetBytes(json)));
 
@@ -45,7 +46,7 @@ public sealed class DeepIdV2MailboxGrantHttpTests
     {
         // JsonReaderException is the framework's sealed subtype; the endpoint
         // catches the documented JsonException family, not an exact leaf type.
-        var error = Assert.ThrowsAny<JsonException>(() => DeepIdV2MailboxGrantHosting.DecodeRequest(Encoding.UTF8.GetBytes("{\"exactXmg1\":")));
+        var error = Assert.ThrowsAny<JsonException>(() => DeepIdV2MailboxGrantHosting.DecodeRequest(Encoding.UTF8.GetBytes("{\"exactXmg2\":")));
         Assert.Equal("JsonReaderException", error.GetType().Name);
     }
 

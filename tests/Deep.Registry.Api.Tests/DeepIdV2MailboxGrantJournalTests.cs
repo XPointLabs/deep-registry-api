@@ -141,7 +141,7 @@ public sealed class DeepIdV2MailboxGrantJournalTests
         }
     }
 
-    private static ContactRecord Request(byte operation, byte nonce = 0x51)
+    private static ContactRecord Request(byte operation, byte routeHashMarker = 0x51)
     {
         var holder = PublicKeyAuth.GenerateKeyPair(Bytes(32, 0x52));
         try
@@ -149,10 +149,10 @@ public sealed class DeepIdV2MailboxGrantJournalTests
             var reference = new byte[38]; "PMT2"u8.CopyTo(reference); BinaryPrimitives.WriteUInt16BigEndian(reference.AsSpan(4), 1);
             Bytes(32, 0x53).CopyTo(reference, 6);
             ReadOnlyMemory<byte>[] fields = [Bytes(16, 0x11), Bytes(32, operation), Bytes(32, 0x54), Bytes(32, 0x55),
-                holder.PublicKey, new byte[] { 1 }, reference, Bytes(32, 0x56), U64(100), U64(220), Bytes(32, nonce), Bytes(64, 0x57)];
-            var unsigned = ContactCodec.AuthorForOperationalAuthority("XMG1", fields);
+                holder.PublicKey, new byte[] { 1 }, reference, Bytes(32, 0x56), U64(100), U64(220), Bytes(32, routeHashMarker), Bytes(64, 0x57)];
+            var unsigned = ContactCodec.AuthorForOperationalAuthority("XMG2", fields);
             fields[11] = PublicKeyAuth.SignDetached(unsigned.SignatureInput.ToArray(), holder.PrivateKey);
-            return ContactCodec.AuthorForOperationalAuthority("XMG1", fields);
+            return ContactCodec.AuthorForOperationalAuthority("XMG2", fields);
         }
         finally { CryptographicOperations.ZeroMemory(holder.PrivateKey); }
     }
@@ -172,7 +172,7 @@ public sealed class DeepIdV2MailboxGrantJournalTests
             };
             var grant = new SodiumMailboxCapabilityCrypto().SignGrant(unsigned, issuer.PrivateKey);
             return ContactCodec.AuthorForOperationalAuthority(DeepProtocolIdentifiers.Magic.XMC2, [request.Field(1), request.Field(2), new byte[] { 0, 1 },
-                U64(110), SHA256.HashData(request.CanonicalBytes.Span), U64(220), Bytes(32, 0x65),
+                U64(110), SHA256.HashData(request.CanonicalBytes.Span), U64(220), request.Field(11),
                 MailboxAuthenticatedCapabilityCodec.EncodeGrant(grant)]).CanonicalBytes.ToArray();
         }
         finally { CryptographicOperations.ZeroMemory(issuer.PrivateKey); }

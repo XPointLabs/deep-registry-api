@@ -71,7 +71,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var placement = ContactServicePlacementFactory.Create(route.Network, ContactServiceRequestKind.ResolveInvite,
             authored.Record.Field(3));
         var effective = BinaryPrimitives.ReadUInt64BigEndian(route.Route.Reachability.Field(17).Span);
-        var tuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(authored.ExactXmg1.Span),
+        var tuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(authored.ExactXmg2.Span),
             authored.Record.Field(3).Span, MailboxGrantCapabilityDigest.Compute(authored.Record.Field(4).Span, authored.Domain),
             (byte)authored.Domain, 1, route.Route.ExactHash.Span, effective);
         var signing = MailboxGrantRouteEvidenceAuthentication.GetSigningBytes(tuple);
@@ -87,7 +87,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             Ed25519PrivateKey = Convert.ToHexString(Bytes(32, forwarder.Marker))
         };
         var client = new xnode::XNode.HttpsMailboxGrantAuthorityClient(http, nodeOptions, origin, new GrantClock(clock));
-        var request = new xnode::XNode.MailboxGrantAuthorityRequest(placement, authored.ExactXmg1,
+        var request = new xnode::XNode.MailboxGrantAuthorityRequest(placement, authored.ExactXmg2,
             MailboxGrantAcquisitionResultCode.Success, route.ExactRouteClosure, 1, effective,
             BinaryPrimitives.ReadUInt64BigEndian(authored.Record.Field(10).Span), evidence);
         using (var untrusted = tls.CreateClient(trustRoot: false))
@@ -99,6 +99,25 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var corrupted = evidence[0].Signature.ToArray(); corrupted[^1] ^= 1;
         await Assert.ThrowsAsync<xnode::XNode.ContactServiceUnavailableException>(async () => await client.AuthorizeAsync(
             request with { ReplicaEvidence = [new(evidence[0].ReplicaId, corrupted), evidence[1]] }, default));
+        // Valid holder and BOTH valid replica signatures still cannot substitute
+        // another exact route intent before reservation or role-key callbacks.
+        var wrongIntentBytes = authored.ExactXmg2.ToArray();
+        Assert.Equal(435, wrongIntentBytes.Length);
+        Bytes(32, 0xad).CopyTo(wrongIntentBytes, 331);
+        var wrongIntent = ContactCodec.Decode("XMG2", wrongIntentBytes);
+        var wrongIntentProof = new byte[64];
+        await holder.SignMailboxGrantRequestAsync(wrongIntent.SignatureInput, wrongIntentProof, default);
+        wrongIntentProof.CopyTo(wrongIntentBytes, 371);
+        ContactCodec.VerifyMailboxGrantHolderSignature(ContactCodec.Decode("XMG2", wrongIntentBytes));
+        var wrongTuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(wrongIntentBytes),
+            authored.Record.Field(3).Span, MailboxGrantCapabilityDigest.Compute(authored.Record.Field(4).Span, authored.Domain),
+            (byte)authored.Domain, 1, route.Route.ExactHash.Span, effective);
+        var wrongSigning = MailboxGrantRouteEvidenceAuthentication.GetSigningBytes(wrongTuple);
+        var wrongEvidence = placement.RankedReplicaNodeIds.Select(id => new xnode::XNode.MailboxGrantReplicaEvidence(id,
+            nodes.Single(node => node.SignerId.Span.SequenceEqual(id.Span)).SignReceipt(wrongSigning))).ToArray();
+        await Assert.ThrowsAsync<xnode::XNode.ContactServiceUnavailableException>(async () => await client.AuthorizeAsync(
+            request with { ExactXmg2 = wrongIntentBytes, ReplicaEvidence = wrongEvidence }, default));
+        CryptographicOperations.ZeroMemory(wrongIntentProof);
         Assert.Empty(custody.Deposit.Inputs); Assert.Empty(custody.Retrieve.Inputs);
         await using (var empty = new NpgsqlCommand("SELECT entry_count FROM deep_did2_grant_journal_network WHERE network_id=$1", db))
         {
@@ -109,7 +128,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         await verified.EnsureCurrentAsync();
         Assert.Equal(MailboxCapabilityDomain.Deposit, verified.Domain);
         Assert.Single(custody.Deposit.Inputs); Assert.Empty(custody.Retrieve.Inputs);
-        // New authenticated forwarding nonce, same exact XMG1: permanent winner
+        // New authenticated forwarding nonce, same exact XMG2: permanent winner
         // is replayed without another signature or journal reservation.
         var replay = await client.AuthorizeAsync(request, default);
         Assert.Equal(exact.ToArray(), replay.ToArray()); Assert.Single(custody.Deposit.Inputs);
@@ -122,7 +141,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         // This does not prove real resolver authorization or Shared holder custody.
         var readRequest = await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route,
             authored.Record.Field(3), Bytes(32, 0x56), holder);
-        var readTuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(readRequest.ExactXmg1.Span),
+        var readTuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(readRequest.ExactXmg2.Span),
             readRequest.Record.Field(3).Span, MailboxGrantCapabilityDigest.Compute(readRequest.Record.Field(4).Span, readRequest.Domain),
             (byte)readRequest.Domain, 1, route.Route.ExactHash.Span, effective);
         var readSigning = MailboxGrantRouteEvidenceAuthentication.GetSigningBytes(readTuple);
@@ -130,7 +149,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             nodes.Single(node => node.SignerId.Span.SequenceEqual(id.Span)).SignReceipt(readSigning))).ToArray();
         var readResult = await client.AuthorizeAsync(request with
         {
-            ExactXmg1 = readRequest.ExactXmg1, ReplicaEvidence = readEvidence,
+            ExactXmg2 = readRequest.ExactXmg2, ReplicaEvidence = readEvidence,
             ResultExpiresAtUnixSeconds = BinaryPrimitives.ReadUInt64BigEndian(readRequest.Record.Field(10).Span)
         }, default);
         var readGrant = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, readRequest, readResult, exactPma);

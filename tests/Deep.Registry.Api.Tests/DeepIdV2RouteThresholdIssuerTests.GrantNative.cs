@@ -131,7 +131,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             var envelope = new MailboxEncryptedEnvelope
             {
                 Epoch = host.SelectionEpoch, MailboxId = new(Bytes(32, 0x54)),
-                PlacementId = new(ContactCodec.Decode("XMG1", grant.ExactXmg1.Span).Field(4).Span),
+                PlacementId = new(ContactCodec.Decode("XMG2", grant.ExactXmg2.Span).Field(4).Span),
                 OperationId = Bytes(16, 0x58), DeduplicationDigest = Bytes(32, 0x59),
                 CreatedAtUnixSeconds = decoded.NotBeforeUnixSeconds, ExpiresAtUnixSeconds = decoded.ExpiresAtUnixSeconds,
                 Ciphertext = Bytes(64, 0x60)
