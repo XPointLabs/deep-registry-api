@@ -55,8 +55,28 @@ are unchanged. Rebuild/repin Protocol, Node and Shared/client consumers together
 old pending/winner requests cannot be converted or reminted by the runtime.
 Do not delete the journal, replace genesis/keys or provision a new authority to
 repair this source mismatch. No deployment or reset is performed by this
-increment; retained-route eligibility/renewed issuance remains unfinished.
+increment; the complete retained-route producer/owner/dispatch path remains unfinished.
 [Exact source-gate evidence](testing/s01-exact-request-binding-2026-10-07.md).
+
+The next private-boundary source cutover follows
+[DR-0104](../../docs/survival-program/decisions/DR-0104-current-retained-retrieve-issuance.md).
+Node and Registry must be updated together: `evidenceKind` and
+`readUntilUnixSeconds` are mandatory private JSON fields, with no missing-field
+default. Current evidence uses its existing purpose and zero retained horizon;
+retained success uses the independent purpose and closed actual current host.
+It cannot authorize Deposit or reuse current-route signatures/effective expiry.
+Parsing private fields never proves original native custody.
+
+The permanent winner scope now also binds the explicit kind/horizon and actual
+current root, time-policy, PMA2 and protected network history. A substituted
+scope rejects rather than rewriting a reservation, returning another winner or
+signing again. A matched retry with a new forwarding nonce rechecks the exact
+still-current winner, including after opening a new journal instance. Existing
+incompatible scopes stay unavailable: no compatibility reader, implicit DDL,
+database deletion, new genesis, issuer-key replacement or automatic repair.
+Public node dispatch/held client integration and actual elapsed-route acceptance
+remain gates; this private candidate is not a deployment or device qualification.
+[Focused evidence and unresolved original full FAIL](testing/s01-retained-private-issuer-2026-10-07.md).
 
 The endpoint is node-private, not a client entry point. Deploy its ingress and
 external signer processes only as part of the matched node/Registry composition.

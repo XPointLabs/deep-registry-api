@@ -150,9 +150,17 @@ internal static class DeepIdV2MailboxGrantHosting
         using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 8 });
         var root = document.RootElement;
         RequireFields(root, ["exactXmg2", "resultCode", "exactRouteClosure", "routeDisposition", "routeEffectiveExpiresAtUnixSeconds",
-            "resultExpiresAtUnixSeconds", "nodeId", "issuedAtUnixSeconds", "nonce", "signature", "replicaEvidence"]);
+            "resultExpiresAtUnixSeconds", "nodeId", "issuedAtUnixSeconds", "nonce", "signature", "replicaEvidence",
+            "evidenceKind", "readUntilUnixSeconds"]);
+        var kind = (DeepIdV2MailboxGrantEvidenceKind)root.GetProperty("evidenceKind").GetUInt16();
+        var readUntil = root.GetProperty("readUntilUnixSeconds").GetUInt64();
+        var effective = root.GetProperty("routeEffectiveExpiresAtUnixSeconds").GetUInt64();
+        if (kind is not (DeepIdV2MailboxGrantEvidenceKind.CurrentRoute or DeepIdV2MailboxGrantEvidenceKind.RetainedRead) ||
+            (kind == DeepIdV2MailboxGrantEvidenceKind.CurrentRoute && (readUntil != 0 || effective == 0)) ||
+            (kind == DeepIdV2MailboxGrantEvidenceKind.RetainedRead && (readUntil == 0 || effective != 0)))
+            throw new JsonException("Private grant kind/horizon fields differ.");
         if (root.GetProperty("resultCode").GetUInt16() != 1 || root.GetProperty("routeDisposition").GetUInt16() != 1)
-            throw new JsonException("Only current-route issuance is supported.");
+            throw new JsonException("Private issuance requires successful independent evidence.");
         var request = Base64(root.GetProperty("exactXmg2").GetString(), 435, 435);
         var route = Base64(root.GetProperty("exactRouteClosure").GetString(), 4_143, 23_295);
         var replicas = root.GetProperty("replicaEvidence");
@@ -166,7 +174,7 @@ internal static class DeepIdV2MailboxGrantHosting
         if (root.GetProperty("resultExpiresAtUnixSeconds").GetUInt64() !=
             BinaryPrimitives.ReadUInt64BigEndian(Deep.Protocol.ContactV1.ContactCodec.Decode("XMG2", request).Field(10).Span))
             throw new JsonException("Private result deadline differs from the original request.");
-        return new(request, route, root.GetProperty("routeEffectiveExpiresAtUnixSeconds").GetUInt64(), evidence,
+        return new(request, route, kind, readUntil, effective, evidence,
             Hex(root.GetProperty("nodeId").GetString()), root.GetProperty("issuedAtUnixSeconds").GetUInt64(),
             Base64(root.GetProperty("nonce").GetString(), 32, 32), Base64(root.GetProperty("signature").GetString(), 64, 64));
     }

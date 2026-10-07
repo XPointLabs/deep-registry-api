@@ -34,7 +34,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         ExerciseRegistryCeremonyAsync(crashMode, mailboxLifecycle: false);
 
     private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle, bool socketControl = false,
-        bool grantExchange = false)
+        bool grantExchange = false, bool retainedExchange = false)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -251,7 +251,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             {
                 await ExercisePrivateGrantExchangeAsync(route, admission, proofs, rootSource, distribution, clock, db, scoped,
                     network, admissionRequest.Admission.ExactDid2, operational.ExactPma2, nodes, grantPeers!,
-                    directory, bundlePath, bootstrap.GenesisPin, genesis.CoreHash);
+                    directory, bundlePath, bootstrap.GenesisPin, genesis.CoreHash, retainedExchange);
                 return;
             }
             Assert.Equal(crashMode == 0 ? 1UL : 2UL, route.Recipient.Freshness.NextProtectedLkg.LogGeneration);

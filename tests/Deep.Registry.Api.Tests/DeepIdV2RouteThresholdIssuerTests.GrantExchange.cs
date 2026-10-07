@@ -36,13 +36,14 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         XPointNetworkClosureDistribution distribution, Clock clock, NpgsqlConnection db, string scoped,
         byte[] network, ReadOnlyMemory<byte> observer, ReadOnlyMemory<byte> exactPma, Signer[] nodes,
         GrantPeerLayout peers, string directory, string bundlePath, XPointNetworkGenesisPin genesisPin,
-        ReadOnlyMemory<byte> genesisHeadHash)
+        ReadOnlyMemory<byte> genesisHeadHash, bool retainedExchange = false)
     {
         await using (var ddl = new NpgsqlCommand(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
             "Fixtures", "did2-mailbox-grant-journal.sql")), db)) await ddl.ExecuteNonQueryAsync();
-        await using (var provision = new NpgsqlCommand("INSERT INTO deep_did2_grant_journal_network VALUES ($1,0,2)", db))
+        await using (var provision = new NpgsqlCommand("INSERT INTO deep_did2_grant_journal_network VALUES ($1,0,$2)", db))
         {
-            provision.Parameters.Add(new() { Value = network }); await provision.ExecuteNonQueryAsync();
+            provision.Parameters.Add(new() { Value = network });
+            provision.Parameters.Add(new() { Value = retainedExchange ? 3L : 2L }); await provision.ExecuteNonQueryAsync();
         }
         using var journal = new DeepIdV2PostgreSqlMailboxGrantJournal(scoped, network);
         using var custody = new MailboxTestCustody();
@@ -89,7 +90,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var client = new xnode::XNode.HttpsMailboxGrantAuthorityClient(http, nodeOptions, origin, new GrantClock(clock));
         var request = new xnode::XNode.MailboxGrantAuthorityRequest(placement, authored.ExactXmg2,
             MailboxGrantAcquisitionResultCode.Success, route.ExactRouteClosure, 1, effective,
-            BinaryPrimitives.ReadUInt64BigEndian(authored.Record.Field(10).Span), evidence);
+            BinaryPrimitives.ReadUInt64BigEndian(authored.Record.Field(10).Span), evidence,
+            xnode::XNode.MailboxGrantAuthorityEvidenceKind.CurrentRoute, 0);
         using (var untrusted = tls.CreateClient(trustRoot: false))
         {
             var refused = new xnode::XNode.HttpsMailboxGrantAuthorityClient(untrusted, nodeOptions, origin, new GrantClock(clock));
@@ -155,6 +157,9 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var readGrant = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, readRequest, readResult, exactPma);
         Assert.Equal(MailboxCapabilityDomain.Retrieve, readGrant.Domain); Assert.Single(custody.Retrieve.Inputs);
         Assert.Equal(2L, await count.ExecuteScalarAsync());
+        if (retainedExchange)
+            await ExerciseRetainedPrivateGrantExchangeAsync(route, readRequest, request, placement, contexts,
+                issuer, custody, client, http, origin, holder, forwarder, nodes, clock, scoped, network, count);
         await ExerciseIssuedGrantsNativeCycleAsync(verified, readGrant, tls, origin, clock, peers, nodes, revocations,
             network, observer, directory, bundlePath, genesisPin, genesisHeadHash);
     }
