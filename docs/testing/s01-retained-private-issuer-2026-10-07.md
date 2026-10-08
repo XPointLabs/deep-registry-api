@@ -140,3 +140,53 @@ the exact swallowed exception. The elapsed time closely matches the unchanged
 15-second Store ingress deadline, making local verification/persistence or budget
 exhaustion the next investigation boundary, not a proven causal fix. No timeout,
 assertion, product guard, shipping activation or production/reset action changed.
+
+## Native Store path optimization and matching full — 2026-10-08
+
+The bounded phase observers now wrap the actual configured network source,
+storage security and durability owners, retaining their arguments, cancellation,
+exceptions and effects. Timing sums use Stopwatch ticks. Caller-scoped,
+bounded first-chance observations expose only type/HResult/code-owner names;
+no exception messages or private values. The original failed receipts above
+remain immutable.
+
+A local sampled-thread profile identified repeated native MGR1 ancestor
+`LinkTarget` resolution as a hot path. The
+[Node change and negative checks](../../../xnode/docs/testing/s01-native-store-path-safety-2026-10-08.md)
+replace that Windows overhead with uncached entry-attribute checks. No TLS,
+authority, revocation, protected read-back, quorum, retry, expiry or deadline
+guard was removed. There is no wire/state-generation change.
+
+Post-change focused native cycle passed1/0/0 with initial Store7402ms. The fresh
+full source-cutover solution build finished0, zero warnings/errors; full
+PostgreSQL/native gate completed **364 Passed/0 Failed/7 Skipped**, actual test0
+and qualification0. All371 original case/method/execution mappings and3718
+prelaunch inputs were accounted for and unchanged at terminal. Started
+`2026-10-08T08:56:41.4657261Z`, finished `2026-10-08T09:01:54.8299116Z`.
+
+The previously failing configured-native cycle Passed. Initial Store11017ms
+completed under the unchanged15-second budget. The cycle still asserts the
+two-node verified quorum, byte-identical exact retry, Retrieve, ACK and cold
+reopen; HTTP200 alone cannot satisfy it. Four expected missing-entry exceptions
+were observed during the successful Store. The original nonce-ledger case and
+all three crash modes passed again; its historical exclusive cause remains
+unproven, not retrospectively waived.
+
+Receipt:
+`artifacts/s00/s01-native-store-path-fix-full-4e94e3adb2cd423dac7aa1f2d38fea50/nikit_SURFACE-LT_2026-10-08_13_57_54_net10.0.trx`,
+SHA256 `021BB4A2136E72E2DF4062E8DD4195D00FF2D0074EB1CDD9D08F0CE7F11189C6`.
+Manifest: `artifacts/s01-native-store-path-fix-full/inputs.json`, SHA256
+`C894704A0BF02A01DFA235BCDC93A51659F24B4B874B4BCF953E061C385D133C`.
+`terminal.json` records actual build/capture/test/qualification exits0 and
+`CurrentWindowsSourceAccepted=true`; historical exclusive-cause proof and
+release acceptance remain false. The provider cleaned only its labelled
+temporary container/tmpfs database; no named volume or production state changed.
+
+This accepts the current Windows Registry source matrix, not Linux provider,
+shipping packages, selected-entry/ONION, an owned two-client path or devices.
+Matching full Node subsequently passed1363/0/0, build/test/qualification0,
+all2191 captured inputs unchanged; required external/no-mock smoke and multi-node
+both completed0. The exact joined source/infrastructure evidence belongs to the
+[Node checkpoint](../../../xnode/docs/testing/s01-native-store-path-safety-2026-10-08.md#matching-full-and-docker-terminal).
+This permits the next S01 known-floor/dependency contract batch, not release
+acceptance. S01 is not closed.

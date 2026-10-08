@@ -30,7 +30,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     // Actual configured source and native owners, not the signed fixture-source
     // used by older peer tests. The client envelope/holder remains test-owned;
     // this is a connected issuer/native data boundary, NOT owned client E2E.
-    private static async Task ExerciseIssuedGrantsNativeCycleAsync(VerifiedDeepIdV2MailboxGrant grant,
+    private async Task ExerciseIssuedGrantsNativeCycleAsync(VerifiedDeepIdV2MailboxGrant grant,
         VerifiedDeepIdV2MailboxGrant readGrant,
         ControlSocketTls registryTls, Uri origin, Clock clock, GrantPeerLayout peers, Signer[] nodes,
         MailboxRevocationAuthority revocations, byte[] network, ReadOnlyMemory<byte> observer, string directory,
@@ -45,12 +45,15 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var peerStatuses = new int[nodes.Length];
         var peerResponseBytes = new long?[nodes.Length];
         var observedPeers = nodes.Select(_ => new ObservedNativePeer()).ToArray();
+        var observedSources = new ObservedNativeSource?[nodes.Length];
+        var observedDurability = nodes.Select(_ => new ObservedNativeDurability()).ToArray();
+        var observedSecurity = nodes.Select(_ => new ObservedNativeSecurity()).ToArray();
         try
         {
             for (var i = 0; i < nodes.Length; i++)
             {
                 var nodeRoot = Path.Combine(directory, "grant-native-" + i);
-                var security = new MailboxStorageSecurity();
+                var security = observedSecurity[i];
                 var keys = Path.Combine(nodeRoot, "keys"); security.SecureDirectory(keys);
                 var provisioning = new ServiceCollection();
                 provisioning.AddDataProtection().PersistKeysToFileSystem(new DirectoryInfo(keys))
@@ -91,10 +94,13 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                     builder.Services.AddSingleton(node); builder.Services.AddSingleton(mailbox);
                     builder.Services.AddSingleton<IOnionMonotonicClock>(clock);
                     builder.Services.AddSingleton<IMailboxStorageSecurity>(security);
-                    builder.Services.AddSingleton<IMailboxDurabilityBarrier, MailboxDurabilityBarrier>();
+                    builder.Services.AddSingleton<IMailboxDurabilityBarrier>(observedDurability[index]);
                     xnode::XNode.DeepIdV2DirectoryProofHostComposition.AddDeepIdV2DirectoryProof(builder.Services, proof);
                     builder.Services.AddHttpClient("did2-directory-proof").ConfigurePrimaryHttpMessageHandler(() => registryTls.CreateHandler());
                     xnode::XNode.DeepIdV2NetworkPlacementHostComposition.AddDeepIdV2NetworkPlacement(builder.Services, placement);
+                    builder.Services.AddSingleton<xnode::XNode.IDeepIdV2ContactStoreAuthoritySource>(provider =>
+                        observedSources[index] = new ObservedNativeSource(
+                            provider.GetRequiredService<xnode::XNode.DeepIdV2NetworkPlacementRuntime>()));
                     xnode::XNode.CurrentMailboxHostComposition.AddCurrentMailboxHost(builder.Services, custody, node, mailbox);
                     // Observe the actual descriptor-pinned production client;
                     // no transport substitution or extra retry is introduced.
@@ -156,12 +162,22 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             });
             var dispatcher = (xnode::XNode.ILocalNativeMailboxExitDispatcher)writer.Services.GetRequiredService<xnode::XNode.NativeMailboxExitDispatcher>();
             var storeWatch = Stopwatch.StartNew();
+            foreach (var source in observedSources) source!.Reset();
+            foreach (var durability in observedDurability) durability.Reset();
+            foreach (var security in observedSecurity) security.Reset();
+            using var exceptions = new NativeStoreExceptions();
             var result = await dispatcher.DispatchAsync(OnionOperation.Store, request, default);
+            exceptions.Dispose();
+            var localSummary = $"sources={string.Join(';', observedSources.Select(source => source!.Summary))}; " +
+                $"durability={string.Join(';', observedDurability.Select(durability => durability.Summary))}; " +
+                $"security={string.Join(';', observedSecurity.Select(security => security.Summary))}; " +
+                $"exceptions={exceptions.Summary}";
+            output.WriteLine($"Initial Store elapsed-ms={storeWatch.ElapsedMilliseconds}; {localSummary}");
             Assert.True(result.Certainty == xnode::XNode.NativeMailboxDispatchCertainty.Completed,
                 $"Initial native Store={result.Certainty}; status={result.StatusCode}; elapsed-ms={storeWatch.ElapsedMilliseconds}; " +
                 $"peer requests={peerRequests.Sum()}; server statuses={string.Join(',', peerStatuses)}; " +
                 $"server response bytes={string.Join(',', peerResponseBytes)}; " +
-                $"client observations={string.Join(';', observedPeers.Select(peer => peer.Summary))}.");
+                $"client observations={string.Join(';', observedPeers.Select(peer => peer.Summary))}; {localSummary}.");
             Assert.Equal(200, result.StatusCode);
             Assert.Equal(1, peerRequests.Sum());
             var quorum = MailboxReceiptV3Codec.DecodeDurableQuorum(result.CanonicalBody.Span);

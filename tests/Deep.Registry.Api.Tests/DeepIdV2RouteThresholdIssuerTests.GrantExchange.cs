@@ -31,7 +31,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     // attestations and holder custody are test-owned: this is NOT resolver storage,
     // owned client dispatch, ONION or device E2E. The continuation uses actual
     // configured/native Store/Retrieve/ACK, including real peer TLS/H2.
-    private static async Task ExercisePrivateGrantExchangeAsync(VerifiedDeepIdV2ContactRouteClosure route,
+    private async Task ExercisePrivateGrantExchangeAsync(VerifiedDeepIdV2ContactRouteClosure route,
         DeepIdV2DurableGenesisAuthority admission, DeepIdV2DirectoryProofIssuer proofs, DeepIdV2XPointAuthoritySource roots,
         XPointNetworkClosureDistribution distribution, Clock clock, NpgsqlConnection db, string scoped,
         byte[] network, ReadOnlyMemory<byte> observer, ReadOnlyMemory<byte> exactPma, Signer[] nodes,
