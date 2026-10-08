@@ -19,6 +19,9 @@ docker build --target mailbox-signer-tests --build-context deep_protocol=../deep
 
 The [disposable DB runbook](../../../deep-devops/docs/S00_REGISTRY_POSTGRES.md)
 owns environment isolation, PostgreSQL image pin, cleanup and guard tests.
+The command above is the historical invocation. Current full reproduction
+requires predeclared receipts/skip names and the canonical gate arguments from
+that runbook; it no longer starts an unqualified full without references.
 Both source-cutover flags are required; this does not verify the published
 NuGet/package graph. The full default test project was used, not a focused
 compile whitelist. Linux signer build uses the existing signer-only target.

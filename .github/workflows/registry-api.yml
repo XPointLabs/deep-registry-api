@@ -31,9 +31,9 @@ jobs:
     env:
       # Synthetic disposable CI auth only; no password in logged connection strings.
       PGPASSWORD: isolated_ci_only
-      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00
-      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00
-      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00
+      DEEP_TEST_DID2_ROUTE_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00;Pooling=false;Timeout=5
+      DEEP_TEST_DID2_GRANT_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00;Pooling=false;Timeout=5
+      DEEP_TEST_DID2_FLOOR_POSTGRES: Host=127.0.0.1;Port=5432;Username=deep_s00;Database=deep_s00;Pooling=false;Timeout=5
 
     steps:
       - name: Checkout
@@ -78,6 +78,9 @@ jobs:
         working-directory: deep-registry-api
         run: dotnet build --no-restore --configuration Release -m:1 -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
 
+      - name: Check isolated database and native provider prerequisites before full
+        working-directory: deep-registry-api
+        run: dotnet test --no-build --no-restore --configuration Release --filter "FixturePreflight=true" -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true
       - name: Test
         working-directory: deep-registry-api
         run: dotnet test --no-build --configuration Release -p:DeepProtocolLocalCutover=true -p:DeepProtocolSourceCutover=true

@@ -34,3 +34,13 @@ dotnet test Deep.Registry.Api.slnx
 
 For persistence, reconciliation, call or ICE changes, also run the corresponding DevOps recovery
 or physical UAT lane and retain sanitized evidence.
+
+Full local source qualification runs through
+`../deep-devops/scripts/test-registry-postgres.ps1 -GateReferencePaths <array>`
+and the root canonical runner. Pass a fresh `-GateRunDirectory` and explicitly
+declared Windows skip names; the provider restores the environment and removes
+only its labelled tmpfs database. Run from Windows PowerShell5.1.
+`FixturePreflight=true` actually opens the loopback `deep_s00` provider and
+the actual ML-DSA provider before full. Missing crypto/DB inputs fail, never skip
+or return a successful-shaped default. Filtered diagnostics are not full gates.
+Do not require unrelated ML-KEM activation for Registry's signing/provider lane.
