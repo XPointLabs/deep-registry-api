@@ -96,3 +96,47 @@ the pinned shipping package graph. S01 acceptance remains open.
 Selected changed source/fresh evidence secret scan passed16 files. Root
 documentation174 checks, contact-machine consistency and governance30/0/0
 passed; these checks do not supersede the Registry full failure.
+
+## Matching horizon full and native Store diagnosis — 2026-10-08
+
+Matching source versions: Protocol `e48484c`, Shared `a5c6d7d`, Node `2804023`,
+root `bedac26`. Registry source-cutover Release solution build completed0,
+zero warnings/errors. A fresh isolated PostgreSQL full completed actual test1/
+qualification1: **363 Passed/1 Failed/7 Skipped**, exact371 original case/method
+mappings and all3715 prelaunch inputs unchanged. The same first configured
+native Store returned `OutcomeUnknownAfterForward`, not `Completed`. This
+reproduces the open data-path failure; it does not prove a timeout/TLS/authority
+cause. The original protected nonce-ledger case and all three crash modes passed
+in this run; that does not establish a cause or fix for its earlier failure.
+
+Manifest SHA256:
+`27E377FDE26E1C3C990987512420740F4F65F063AE5EF745246120F5F75E6861`.
+Receipt:
+`artifacts/s00/s01-object-horizon-full-4182e4553b5b45afa776198106053ea3/nikit_SURFACE-LT_2026-10-08_13_18_32_net10.0.trx`,
+SHA256 `BA050C70502E93DDD161A99C40E2040249E1B1BA5BC4A34F5A796B42CA2D0587`.
+The actual terminal and standalone verifier preserve source acceptance=false;
+the temporary labelled tmpfs database was removed by its provider wrapper.
+
+The test now observes the existing descriptor-pinned peer client, without
+replacing transport, adding retries or changing deadlines/authority. The failed
+assertion reports only types/HResult, counts, elapsed time, cancellation, HTTP
+status and byte lengths; never exception messages, URLs, identities, grants,
+payloads or private paths. A rebuilt single-case diagnostic run passed1/0/0,
+actual0, but does not supersede the full failure or establish its cause.
+Receipt:
+`artifacts/s00/s01-native-store-diagnostic-b98b883e1e3742fe8d317a0fbcd19bbc/nikit_SURFACE-LT_2026-10-08_13_25_19_net10.0.trx`.
+The separate diagnostic full completed actual test1/qualification1:
+363/1/7, exact371 cases and3715 immutable inputs unchanged. Receipt:
+`artifacts/s00/s01-native-store-diagnostic-full-1e92556eaf3342acacc3a64a22535166/nikit_SURFACE-LT_2026-10-08_13_27_10_net10.0.trx`,
+SHA256 `074AFE992BA880A4E80C27DC8FFABC964DADB00EA74FA6EF0F17B0876F3B2ABA`.
+Manifest SHA256:
+`BCA429BC851D23B30E085B507638D576AA10257F6F3D38134CD34213FB68EACA`.
+
+The failing Store reports504/unknown after15027ms. The actual pinned peer call
+took4506ms and returned296 bytes, uncancelled, with server200. Thus the client
+received the expected transport framing; it was not a missing peer HTTP response.
+This does not prove quorum-signature acceptance, durable recipient settlement or
+the exact swallowed exception. The elapsed time closely matches the unchanged
+15-second Store ingress deadline, making local verification/persistence or budget
+exhaustion the next investigation boundary, not a proven causal fix. No timeout,
+assertion, product guard, shipping activation or production/reset action changed.

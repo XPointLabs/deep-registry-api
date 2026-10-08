@@ -2,6 +2,7 @@
 extern alias xnode;
 using System.Net;
 using System.Net.Sockets;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ContactV1;
@@ -41,6 +42,9 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var running = new List<WebApplication>();
         var reopen = new List<Func<Task<WebApplication>>>();
         var peerRequests = new int[nodes.Length];
+        var peerStatuses = new int[nodes.Length];
+        var peerResponseBytes = new long?[nodes.Length];
+        var observedPeers = nodes.Select(_ => new ObservedNativePeer()).ToArray();
         try
         {
             for (var i = 0; i < nodes.Length; i++)
@@ -92,15 +96,24 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                     builder.Services.AddHttpClient("did2-directory-proof").ConfigurePrimaryHttpMessageHandler(() => registryTls.CreateHandler());
                     xnode::XNode.DeepIdV2NetworkPlacementHostComposition.AddDeepIdV2NetworkPlacement(builder.Services, placement);
                     xnode::XNode.CurrentMailboxHostComposition.AddCurrentMailboxHost(builder.Services, custody, node, mailbox);
+                    // Observe the actual descriptor-pinned production client;
+                    // no transport substitution or extra retry is introduced.
+                    builder.Services.AddSingleton<xnode::XNode.ICurrentMailboxReplicaPeerClient>(observedPeers[index]);
                     builder.Services.AddSingleton<xnode::XNode.NativeMailboxExitDispatcher>();
                     var app = builder.Build();
                     try
                     {
-                        app.Use((context, next) =>
+                        app.Use(async (context, next) =>
                         {
-                            if (context.Request.Path.Value is MailboxWireHttpContract.PeerStoreRoute or MailboxWireHttpContract.PeerTombstoneRoute)
+                            var isPeer = context.Request.Path.Value is MailboxWireHttpContract.PeerStoreRoute or MailboxWireHttpContract.PeerTombstoneRoute;
+                            if (isPeer)
                                 Interlocked.Increment(ref peerRequests[index]);
-                            return next(context);
+                            await next(context);
+                            if (isPeer)
+                            {
+                                peerStatuses[index] = context.Response.StatusCode;
+                                peerResponseBytes[index] = context.Response.ContentLength;
+                            }
                         });
                         app.Services.GetRequiredService<xnode::XNode.CurrentMailboxPeerHttpEndpoint>().Map(app);
                         if (initialEnrollment)
@@ -142,8 +155,13 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 Binding = binding, Presentation = new SodiumMailboxCapabilityCrypto().SignPresentation(decoded, binding, 1, Bytes(32, 0x57))
             });
             var dispatcher = (xnode::XNode.ILocalNativeMailboxExitDispatcher)writer.Services.GetRequiredService<xnode::XNode.NativeMailboxExitDispatcher>();
+            var storeWatch = Stopwatch.StartNew();
             var result = await dispatcher.DispatchAsync(OnionOperation.Store, request, default);
-            Assert.Equal(xnode::XNode.NativeMailboxDispatchCertainty.Completed, result.Certainty);
+            Assert.True(result.Certainty == xnode::XNode.NativeMailboxDispatchCertainty.Completed,
+                $"Initial native Store={result.Certainty}; status={result.StatusCode}; elapsed-ms={storeWatch.ElapsedMilliseconds}; " +
+                $"peer requests={peerRequests.Sum()}; server statuses={string.Join(',', peerStatuses)}; " +
+                $"server response bytes={string.Join(',', peerResponseBytes)}; " +
+                $"client observations={string.Join(';', observedPeers.Select(peer => peer.Summary))}.");
             Assert.Equal(200, result.StatusCode);
             Assert.Equal(1, peerRequests.Sum());
             var quorum = MailboxReceiptV3Codec.DecodeDurableQuorum(result.CanonicalBody.Span);
@@ -243,6 +261,37 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         }
         var authority = new MailboxRevocationAuthority(contexts, custody, scoped, network);
         await authority.RefreshAsync(default); await authority.RequireReadyAsync(default); return authority;
+    }
+
+    private sealed class ObservedNativePeer : xnode::XNode.ICurrentMailboxReplicaPeerClient
+    {
+        private readonly xnode::XNode.CurrentMailboxReplicaPeerClient inner = new();
+        private int calls;
+        private string failure = "none";
+        private long elapsed;
+        private bool cancelled;
+        private int? responseBytes;
+        // Closed types/counters only: never exception messages, URLs, node IDs,
+        // request bytes, grants, credentials or filesystem paths.
+        internal string Summary => $"calls={calls},failure={failure},elapsed-ms={elapsed},cancelled={cancelled},bytes={responseBytes}";
+        public async ValueTask<ReadOnlyMemory<byte>?> SendAsync(VerifiedOnionNextHopTransport recipient,
+            MailboxPeerReplicationOperation operation, ReadOnlyMemory<byte> exactRequest, CancellationToken token)
+        {
+            calls++; var watch = Stopwatch.StartNew();
+            try
+            {
+                var result = await inner.SendAsync(recipient, operation, exactRequest, token);
+                responseBytes = result?.Length;
+                failure = result.HasValue ? "none" : "noncanonical-response";
+                return result;
+            }
+            catch (Exception error)
+            {
+                failure = error.GetType().Name + "/" + error.HResult;
+                throw;
+            }
+            finally { elapsed = watch.ElapsedMilliseconds; cancelled = token.IsCancellationRequested; }
+        }
     }
 
     private sealed class GrantPeerLayout : IDisposable
