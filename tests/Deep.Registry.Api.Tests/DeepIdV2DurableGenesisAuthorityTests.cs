@@ -12,7 +12,7 @@ using System.Net.Http.Headers;
 
 namespace Deep.Registry.Api.Tests;
 
-public sealed class DeepIdV2DurableGenesisAuthorityTests
+public sealed partial class DeepIdV2DurableGenesisAuthorityTests
 {
     [Fact]
     public async Task RealPqGenesisAdvancesAda2OnceAndReturnsExactIdempotentReceipt()
@@ -333,6 +333,34 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
             Assert.Equal(3, floor.AdvanceCount);
             await authority.RequireReadyAsync();
             Assert.False(await authority.RenewHeadIfDueAsync(300));
+            var beforeTimedFlight = await File.ReadAllBytesAsync(statePath);
+            var beforeTimedFlightAdvances = floor.AdvanceCount;
+            using (var worker = new DeepIdV2DirectoryHeadRenewalWorker(authority,
+                       300, TimeSpan.FromSeconds(60),
+                       Microsoft.Extensions.Logging.Abstractions.NullLogger<DeepIdV2DirectoryHeadRenewalWorker>.Instance))
+            {
+                timeSource.WaitForCancellation = true;
+                try
+                {
+                    using var caller = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                        await worker.RenewOnceAsync(caller.Token));
+                    Assert.True(caller.IsCancellationRequested);
+                    // Exercise the actual worker budget, without a caller timeout,
+                    // against its real authority and blocked trusted-time source.
+                    Assert.Equal(TimeSpan.FromSeconds(30), DeepIdV2DirectoryHeadRenewalWorker.RenewalTimeout);
+                    var timeout = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                        await worker.RenewOnceAsync(CancellationToken.None));
+                    Assert.True(timeout.CancellationToken.IsCancellationRequested);
+                }
+                finally { timeSource.WaitForCancellation = false; }
+                Assert.Equal(beforeTimedFlight, await File.ReadAllBytesAsync(statePath));
+                Assert.Equal(beforeTimedFlightAdvances, floor.AdvanceCount);
+                Assert.False(await worker.RenewOnceAsync(CancellationToken.None));
+                await authority.RequireReadyAsync();
+            }
+            await ExerciseAuthoritySuccessorAsync(fixture, root, statePath, key, bootstrap,
+                custody, timeSource, floor, first.DirectoryLeafKey, request.Admission.ExactDid2);
             await File.WriteAllBytesAsync(statePath, genesisProtectedState);
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await authority.AdmitAsync(request));
@@ -458,13 +486,16 @@ public sealed class DeepIdV2DurableGenesisAuthorityTests
         : IContactResolveTrustedTimeContextSource
     {
         public ulong UnixTime { get; set; } = unixTime;
+        public bool WaitForCancellation { get; set; }
 
-        public ValueTask<ContactResolveTrustedTimeContext> ReadAsync(
+        public async ValueTask<ContactResolveTrustedTimeContext> ReadAsync(
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(new ContactResolveTrustedTimeContext(
-                Bytes(16, 0xc1), 4_000, UnixTime, 5));
+            if (WaitForCancellation)
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new ContactResolveTrustedTimeContext(
+                Bytes(16, 0xc1), 4_000, UnixTime, 5);
         }
     }
 }

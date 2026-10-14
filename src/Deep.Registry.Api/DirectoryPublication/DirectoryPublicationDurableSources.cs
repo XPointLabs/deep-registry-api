@@ -157,7 +157,20 @@ internal static class DirectoryPublicationProtectedFile
             stream.Write(bytes);
             stream.Flush(true);
         }
-        File.Move(writing, fullPath, overwrite: true);
+        // Windows scanners/readers can briefly deny replacement after the
+        // flushed handle closes. Retry only the same prepared rename; never
+        // re-encode, delete the destination, alter ACLs or copy over it.
+        for (var attempt = 0; ; attempt++)
+        {
+            try { File.Move(writing, fullPath, overwrite: true); break; }
+            catch (Exception error) when (OperatingSystem.IsWindows() && attempt < 5 &&
+                (error is IOException or UnauthorizedAccessException) &&
+                (error.HResult & 0xffff) is 5 or 32 or 33 &&
+                File.Exists(writing) && !Directory.Exists(fullPath))
+            {
+                Thread.Sleep(50 * (1 << attempt));
+            }
+        }
     }
 }
 

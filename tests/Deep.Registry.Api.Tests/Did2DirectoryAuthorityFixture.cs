@@ -10,7 +10,7 @@ namespace Deep.Registry.Api.Tests;
 
 // DID2-only directory heads and signed identity-neutral network view.
 // Deterministic keys are test fixtures, not operational custody.
-internal sealed class Did2DirectoryAuthorityFixture : IDisposable
+internal sealed partial class Did2DirectoryAuthorityFixture : IDisposable
 {
     private readonly KeyPair root = PublicKeyAuth.GenerateKeyPair(Bytes(0x20, 32));
     private readonly Witness[] witnesses = Enumerable.Range(0, 3).Select(index => new Witness(
@@ -35,6 +35,17 @@ internal sealed class Did2DirectoryAuthorityFixture : IDisposable
     internal IReadOnlyList<IAccountDirectoryDtt1WitnessSigner> Signers =>
         witnesses.Take(2).Select(value =>
             (IAccountDirectoryDtt1WitnessSigner)new WitnessSigner(value)).ToArray();
+
+    internal async ValueTask<AuthoredXPointNetworkAuthorityRenewal> RenewAuthorityAsync(ulong observed)
+    {
+        return await XPointNetworkBootstrapAuthor.AuthorSameKeyRenewalAsync(Bytes(0xe1, 32), Authority,
+            [ExactDts1], observed - 5, observed - 5, Authority.ExpiresAt,
+            observed - 5, observed + 1_900_000, [new RootSigner(root)]);
+    }
+
+    internal byte[] CreateRenewedView(VerifiedXPointNetworkAuthority authority, ulong observed) =>
+        CreateCurrentXnv1(Network, authority, witnesses, observed - 5, observed + 7_200,
+            XPointNetworkCodec.Parse<Xnv1Record>(ExactCurrentXnv1).CoreHash.ToArray());
 
     internal byte[] CreateDid2GenesisHead() => AccountDirectoryAdh1Codec.Encode(
         CreateHead(Network, Authority, witnesses, 0, new byte[32], 0,
@@ -119,18 +130,19 @@ internal sealed class Did2DirectoryAuthorityFixture : IDisposable
     private static byte[] CreateCurrentXnv1(
         byte[] network,
         VerifiedXPointNetworkAuthority authority,
-        Witness[] witnesses)
+        Witness[] witnesses, ulong issued = 1_699_999_000, ulong expires = 1_700_010_000,
+        byte[]? predecessor = null, ulong generation = 1)
     {
         ReadOnlyMemory<byte>[] fields =
         [
-            network, U64(0), new byte[32], Bytes(0x91, 32), U64(1), Bytes(0x92, 32),
+            network, U64(predecessor is null ? 0UL : generation), predecessor ?? new byte[32], Bytes(0x91, 32), U64(1), Bytes(0x92, 32),
             authority.AuthorityCoreReference, authority.DirectoryWitnessPolicyHash,
             Reference("XVP1", Bytes(0x93, 32)), U16(1), U16(3),
             Join(Reference("XND1", Bytes(0x94, 32)), Reference("XND1", Bytes(0x95, 32)),
                 Reference("XND1", Bytes(0x96, 32))),
             U16(0), ReadOnlyMemory<byte>.Empty, U16(0), ReadOnlyMemory<byte>.Empty,
             U16(1), Reference("XCB1", Bytes(0x97, 32)),
-            U64(1), U64(1_699_999_000), U64(1_700_010_000), U16(1), new byte[] { 2 },
+            U64(1), U64(issued), U64(expires), U16(1), new byte[] { 2 },
             Join(witnesses[0].Id, Bytes(0xa1, 64), witnesses[1].Id, Bytes(0xa2, 64)),
         ];
         var provisional = XPointNetworkCodec.Parse<Xnv1Record>(
@@ -165,6 +177,22 @@ internal sealed class Did2DirectoryAuthorityFixture : IDisposable
     private static byte[] U64(ulong value) { var result = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(result, value); return result; }
 
     private sealed record Witness(byte[] Id, KeyPair Key, byte[] FailureDomain);
+
+    private sealed class RootSigner(KeyPair key) : IXPointNetworkBootstrapRootSigner
+    {
+        public ReadOnlyMemory<byte> RootKeyId => Bytes(0x20, 32);
+        public ulong KeyGeneration => 0;
+        public ReadOnlyMemory<byte> Ed25519PublicKey => key.PublicKey.ToArray();
+        public ReadOnlyMemory<byte> CustodyDomainHash => Bytes(0x91, 32);
+        public ValueTask<int> SignAsync(XPointNetworkRootSigningRequest request, Memory<byte> signature64,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var signature = PublicKeyAuth.SignDetached(request.SigningInput.ToArray(), key.PrivateKey);
+            try { signature.CopyTo(signature64); return ValueTask.FromResult(signature.Length); }
+            finally { CryptographicOperations.ZeroMemory(signature); }
+        }
+    }
 
     private sealed class WitnessSigner(Witness witness) : IAccountDirectoryDtt1WitnessSigner
     {

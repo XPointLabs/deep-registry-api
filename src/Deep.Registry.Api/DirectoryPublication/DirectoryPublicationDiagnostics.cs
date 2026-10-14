@@ -26,6 +26,8 @@ internal static class DirectoryPublicationDiagnostics
         "The platform monotonic clock reset; trusted time requires a custody rotation." => "manual-time-clock-reset",
         "Production DID2 authority does not cover the trusted-time interval." => "authority-time-coverage",
         "Production DID2 current head cannot cover a new proof." => "head-time-coverage",
+        "Production DID2 current head requires authority renewal." => "head-authority-renewal",
+        "DID2 prepared commit requires author recovery." => "directory-commit-pending",
         "DID2 proof has no usable nonce-bound lifetime." => "proof-lifetime",
         "The trusted interval cannot identify a DTT1 issuance epoch." => "epoch-interval",
         "The trusted interval crosses an issuance-epoch or DTS1 policy boundary." => "epoch-boundary",

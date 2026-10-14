@@ -1,6 +1,7 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 extern alias xnode;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Runtime.ExceptionServices;
 using XNode.Core.Mailbox;
 using Xunit.Abstractions;
@@ -17,15 +18,61 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     private sealed class ObservedNativeSource(xnode::XNode.IDeepIdV2ContactStoreAuthoritySource inner)
         : xnode::XNode.IDeepIdV2ContactStoreAuthoritySource
     {
+        private static readonly AsyncLocal<ObservedNativeSource?> active = new();
+        private readonly Dictionary<string, (long Count, double Milliseconds)> phases = [];
         private long calls, elapsed;
-        internal string Summary => $"calls={Interlocked.Read(ref calls)},ms={Interlocked.Read(ref elapsed) * 1000 / Stopwatch.Frequency}";
-        internal void Reset() { Interlocked.Exchange(ref calls, 0); Interlocked.Exchange(ref elapsed, 0); }
+        internal string Summary
+        {
+            get { lock (phases) return $"calls={Interlocked.Read(ref calls)},ms={Interlocked.Read(ref elapsed) * 1000 / Stopwatch.Frequency},phases=" +
+                string.Join(',', phases.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value.Count}/{pair.Value.Milliseconds:F0}")); }
+        }
+        internal void Reset() { Interlocked.Exchange(ref calls, 0); Interlocked.Exchange(ref elapsed, 0); lock (phases) phases.Clear(); }
+        internal static NativePhaseTrace ObservePhases()
+        {
+            // Whole-process histograms are only meaningful in an explicitly
+            // isolated profile. Do not enable this listener in the canonical
+            // full suite or change production timing with diagnostic callbacks.
+            if (Environment.GetEnvironmentVariable("DEEP_TEST_NATIVE_PHASE_TRACE") != "1")
+                return new NativePhaseTrace(null);
+            var listener = new MeterListener();
+            var trace = new NativePhaseTrace(listener);
+            listener.InstrumentPublished = (instrument, owner) =>
+            { if (instrument.Meter.Name == "XPoint.XNode.CurrentMailbox" && instrument.Name == "phase.duration") owner.EnableMeasurementEvents(instrument); };
+            listener.SetMeasurementEventCallback<double>((_, value, tags, _) =>
+            {
+                var source = active.Value;
+                foreach (var tag in tags)
+                {
+                    if (tag.Key != "phase" || tag.Value is not string phase || phase.Length > 48 ||
+                        phase.Any(c => !(char.IsAsciiLetterOrDigit(c) || c == '-'))) continue;
+                    trace.Record(phase, value);
+                    if (source is not null)
+                        lock (source.phases)
+                        { var prior = source.phases.GetValueOrDefault(phase); source.phases[phase] = (prior.Count + 1, prior.Milliseconds + value); }
+                }
+            });
+            listener.Start(); return trace;
+        }
         public async ValueTask<xnode::XNode.DeepIdV2ContactStoreAuthority> ReadPublicationAuthorityAsync(CancellationToken ct)
         {
             Interlocked.Increment(ref calls); var watch = Stopwatch.StartNew();
+            var previous = active.Value; active.Value = this;
             try { return await inner.ReadPublicationAuthorityAsync(ct); }
-            finally { Interlocked.Add(ref elapsed, watch.ElapsedTicks); }
+            finally { active.Value = previous; Interlocked.Add(ref elapsed, watch.ElapsedTicks); }
         }
+    }
+
+    // Whole-operation aggregate across the three real owned node hosts. Used
+    // only in the isolated diagnostic lane; unrelated concurrent hosts would
+    // share the meter and must not be interpreted as per-request measurements.
+    private sealed class NativePhaseTrace(MeterListener? listener) : IDisposable
+    {
+        private readonly Dictionary<string, (long Count, double Milliseconds)> phases = [];
+        internal void Record(string phase, double value)
+        { lock (phases) { var prior = phases.GetValueOrDefault(phase); phases[phase] = (prior.Count + 1, prior.Milliseconds + value); } }
+        internal string Summary
+        { get { lock (phases) return listener is null ? "disabled" : string.Join(',', phases.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value.Count}/{pair.Value.Milliseconds:F0}")); } }
+        public void Dispose() => listener?.Dispose();
     }
 
     private sealed class ObservedNativeDurability : IMailboxDurabilityBarrier

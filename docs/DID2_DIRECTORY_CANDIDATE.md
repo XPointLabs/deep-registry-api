@@ -97,7 +97,9 @@ logged as warnings and still return readiness/proof 503. Invalid cryptographic,
 custody or configuration state remains Error severity. The head-renewal worker
 logs recovery after the next successful protected-authority check. Known transient
 NTS/floor loss retries after 5/10/20/40 seconds, capped at the configured maintenance
-interval; successful checks restore the normal cadence. Invalid crypto/custody/
+interval; the worker adds 0–2 seconds of jitter, capped by the existing
+300-second polling ceiling and strictly below half the renewal lead.
+Successful checks restore the normal cadence. Invalid crypto/custody/
 configuration keeps the regular cadence. This avoids waiting the full normal
 interval after startup dependencies return; every retry still verifies fresh time,
 the complete journal, signatures and the independent floor before renewal.
@@ -226,14 +228,55 @@ trusted-time anchor, the complete ADA2 journal and independent PostgreSQL
 floor before signing a content-preserving successor. The hosted worker attempts
 renewal on activation and then checks at the bounded interval, including after
 dependency outages, timeouts and dependency-owned cancellation while the host
-token is not canceled. Host shutdown still cancels promptly. Readiness treats
+token is not canceled. One linked 30-second cancellation budget covers waiting
+for the authority gate, time acquisition, signing and durable completion;
+individual dependencies do not receive a fresh independent worker deadline.
+A timed-out flight leaves retained intent/floor recovery to the existing owner,
+never resets or provisions authority. Cancellation requires dependencies to
+honor their token; this is not forced process termination. Host shutdown still
+cancels promptly. Readiness treats
 that dependency-owned cancellation as unavailable, not a fresh capability.
 A successful renewal preserves tree size and both map/log roots and advances
-the external floor before replacing local ADA2. Missing,
+the external floor before replacing local ADA2. A
+changed current XNA1/witness-policy binding requires immediate head renewal,
+even when the historical head has not reached its expiry lead. Readiness remains
+unavailable until the existing threshold author commits a current-authority
+successor. Full verified ancestor history still authenticates retained heads;
+old heads are not rewritten, re-signed in place or accepted as current proof
+authority. Cold restart restores the same current head/floor without another
+generation. The diagnostic reason is `head-authority-renewal`, with no custody
+values in logs. Missing,
 stale or reset trusted time, insufficient witness custody, expired network
 authority and floor failures all remain fail-closed. This feature does not
 provision or rotate a trusted-time anchor, and must not be presented as a
 substitute for the required independent time-source and recovery evidence.
+
+The protected-file writer retries only the same flushed atomic rename after
+Windows access/sharing/lock errors5/32/33, at most five delays totaling1550ms.
+It never copies over or deletes the old file, alters permissions, regenerates a
+signed candidate or accepts a partial write. Persistent failure still throws
+and leaves the prepared `.writing` file. This bounded retry is not permission
+to reset either restore domain. The ADA2 mutation owner additionally persists
+the exact verified candidate at `StatePath + ".pending"` before external CAS,
+then replaces primary ADA2 and clears pending custody. Preserve this file with
+primary ADA2 in quiescent backups; the PostgreSQL floor remains in its independent
+restore domain. Never delete a pending file to restore readiness or overwrite it
+with a newly generated head/admission.
+
+On the next admission/renewal flight, that owner reauthenticates the complete
+primary and pending ADA2 from the original genesis, checks their exact prefix and
+single successor, and queries the actual external floor. Only an exact candidate
+match or exact predecessor CAS can complete the same commit. A completed local
+replacement with unfinished cleanup requires byte-identical files and a matching
+floor. No callback signs another head merely to finish that intent. An expired
+prepared head completes as history, then ordinary current-authority renewal must
+independently supply freshness. Missing/corrupt primary or pending custody,
+unavailable/lost/unrelated floor and invalid lineage all remain fail-closed.
+Readiness/history/proof reads refuse an unfinished pending commit and never
+complete CAS or change files. The hosted renewal worker owns bounded recovery;
+when it is disabled, a normal authorized admission retry can complete its retained
+intent. This does not assert process/power-loss recovery without matching evidence.
+The sole contract is [DR-0115](../../docs/survival-program/decisions/DR-0115-did2-prepared-directory-commit.md).
 On Linux, startup rejects repeated raw `DeepIdV2DirectoryAuthority__*`
 environment names even when their values are identical: .NET configuration
 would otherwise hide which override won. Compose one effective value per

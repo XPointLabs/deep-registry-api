@@ -166,13 +166,16 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             foreach (var durability in observedDurability) durability.Reset();
             foreach (var security in observedSecurity) security.Reset();
             using var exceptions = new NativeStoreExceptions();
+            using var phases = ObservedNativeSource.ObservePhases();
             var result = await dispatcher.DispatchAsync(OnionOperation.Store, request, default);
+            phases.Dispose();
             exceptions.Dispose();
             var localSummary = $"sources={string.Join(';', observedSources.Select(source => source!.Summary))}; " +
                 $"durability={string.Join(';', observedDurability.Select(durability => durability.Summary))}; " +
                 $"security={string.Join(';', observedSecurity.Select(security => security.Summary))}; " +
                 $"exceptions={exceptions.Summary}";
             output.WriteLine($"Initial Store elapsed-ms={storeWatch.ElapsedMilliseconds}; {localSummary}");
+            output.WriteLine($"Initial Store aggregate-phases={phases.Summary}");
             Assert.True(result.Certainty == xnode::XNode.NativeMailboxDispatchCertainty.Completed,
                 $"Initial native Store={result.Certainty}; status={result.StatusCode}; elapsed-ms={storeWatch.ElapsedMilliseconds}; " +
                 $"peer requests={peerRequests.Sum()}; server statuses={string.Join(',', peerStatuses)}; " +

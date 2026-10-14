@@ -11,6 +11,7 @@ namespace Deep.Registry.Api.DirectoryPublication;
 /// </summary>
 internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
 {
+    internal static readonly TimeSpan RenewalTimeout = TimeSpan.FromSeconds(30);
     private readonly DeepIdV2DurableGenesisAuthority authority;
     private readonly ulong leadSeconds;
     private readonly TimeSpan interval;
@@ -43,8 +44,7 @@ internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
             var delay = interval;
             try
             {
-                if (await authority.RenewHeadIfDueAsync(leadSeconds,
-                        stoppingToken).ConfigureAwait(false))
+                if (await RenewOnceAsync(stoppingToken).ConfigureAwait(false))
                     logger.LogInformation(
                         "The protected DID2 directory head was renewed.");
                 if (unavailable)
@@ -70,9 +70,32 @@ internal sealed class DeepIdV2DirectoryHeadRenewalWorker : BackgroundService
                 logger.Log(DirectoryPublicationDiagnostics.UnavailableLevel(exception), "DID2 directory head renewal failed closed ({Category}; {Reason}).",
                     exception.GetType().Name, DirectoryPublicationDiagnostics.UnavailableReason(exception));
             }
+            delay = JitterDelay(delay, leadSeconds, Random.Shared.Next(0, 3));
             try { await Task.Delay(delay, stoppingToken).ConfigureAwait(false); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
         } while (!stoppingToken.IsCancellationRequested);
+    }
+
+    internal async ValueTask<bool> RenewOnceAsync(CancellationToken stoppingToken)
+    {
+        // One budget covers gate acquisition, trusted time, external custody
+        // and durable completion. A timeout never creates a new signing intent
+        // or repairs a floor; the next flight reopens the real retained state.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        deadline.CancelAfter(RenewalTimeout);
+        return await authority.RenewHeadIfDueAsync(leadSeconds, deadline.Token)
+            .ConfigureAwait(false);
+    }
+
+    internal static TimeSpan JitterDelay(TimeSpan delay, ulong leadSeconds, int jitterSeconds)
+    {
+        if (delay <= TimeSpan.Zero || leadSeconds is < 60 or > 3_600 ||
+            jitterSeconds is < 0 or > 2)
+            throw new ArgumentOutOfRangeException(nameof(jitterSeconds));
+        // Jitter may not violate the configured half-lead safety margin or
+        // the existing 300-second polling ceiling, including near a boundary.
+        var ceiling = Math.Min(300UL, (leadSeconds - 1) / 2);
+        return TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds + jitterSeconds, ceiling));
     }
 
     internal static TimeSpan RecoveryDelay(Exception error, int consecutiveFailures, TimeSpan interval)

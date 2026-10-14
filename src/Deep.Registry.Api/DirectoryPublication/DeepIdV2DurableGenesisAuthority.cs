@@ -99,6 +99,12 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
         using var lease = store.Open(cancellationToken);
         var restored = await lease.ReadAsync(upper, cancellationToken)
             .ConfigureAwait(false);
+        if (!Fixed(restored.CurrentHead.Head.ExactXnaAuthorityCoreReference.Span,
+                authority.AuthorityCoreReference.Span) ||
+            !Fixed(restored.CurrentHead.Head.WitnessPolicyHash.Span,
+                authority.DirectoryWitnessPolicyHash.Span))
+            throw new CryptographicException(
+                "Production DID2 current head requires authority renewal.");
         if (lower < restored.CurrentHead.Head.ValidFrom ||
             upper >= restored.CurrentHead.Head.ValidUntil - 1)
             throw new CryptographicException(
@@ -138,9 +144,13 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
                 integrityKey, networkId, bootstrapSource, authority, verifier,
                 deploymentProfileId, latestHeadFloor);
             using var lease = store.Open(cancellationToken);
+            await lease.RecoverPendingAsync(upper, cancellationToken).ConfigureAwait(false);
             var prior = await lease.ReadAsync(upper, cancellationToken)
                 .ConfigureAwait(false);
-            if (prior.CurrentHead.Head.ValidUntil >
+            var sameAuthority = Fixed(prior.CurrentHead.Head.ExactXnaAuthorityCoreReference.Span,
+                    authority.AuthorityCoreReference.Span) &&
+                Fixed(prior.CurrentHead.Head.WitnessPolicyHash.Span, authority.DirectoryWitnessPolicyHash.Span);
+            if (sameAuthority && prior.CurrentHead.Head.ValidUntil >
                 checked(upper + leadSeconds))
                 return false;
 
@@ -211,6 +221,7 @@ internal sealed class DeepIdV2DurableGenesisAuthority :
                 integrityKey, networkId, bootstrapSource, authority,
                 mlDsa65, deploymentProfileId, latestHeadFloor);
             using var lease = store.Open(cancellationToken);
+            await lease.RecoverPendingAsync(upper, cancellationToken).ConfigureAwait(false);
             var prior = await lease.ReadAsync(upper, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var row in prior.AdmissionRows)

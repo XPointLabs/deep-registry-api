@@ -24,6 +24,7 @@ using Sodium;
 
 namespace Deep.Registry.Api.Tests;
 
+[Collection(NativeIssuerDeadlineCollection.Name)]
 public sealed partial class DeepIdV2RouteThresholdIssuerTests
 {
     [Theory]

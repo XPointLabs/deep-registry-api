@@ -9,8 +9,9 @@ namespace Deep.Registry.Api.DirectoryPublication;
 /// <summary>
 /// An independently durable, rollback-resistant ADA2 latest-head anchor.
 /// Its state must live outside the ADA2 file's backup/restore domain. Advance
-/// is an atomic compare/exchange of exact verified heads; a failed ADA2 write
-/// after a successful advance deliberately requires operator recovery.
+/// is an atomic compare/exchange of exact verified heads. Interrupted commits
+/// may complete only from their authenticated exact candidate and this floor;
+/// missing/corrupt custody still requires independent operator recovery.
 /// </summary>
 internal interface IDeepIdV2DirectoryLatestHeadFloor
 {
@@ -28,7 +29,7 @@ internal interface IDeepIdV2DirectoryLatestHeadFloor
 /// floor is still required to detect replacement by an older valid HMAC file
 /// across restarts. No ADA1 migration path exists.
 /// </summary>
-internal sealed class DeepIdV2DirectoryStateStore : IDisposable
+internal sealed partial class DeepIdV2DirectoryStateStore : IDisposable
 {
     private readonly string statePath;
     private readonly byte[] integrityKey;
@@ -85,7 +86,7 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
         CryptographicOperations.ZeroMemory(networkId);
     }
 
-    internal sealed class Lease : IDisposable
+    internal sealed partial class Lease : IDisposable
     {
         private readonly DeepIdV2DirectoryStateStore owner;
         private readonly IDisposable fileLease;
@@ -102,6 +103,8 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             ulong trustedUnixSeconds, CancellationToken cancellationToken = default)
         {
             RequireOpen();
+            if (File.Exists(owner.statePath + ".pending"))
+                throw new IOException("DID2 prepared commit requires author recovery.");
             var genesis = owner.bootstrapSource.Read(owner.authority);
             if (!File.Exists(owner.statePath))
                 throw new InvalidDataException(
@@ -170,6 +173,8 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
             var prior = previouslyRead ?? throw new InvalidOperationException(
                 "ADA2 state must be read under this lease before mutation.");
             RequireAppendOnly(prior, candidate);
+            if (owner.latestHeadFloor is not null && candidate.Heads.Count != prior.Heads.Count + 1)
+                throw new InvalidDataException("DID2 durable commit requires one exact successor.");
             var genesis = owner.bootstrapSource.Read(owner.authority);
             var verified = DeepIdV2DirectoryStateRestorer.Restore(
                 owner.authority, genesis, candidate, trustedUnixSeconds,
@@ -180,15 +185,24 @@ internal sealed class DeepIdV2DirectoryStateStore : IDisposable
                 payload, owner.integrityKey);
             try
             {
-                // Finish all candidate validation/encoding before the
-                // irreversible external advance. If ADA2 replacement then
-                // fails, the older file must fail closed on the next read.
+                // Persist the exact verified intent before the irreversible
+                // independent advance. A lost CAS reply or local rename keeps
+                // that same candidate for the next author flight, never a
+                // new signature, genesis, row rewrite or floor reset.
                 if (owner.latestHeadFloor is { } floor)
+                {
+                    if (File.Exists(owner.statePath + ".pending"))
+                        throw new IOException("DID2 prepared commit cannot be overwritten.");
+                    DirectoryPublicationProtectedFile.WriteAtomic(owner.statePath + ".pending", encoded);
                     await floor.AdvanceAsync(prior.CurrentHead,
                         verified.CurrentHead, cancellationToken)
                         .ConfigureAwait(false);
+                    await floor.RequireCurrentAsync(verified.CurrentHead, cancellationToken).ConfigureAwait(false);
+                }
                 DirectoryPublicationProtectedFile.WriteAtomic(
                     owner.statePath, encoded);
+                if (owner.latestHeadFloor is not null)
+                    File.Delete(owner.statePath + ".pending");
             }
             finally
             {

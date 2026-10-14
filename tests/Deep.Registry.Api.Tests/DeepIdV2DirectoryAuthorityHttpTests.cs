@@ -23,7 +23,7 @@ using Npgsql;
 
 namespace Deep.Registry.Api.Tests;
 
-public sealed class DeepIdV2DirectoryAuthorityHttpTests
+public sealed partial class DeepIdV2DirectoryAuthorityHttpTests
 {
     private static HttpServiceRequestTransport History(HttpClient client) => new(client,
         DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions(client.BaseAddress!.AbsoluteUri),

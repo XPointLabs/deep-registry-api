@@ -35,6 +35,8 @@ public sealed class DirectoryPublicationDiagnosticsTests
     [InlineData("The protected trusted-time anchor is stale. private suffix", "unclassified")]
     [InlineData("Production DID2 authority does not cover the trusted-time interval.", "authority-time-coverage")]
     [InlineData("Production DID2 current head cannot cover a new proof.", "head-time-coverage")]
+    [InlineData("Production DID2 current head requires authority renewal.", "head-authority-renewal")]
+    [InlineData("DID2 prepared commit requires author recovery.", "directory-commit-pending")]
     [InlineData("DID2 proof has no usable nonce-bound lifetime.", "proof-lifetime")]
     [InlineData("The trusted interval cannot identify a DTT1 issuance epoch.", "epoch-interval")]
     [InlineData("The trusted interval crosses an issuance-epoch or DTS1 policy boundary.", "epoch-boundary")]
@@ -63,5 +65,33 @@ public sealed class DirectoryPublicationDiagnosticsTests
             new InvalidDataException(), new UnauthorizedAccessException(), new InvalidOperationException(), new IOException() })
             Assert.Equal(interval, DeepIdV2DirectoryHeadRenewalWorker.RecoveryDelay(error, 1, interval));
     }
+
+    [Theory]
+    [InlineData(60, 300, 0, 60)]
+    [InlineData(60, 300, 2, 62)]
+    [InlineData(60, 121, 2, 60)]
+    [InlineData(300, 3600, 2, 300)]
+    [InlineData(5, 300, 2, 7)]
+    public void HeadRenewalJitterPreservesLeadAndPollingBounds(
+        int delaySeconds, ulong leadSeconds, int jitterSeconds, int expectedSeconds)
+    {
+        var delay = DeepIdV2DirectoryHeadRenewalWorker.JitterDelay(
+            TimeSpan.FromSeconds(delaySeconds), leadSeconds, jitterSeconds);
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), delay);
+        Assert.True(delay.TotalSeconds * 2 < leadSeconds);
+        Assert.True(delay <= TimeSpan.FromSeconds(300));
+    }
+
+    [Theory]
+    [InlineData(0, 300, 0)]
+    [InlineData(60, 59, 0)]
+    [InlineData(60, 3601, 0)]
+    [InlineData(60, 300, -1)]
+    [InlineData(60, 300, 3)]
+    public void HeadRenewalJitterRejectsInvalidBounds(
+        int delaySeconds, ulong leadSeconds, int jitterSeconds) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            DeepIdV2DirectoryHeadRenewalWorker.JitterDelay(
+                TimeSpan.FromSeconds(delaySeconds), leadSeconds, jitterSeconds));
 }
 #endif
