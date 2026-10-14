@@ -15,20 +15,30 @@ internal sealed class MailboxRevocationJournal : IDisposable
 {
     private const string ScopePredicate = "network_id = $1 AND policy_reference = $2 AND role = $3 AND issuer_key = $4";
     private readonly NpgsqlDataSource source;
+    private readonly bool ownsSource;
     private readonly byte[] network, policy, issuer;
     private readonly MailboxCapabilityDomain role;
 
     internal MailboxRevocationJournal(string connectionString, ReadOnlySpan<byte> networkId,
         ReadOnlySpan<byte> policyReference, MailboxCapabilityDomain domain, ReadOnlySpan<byte> issuerKey)
+        : this(null, connectionString, networkId, policyReference, domain, issuerKey) { }
+
+    internal MailboxRevocationJournal(NpgsqlDataSource source, ReadOnlySpan<byte> networkId,
+        ReadOnlySpan<byte> policyReference, MailboxCapabilityDomain domain, ReadOnlySpan<byte> issuerKey)
+        : this(source ?? throw new ArgumentNullException(nameof(source)), null, networkId, policyReference, domain, issuerKey) { }
+
+    private MailboxRevocationJournal(NpgsqlDataSource? sharedSource, string? connectionString, ReadOnlySpan<byte> networkId,
+        ReadOnlySpan<byte> policyReference, MailboxCapabilityDomain domain, ReadOnlySpan<byte> issuerKey)
     {
-        if (string.IsNullOrWhiteSpace(connectionString) || networkId.Length != 16 ||
+        if (sharedSource is null && string.IsNullOrWhiteSpace(connectionString) || networkId.Length != 16 ||
             networkId.IndexOfAnyExcept((byte)0) < 0 || policyReference.Length != 38 ||
             !policyReference[..4].SequenceEqual(ProtocolMagicBytes.PMA2) || policyReference[4] != 0 || policyReference[5] != 1 ||
             policyReference[6..].IndexOfAnyExcept((byte)0) < 0 || issuerKey.Length != 32 ||
             issuerKey.IndexOfAnyExcept((byte)0) < 0 || domain is not (MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve))
             throw new ArgumentException("MGR1 journal scope is invalid.");
         network = networkId.ToArray(); policy = policyReference.ToArray(); issuer = issuerKey.ToArray(); role = domain;
-        source = NpgsqlDataSource.Create(connectionString);
+        ownsSource = sharedSource is null;
+        source = sharedSource ?? NpgsqlDataSource.Create(connectionString!);
     }
 
     internal async ValueTask<ReadOnlyMemory<byte>> GetOrIssueNextAsync(VerifiedMailboxHostAuthorityV2 host,
@@ -268,6 +278,6 @@ internal sealed class MailboxRevocationJournal : IDisposable
     private static bool Fixed(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
     private sealed record State(long Committed, long Entries, long Maximum, byte[] Serials);
     private sealed record Entry(byte[] Input, byte[]? Winner);
-    public void Dispose() => source.Dispose();
+    public void Dispose() { if (ownsSource) source.Dispose(); }
 }
 #endif

@@ -51,7 +51,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             DeepIdV2Codec.DecodeDid2(observer.Span));
         var issuer = new DeepIdV2MailboxGrantIssuer(contexts, journal, custody, new());
         using var revocationCustody = new MailboxTestCustody();
-        var revocations = await ProvisionGrantRevocationsAsync(contexts, revocationCustody, db, scoped, network, exactPma);
+        using var revocations = await ProvisionGrantRevocationsAsync(contexts, revocationCustody, db, scoped, network, exactPma);
         using var tls = new ControlSocketTls();
         var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,

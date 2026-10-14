@@ -63,7 +63,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             await provision.ExecuteNonQueryAsync();
         }
         var contexts = new DeepIdV2MailboxAuthorityContextSource(proofs, roots, distribution, clock, DeepIdV2Codec.DecodeDid2(observer.Span));
-        var authority = new MailboxRevocationAuthority(contexts, custody, scoped, network);
+        using var authority = new MailboxRevocationAuthority(contexts, custody, scoped, network);
         await Assert.ThrowsAsync<IOException>(() => authority.RequireReadyAsync(default).AsTask());
         custody.Deposit.BeforeSign = (_, _) => throw new IOException("Interrupted role custody after reservation.");
         await Assert.ThrowsAsync<IOException>(() => authority.RefreshAsync(default).AsTask());
@@ -72,7 +72,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         custody.Deposit.BeforeSign = null;
         // Old reserved genesis expired; complete current root/PMA2/PMT2 still valid.
         clock.UnixTime = 1_410; clock.Sample = 410;
-        var reopened = new MailboxRevocationAuthority(contexts, custody, scoped, network);
+        using var reopened = new MailboxRevocationAuthority(contexts, custody, scoped, network);
         using var tls = socketControl ? new ControlSocketTls() : null;
         var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders();
         if (tls is null) builder.WebHost.UseTestServer();
@@ -121,7 +121,21 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         }
         await RequireHttpReadinessAsync(false); // Cold context is not authority.
         using (var cold = await http.GetAsync(controlPath + "latest")) Assert.Equal(HttpStatusCode.ServiceUnavailable, cold.StatusCode);
-        await reopened.RefreshAsync(default);
+        var signerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSigner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        custody.Deposit.BeforeSign = async (_, ct) => { signerEntered.TrySetResult(); await releaseSigner.Task.WaitAsync(ct); };
+        var renewing = reopened.RefreshAsync(default).AsTask();
+        await signerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var requestsAtWriter = Directory.EnumerateFiles(Path.Combine(directory,"proof-nonces"),"*.request",SearchOption.AllDirectories).Count();
+        using (var cancelledRead = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reopened.RequireReadyAsync(cancelledRead.Token).AsTask());
+        var waitingRead = reopened.RequireReadyAsync(default).AsTask();
+        Assert.False(waitingRead.IsCompleted); // Must not release pending/old bytes through a busy owner.
+        Assert.Equal(requestsAtWriter,Directory.EnumerateFiles(Path.Combine(directory,"proof-nonces"),"*.request",SearchOption.AllDirectories).Count());
+        releaseSigner.TrySetResult();
+        await renewing; await waitingRead;
+        custody.Deposit.BeforeSign = null;
+        Assert.Equal(requestsAtWriter,Directory.EnumerateFiles(Path.Combine(directory,"proof-nonces"),"*.request",SearchOption.AllDirectories).Count());
         Assert.Equal(3, custody.Deposit.Inputs.Count); Assert.Equal(intent, custody.Deposit.Inputs[1]);
         Assert.Single(custody.Retrieve.Inputs);
         var historical = await reopened.ReadRetainedAsync(MailboxCapabilityDomain.Deposit, 1, default);
@@ -212,7 +226,10 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         { await reopened.RequireReadyAsync(default); await RequireHttpReadinessAsync(true); }
         Assert.Equal(nonceCount, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
         Assert.Equal(3, custody.Deposit.Inputs.Count); Assert.Single(custody.Retrieve.Inputs);
-        await reopened.RefreshAsync(default); // Fresh unchanged ledger: no extra generation/signature.
+        var unchangedRefresh = reopened.RefreshAsync(default).AsTask();
+        await Task.WhenAll(Enumerable.Range(0,3).Select(_=>reopened.RequireReadyAsync(default).AsTask()).Append(unchangedRefresh));
+        Assert.Equal(nonceCount+1,Directory.EnumerateFiles(requestsRoot,"*.request",SearchOption.AllDirectories).Count());
+        // Only refresh acquired its one proof; concurrent readiness signed/reserved nothing.
         Assert.Equal(3, custody.Deposit.Inputs.Count); Assert.Single(custody.Retrieve.Inputs);
 
         // New cumulative revocation plus a source change during signing: exact
@@ -270,7 +287,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var afterStop = custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count;
         await Assert.ThrowsAsync<IOException>(() => reopened.RefreshAsync(default).AsTask());
         Assert.Equal(afterStop, custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count);
-        var restarted = new MailboxRevocationAuthority(contexts, custody, scoped, network);
+        using var restarted = new MailboxRevocationAuthority(contexts, custody, scoped, network);
         await restarted.RefreshAsync(default); await restarted.RequireReadyAsync(default);
         Assert.Equal(afterStop, custody.Deposit.Inputs.Count + custody.Retrieve.Inputs.Count);
         Assert.Equal(revoked.CanonicalBytes.ToArray(), (await restarted.ReadRetainedAsync(MailboxCapabilityDomain.Deposit, 3, default)).ToArray());

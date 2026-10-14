@@ -15,6 +15,31 @@ namespace Deep.Registry.Api.Tests;
 /// No operator keys, live observer, external signer socket or device evidence.</summary>
 public sealed class MailboxRevocationJournalTests
 {
+    [Fact]
+    public async Task BorrowedPoolSurvivesJournalDisposalAndNeverSubstitutesAnotherRoleScope()
+    {
+        using var fixture = await Fixture.CreateAsync(); var host = await Host(fixture);
+        await using var db = await Database.CreateAsync(host,MailboxCapabilityDomain.Deposit);
+        await using var source = db.CreatePooledSource(); using var signer = new Signer(MailboxCapabilityDomain.Deposit);
+        async Task<int> BackendAsync() {
+            await using var connection = await source.OpenConnectionAsync();
+            await using var command = new NpgsqlCommand("SELECT pg_backend_pid()",connection);
+            return (int)(await command.ExecuteScalarAsync())!;
+        }
+        var backend = await BackendAsync(); ReadOnlyMemory<byte> winner;
+        using(var journal = new MailboxRevocationJournal(source,db.Scope.NetworkId.Span,db.Scope.PolicyReference.Span,db.Scope.Domain,db.Scope.IssuerPublicKey.Span))
+            winner = await journal.GetOrIssueNextAsync(host,[],signer);
+        Assert.Equal(backend,await BackendAsync());
+        using(var reopened = new MailboxRevocationJournal(source,db.Scope.NetworkId.Span,db.Scope.PolicyReference.Span,db.Scope.Domain,db.Scope.IssuerPublicKey.Span))
+            Assert.Equal(winner.ToArray(),(await reopened.ReadSignedStepAsync(host,1)).ToArray());
+        using var retrieve = new Signer(MailboxCapabilityDomain.Retrieve);
+        using(var foreignRole = new MailboxRevocationJournal(source,db.Scope.NetworkId.Span,db.Scope.PolicyReference.Span,MailboxCapabilityDomain.Retrieve,retrieve.Ed25519PublicKey.Span))
+            await Assert.ThrowsAsync<InvalidDataException>(()=>foreignRole.ReadIssuerStateAsync(host,default).AsTask());
+        Assert.Single(signer.Inputs);Assert.Empty(retrieve.Inputs);
+        Assert.Equal(1L,await db.ScalarAsync("SELECT count(*) FROM deep_mailbox_revocation_snapshot"));
+        Assert.Equal(backend,await BackendAsync());
+    }
+
     [Theory]
     [InlineData(MailboxCapabilityDomain.Deposit)]
     [InlineData(MailboxCapabilityDomain.Retrieve)]
@@ -289,6 +314,7 @@ public sealed class MailboxRevocationJournalTests
             catch { await database.DisposeAsync(); throw; }
         }
         internal MailboxRevocationJournal Open(byte[]? issuer = null) => new(connection, Scope.NetworkId.Span, Scope.PolicyReference.Span, Scope.Domain, issuer ?? Scope.IssuerPublicKey.ToArray());
+        internal NpgsqlDataSource CreatePooledSource() => NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(connection) { Pooling=true,MaxPoolSize=1 }.ConnectionString);
         internal async Task ProvisionAsync(int maximum)
         {
             await using var target = new NpgsqlConnection(connection); await target.OpenAsync();

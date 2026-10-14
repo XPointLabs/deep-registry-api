@@ -10,11 +10,15 @@ namespace Deep.Registry.Api.DirectoryPublication;
 // Current-pair bytes are distribution input, not native admission capabilities.
 internal sealed class MailboxRevocationAuthority(
     DeepIdV2MailboxAuthorityContextSource contexts, IDeepIdV2MailboxGrantSignerCustody custody,
-    string connectionString, ReadOnlyMemory<byte> configuredNetwork)
+    string connectionString, ReadOnlyMemory<byte> configuredNetwork) : IDisposable
 {
     internal const ulong RenewalLeadSeconds = 60;
     private readonly byte[] network = configuredNetwork.ToArray();
+    // Reuse connections, never verified authority or winner bytes. Scoped journal
+    // instances borrow this fixed-config owner; every actual DB/source check stays.
+    private readonly Npgsql.NpgsqlDataSource journalSource = Npgsql.NpgsqlDataSource.Create(connectionString);
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly SemaphoreSlim refreshFlight = new(1, 1);
     private DeepIdV2MailboxAuthorityContext? observedContext;
     private int stopped;
 
@@ -24,39 +28,59 @@ internal sealed class MailboxRevocationAuthority(
     internal async ValueTask RefreshAsync(CancellationToken ct)
     {
         RequireRunning(); ct.ThrowIfCancellationRequested();
-        if (!await gate.WaitAsync(0, ct).ConfigureAwait(false)) throw new IOException("Mailbox renewal is busy.");
+        if (!await refreshFlight.WaitAsync(0, ct).ConfigureAwait(false)) throw new IOException("Mailbox renewal is busy.");
         try
         {
             await contexts.WithCurrentAsync(async (context, token) =>
             {
-                RequireRunning(); RequireNetwork(context); Volatile.Write(ref observedContext, context);
-                foreach (var role in new[] { MailboxCapabilityDomain.Deposit, MailboxCapabilityDomain.Retrieve })
+                // Proof acquisition and unchanged journal reads are not writes.
+                // Publish only a freshly verified context under the owner;
+                // actual reserved-signature/winner mutations retain exclusion.
+                await gate.WaitAsync(token).ConfigureAwait(false);
+                try { RequireRunning(); RequireNetwork(context); Volatile.Write(ref observedContext, context); }
+                finally { gate.Release(); }
+                var ownsWrite = false;
+                try
                 {
-                    var current = await context.ReadIntervalAsync(token).ConfigureAwait(false);
-                    if (current.Policy.ExpiresAtUnixSeconds <= checked(current.Upper + RenewalLeadSeconds))
-                        throw new IOException("Mailbox policy requires an authorized successor before renewal.");
-                    using var journal = Open(context, current.Policy, role);
-                    // At most an identical pending completion and one fresh
-                    // cumulative successor per role per refresh. No unbounded loop.
-                    for (var step = 0; step < 2; step++)
+                    foreach (var role in new[] { MailboxCapabilityDomain.Deposit, MailboxCapabilityDomain.Retrieve })
                     {
-                        var state = await journal.ReadIssuerStateAsync(context.Host, token).ConfigureAwait(false);
-                        current = await context.ReadIntervalAsync(token).ConfigureAwait(false);
-                        var due = state.ExactWinner.IsEmpty || state.HasPending || state.HasUnpublishedRevocations ||
-                            MailboxGrantRevocationV1Codec.Decode(state.ExactWinner.Span).ExpiresAt <= checked(current.Upper + RenewalLeadSeconds);
-                        if (!due) break;
+                        var current = await context.ReadIntervalAsync(token).ConfigureAwait(false);
                         if (current.Policy.ExpiresAtUnixSeconds <= checked(current.Upper + RenewalLeadSeconds))
                             throw new IOException("Mailbox policy requires an authorized successor before renewal.");
-                        var signer = context.GuardSigner(custody.Resolve(current.Policy, role));
-                        _ = await journal.GetOrIssueNextAsync(context.Host, [], signer, token).ConfigureAwait(false);
-                        await context.RequireCurrentAsync(token).ConfigureAwait(false);
+                        using var journal = Open(context, current.Policy, role);
+                        // At most an identical pending completion and one fresh
+                        // cumulative successor per role per refresh. No unbounded loop.
+                        for (var step = 0; step < 2; step++)
+                        {
+                            var state = await journal.ReadIssuerStateAsync(context.Host, token).ConfigureAwait(false);
+                            current = await context.ReadIntervalAsync(token).ConfigureAwait(false);
+                            var due = state.ExactWinner.IsEmpty || state.HasPending || state.HasUnpublishedRevocations ||
+                                MailboxGrantRevocationV1Codec.Decode(state.ExactWinner.Span).ExpiresAt <= checked(current.Upper + RenewalLeadSeconds);
+                            if (!due) break;
+                            if (current.Policy.ExpiresAtUnixSeconds <= checked(current.Upper + RenewalLeadSeconds))
+                                throw new IOException("Mailbox policy requires an authorized successor before renewal.");
+                            if (!ownsWrite) { await gate.WaitAsync(token).ConfigureAwait(false); ownsWrite = true; }
+                            // A concurrent independent issuer may already have
+                            // completed it. Re-read before reserving any bytes.
+                            state = await journal.ReadIssuerStateAsync(context.Host, token).ConfigureAwait(false);
+                            current = await context.ReadIntervalAsync(token).ConfigureAwait(false);
+                            due = state.ExactWinner.IsEmpty || state.HasPending || state.HasUnpublishedRevocations ||
+                                MailboxGrantRevocationV1Codec.Decode(state.ExactWinner.Span).ExpiresAt <= checked(current.Upper + RenewalLeadSeconds);
+                            if (!due) break;
+                            if (current.Policy.ExpiresAtUnixSeconds <= checked(current.Upper + RenewalLeadSeconds))
+                                throw new IOException("Mailbox policy requires an authorized successor before renewal.");
+                            var signer = context.GuardSigner(custody.Resolve(current.Policy, role));
+                            _ = await journal.GetOrIssueNextAsync(context.Host, [], signer, token).ConfigureAwait(false);
+                            await context.RequireCurrentAsync(token).ConfigureAwait(false);
+                        }
                     }
+                    _ = await ReadCurrentPairAsync(context, token).ConfigureAwait(false);
+                    RequireRunning(); token.ThrowIfCancellationRequested(); return true;
                 }
-                _ = await ReadCurrentPairAsync(context, token).ConfigureAwait(false);
-                RequireRunning(); token.ThrowIfCancellationRequested(); return true;
+                finally { if (ownsWrite) gate.Release(); }
             }, ct).ConfigureAwait(false);
         }
-        finally { gate.Release(); }
+        finally { refreshFlight.Release(); }
     }
 
     // No proof acquisition or signature on health/readiness. Every read still
@@ -64,9 +88,12 @@ internal sealed class MailboxRevocationAuthority(
     internal async ValueTask RequireReadyAsync(CancellationToken ct)
     {
         RequireRunning(); ct.ThrowIfCancellationRequested();
-        if (!await gate.WaitAsync(0, ct).ConfigureAwait(false)) throw new IOException("Mailbox readiness is busy.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        // A read-only health check may wait for the existing renewal owner,
+        // under its original whole-request budget. It never starts renewal or
+        // uses stale/pending bytes merely because the writer is busy.
+        await gate.WaitAsync(deadline.Token).ConfigureAwait(false);
         try
         {
             var context = Volatile.Read(ref observedContext) ?? throw new IOException("Mailbox authority has not observed current sources.");
@@ -147,7 +174,7 @@ internal sealed class MailboxRevocationAuthority(
         await context.RequireCurrentAsync(ct).ConfigureAwait(false); return result;
     }
     private MailboxRevocationJournal Open(DeepIdV2MailboxAuthorityContext context, VerifiedMailboxAuthorityV2 policy, MailboxCapabilityDomain role) =>
-        new(connectionString, context.Host.NetworkId.Span, [.. "PMA2"u8, 0, 1, .. policy.CoreHash.Span], role, policy.ResolveIssuer(role).PublicKey.Span);
+        new(journalSource, context.Host.NetworkId.Span, [.. "PMA2"u8, 0, 1, .. policy.CoreHash.Span], role, policy.ResolveIssuer(role).PublicKey.Span);
     private void RequireNetwork(DeepIdV2MailboxAuthorityContext context)
     {
         if (network.Length != 16 || !CryptographicOperations.FixedTimeEquals(network, context.Host.NetworkId.Span))
@@ -155,6 +182,7 @@ internal sealed class MailboxRevocationAuthority(
     }
     private void RequireRunning()
     { if (Volatile.Read(ref stopped) != 0) throw new IOException("Mailbox authority is stopped."); }
+    public void Dispose() { MarkStopped(); journalSource.Dispose(); }
 }
 
 internal sealed class MailboxRevocationRenewalWorker(MailboxRevocationAuthority authority, ILogger<MailboxRevocationRenewalWorker> logger)

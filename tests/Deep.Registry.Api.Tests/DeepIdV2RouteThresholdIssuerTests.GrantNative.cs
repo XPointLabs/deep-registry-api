@@ -279,7 +279,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             await provision.ExecuteNonQueryAsync();
         }
         var authority = new MailboxRevocationAuthority(contexts, custody, scoped, network);
-        await authority.RefreshAsync(default); await authority.RequireReadyAsync(default); return authority;
+        try { await authority.RefreshAsync(default); await authority.RequireReadyAsync(default); return authority; }
+        catch { authority.Dispose(); throw; } // Successful return transfers ownership to the caller.
     }
 
     private sealed class ObservedNativePeer : xnode::XNode.ICurrentMailboxReplicaPeerClient

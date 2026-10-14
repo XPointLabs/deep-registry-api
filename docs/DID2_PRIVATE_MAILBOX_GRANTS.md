@@ -215,7 +215,13 @@ release a winner. Missing roots, invalid history or exhausted capacity do not
 trigger automatic provisioning, pruning, regeneration or repair.
 
 Refresh is single-flight and shares the existing distribution admission gate
-with issuance. Each attempt has the original 30-second deadline. Successful
+with issuance. Its independent flight owner covers proof acquisition and reads;
+the journal owner is taken only after work requiring a reservation/signature is
+observed, with a second actual state read before mutation. Once taken it covers
+both roles and at most two steps per role through final pair verification.
+Unchanged reads do not lock out readiness, which still independently rechecks
+actual sources/winners; expired, pending or changed state never becomes a success
+through concurrent access. Each attempt has the original 30-second deadline. Successful
 attempts are followed by 15–17 seconds of delay; failures use bounded 10–62-second
 backoff with jitter. This requires at most 240 observer proof attempts per hour
 per Registry process, in addition to foreground traffic. Those proofs consume
@@ -228,9 +234,23 @@ root key or extended signed lifetime.
 When this candidate is enabled, `/health/did2/ready` also reads both actual
 signed database winners and rechecks their current sources/time. It does not
 acquire a proof, sign, advance a generation or enroll a native node floor.
-Cold, busy, pending, corrupt, expired or stopped authority returns unavailable;
+Readiness may wait for the existing renewal owner within its original five-second
+whole-request deadline, without acquiring a proof or starting renewal. It checks
+actual current signed winners after obtaining that owner; cancellation/deadline
+rejects, never a cached successful-shaped default. Control-distribution reads
+retain their immediate contention rejection. Cold, pending, corrupt, expired,
+stopped or still-busy-at-deadline authority returns unavailable;
 liveness does not imply admission. Stop clears the current observation, and a
 restart reacquires current sources without replacing identities or history.
+
+The authority owns one fixed-config `NpgsqlDataSource` for its lifetime; short
+policy/role-bound journals borrow it without disposing its pool. Standalone
+operator/test journals retain their own datasource ownership. This reuses only
+connections, never authority, signed winners or currentness checks. Every actual
+SQL transaction, immutable reservation, signature and read-back fence remains.
+TLS/connection/deadline configuration is unchanged; datasource disposal belongs
+to the service owner. This follows the
+[Npgsql datasource/pooling lifecycle](https://www.npgsql.org/doc/basic-usage.html#data-source).
 
 The internal retained reader releases one verified signed historical generation
 at a time under a current complete host. Expired history is allowed for

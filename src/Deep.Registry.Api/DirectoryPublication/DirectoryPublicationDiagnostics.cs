@@ -34,6 +34,10 @@ internal static class DirectoryPublicationDiagnostics
         "DID2 renewal authority does not cover protected time." => "renewal-authority-time",
         "DID2 signed authority cannot cover the renewal interval." => "renewal-lifetime",
         "The ContactResolve request ledger rejected an issuance-epoch rollback or fork." => "issuance-epoch-rollback-or-fork",
+        "Mailbox authority is busy." => "mailbox-context-busy",
+        "Mailbox authority has not observed current sources." => "mailbox-observation-missing",
+        "Mailbox current cumulative winner is unavailable." => "mailbox-winner-unavailable",
+        "Mailbox cumulative winner changed during readiness read-back." => "mailbox-winner-changed",
         _ => "unclassified",
     };
 }
