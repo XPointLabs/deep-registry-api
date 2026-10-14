@@ -168,14 +168,26 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
             Directory.CreateDirectory(rootPath);
             RejectReparseDirectory(rootPath);
             using var lease = DirectoryPublicationProtectedFile.AcquireLease(statePath, cancellationToken);
-            if (File.Exists(marker))
+            // An authenticated same-day authority successor cannot reopen a
+            // nonce consumed in any exact predecessor namespace (DR-0119).
+            foreach (var priorId in issuanceEpoch.ReplayNamespaceIds)
             {
-                if ((File.GetAttributes(marker) & FileAttributes.ReparsePoint) != 0)
-                    throw new InvalidDataException(
-                        "Reparse points are forbidden in the ContactResolve request ledger.");
-                throw new CryptographicException("The ContactResolve request nonce was already consumed.");
+                cancellationToken.ThrowIfCancellationRequested();
+                priorId.Span.CopyTo(digestInput[24..]);
+                var priorDigest = HMACSHA256.HashData(integrityKey, digestInput);
+                try
+                {
+                    var priorHex = Convert.ToHexString(priorDigest);
+                    var priorMarker = Path.Combine(rootPath, priorHex[..2], priorHex.Substring(2, 2), priorHex[4..] + ".request");
+                    if (File.Exists(priorMarker))
+                    {
+                        if ((File.GetAttributes(priorMarker) & FileAttributes.ReparsePoint) != 0)
+                            throw new InvalidDataException("Reparse points are forbidden in the ContactResolve request ledger.");
+                        throw new CryptographicException("The ContactResolve request nonce was already consumed.");
+                    }
+                }
+                finally { CryptographicOperations.ZeroMemory(priorDigest); }
             }
-
             var state = ReadStateOrCompact(issuanceEpoch);
             if (state.Count >= capacity || state.Revision % (ulong)compactionInterval == 0)
                 state = Compact(issuanceEpoch, state.Revision);
@@ -233,10 +245,8 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
                 throw new InvalidDataException("The ContactResolve request-ledger quota state is invalid.");
             var storedEpochNumber = BinaryPrimitives.ReadUInt64BigEndian(payload[22..]);
             var revision = BinaryPrimitives.ReadUInt64BigEndian(payload[66..]);
-            var sameEpochId = CryptographicOperations.FixedTimeEquals(
-                payload.Slice(30, 32), issuanceEpoch.Id.Span);
             if (storedEpochNumber > issuanceEpoch.Number ||
-                storedEpochNumber == issuanceEpoch.Number && !sameEpochId)
+                storedEpochNumber == issuanceEpoch.Number && !BindsReplayNamespace(payload.Slice(30, 32), issuanceEpoch.ReplayNamespaceIds))
                 throw new CryptographicException(
                     "The ContactResolve request ledger rejected an issuance-epoch rollback or fork.");
             if (storedEpochNumber < issuanceEpoch.Number)
@@ -258,6 +268,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
     {
         var count = 0;
         var inspected = 0;
+        var replayNamespaces = issuanceEpoch.ReplayNamespaceIds;
         var enumeration = new EnumerationOptions
         {
             RecurseSubdirectories = true,
@@ -275,7 +286,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
             try
             {
                 var payload = DirectoryPublicationProtectedFile.Verify(encoded, integrityKey);
-                var isCurrent = ValidateMarker(payload, marker, issuanceEpoch);
+                var isCurrent = ValidateMarker(payload, marker, issuanceEpoch, replayNamespaces);
                 if (isCurrent)
                 {
                     count++;
@@ -299,7 +310,8 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
     private bool ValidateMarker(
         ReadOnlySpan<byte> payload,
         string marker,
-        AccountDirectoryDtt1IssuanceEpoch issuanceEpoch)
+        AccountDirectoryDtt1IssuanceEpoch issuanceEpoch,
+        IReadOnlyList<ReadOnlyMemory<byte>> replayNamespaces)
     {
         if (payload.Length != PayloadBytes || !payload[..4].SequenceEqual(Magic) ||
             BinaryPrimitives.ReadUInt16BigEndian(payload[4..]) != 2 ||
@@ -333,10 +345,17 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
         var markerEpochNumber = BinaryPrimitives.ReadUInt64BigEndian(payload[22..]);
         if (markerEpochNumber > issuanceEpoch.Number ||
             markerEpochNumber == issuanceEpoch.Number &&
-            !CryptographicOperations.FixedTimeEquals(payload.Slice(30, 32), issuanceEpoch.Id.Span))
+            !BindsReplayNamespace(payload.Slice(30, 32), replayNamespaces))
             throw new CryptographicException(
                 "The ContactResolve request ledger rejected an issuance-epoch rollback or fork.");
         return markerEpochNumber == issuanceEpoch.Number;
+    }
+
+    private static bool BindsReplayNamespace(ReadOnlySpan<byte> id, IReadOnlyList<ReadOnlyMemory<byte>> replayNamespaces)
+    {
+        foreach (var candidate in replayNamespaces)
+            if (CryptographicOperations.FixedTimeEquals(id, candidate.Span)) return true;
+        return false;
     }
 
     private void WriteState(

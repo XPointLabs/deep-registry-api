@@ -159,14 +159,27 @@ public sealed class DirectorySourceCutoverTests
                 new(Bytes(16, 4), 900, observed, 1), epoch, default);
             var files = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(p => p, File.ReadAllBytes);
             await ledger.RequireReadyAsync(epoch, default);
-            var rejected = await Assert.ThrowsAsync<CryptographicException>(() => ledger.RequireReadyAsync(changed, default).AsTask());
-            Assert.Equal("issuance-epoch-rollback-or-fork", DirectoryPublicationDiagnostics.UnavailableReason(rejected));
+            await ledger.RequireReadyAsync(changed, default); // Exact paired predecessor, not a fork.
             var tomorrow = AccountDirectoryDtt1IssuanceEpoch.Derive(renewed, observed + 86_400, 1);
             await ledger.RequireReadyAsync(tomorrow, default);
             Assert.Equal(files.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
             foreach (var (path, bytes) in files) Assert.Equal(bytes, await File.ReadAllBytesAsync(path));
             using var cold = new ProtectedFileContactResolveOneUseRequestLedger(root, fixture.Network, Bytes(32, 5));
-            await Assert.ThrowsAsync<CryptographicException>(() => cold.RequireReadyAsync(changed, default).AsTask());
+            await cold.RequireReadyAsync(changed, default);
+            await Assert.ThrowsAsync<CryptographicException>(() => cold.ConsumeAsync(
+                new(fixture.Network, Bytes(32, 6), Bytes(16, 8), 99), new(Bytes(16, 4), 901, observed, 1), changed, default).AsTask());
+            await cold.ConsumeAsync(new(fixture.Network, Bytes(32, 9), Bytes(16, 8), 99),
+                new(Bytes(16, 4), 901, observed, 1), changed, default);
+            Assert.Equal(2, Directory.EnumerateFiles(root, "*.request", SearchOption.AllDirectories).Count());
+            // An older authority cannot explain the durable successor quota ID.
+            var rollback = await Assert.ThrowsAsync<CryptographicException>(() => cold.RequireReadyAsync(epoch, default).AsTask());
+            Assert.Equal("issuance-epoch-rollback-or-fork", DirectoryPublicationDiagnostics.UnavailableReason(rollback));
+            var fork = await fixture.RenewAuthorityAsync(observed + 120);
+            var forkAuthority = Deep.Protocol.XPointNetworkV1.XPointNetworkAuthorityVerifier.Verify(
+                new(fixture.Network, fixture.Authority.AuthorityCoreHash.Span),
+                [fixture.ExactXna1, fork.ExactXna1], [fixture.ExactDts1, fork.ExactDts1]);
+            var forkEpoch = AccountDirectoryDtt1IssuanceEpoch.Derive(forkAuthority, observed + 120, 1);
+            await Assert.ThrowsAsync<CryptographicException>(() => cold.RequireReadyAsync(forkEpoch, default).AsTask());
         } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
