@@ -8,6 +8,12 @@ Deep.Registry.Api.DirectoryPublication.RetiredDirectoryConfiguration.RequireAbse
 Deep.Registry.Api.DirectoryPublication.RetiredMailboxConfiguration.RequireAbsent(builder.Configuration);
 
 #if DEEP_PROTOCOL_DIRECTORY_V1
+var mailboxSignerExit = await Deep.Registry.Api.DirectoryPublication.MailboxRoleSigner.TryRunAsync(args, builder.Configuration);
+if (mailboxSignerExit is not null)
+{
+    Environment.ExitCode = mailboxSignerExit.Value;
+    return;
+}
 var contactResolveOperatorExit = await
     Deep.Registry.Api.DirectoryPublication.ContactResolveOperatorCommand.TryRunAsync(
         args, builder.Configuration);
@@ -25,6 +31,9 @@ if (deepIdV2OperatorExit is not null)
     return;
 }
 #endif
+
+if (args.Length > 0 && args[0] == "mailbox-role-signer")
+    throw new PlatformNotSupportedException("This build does not contain the current protected role signer.");
 
 builder.Services.Configure<RegistryOptions>(builder.Configuration.GetSection("Registry"));
 builder.Services.ConfigureHttpJsonOptions(options =>

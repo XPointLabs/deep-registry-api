@@ -99,6 +99,43 @@ Polling `Socket.Available` is not a substitute for the response boundary:
 it reports only bytes already queued, not future bytes or successful completion.
 See the [.NET socket contract](https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket.available?view=net-10.0).
 
+### Protected role signer process
+
+The source-cutover build provides the separate Linux command
+`Deep.Registry.Api.dll mailbox-role-signer run`. It returns before constructing
+the Registry service/HTTP endpoints. This is the current PMES key-custody process,
+not the retired PMA1 signer or an in-process/other-role fallback. Run one process
+per role, with only its exact nonzero raw32 seed mounted read-only; do not mount
+directory witnesses, node/BLS keys, the other role or offline root. The Registry
+process must not receive those role seed mounts.
+
+`MailboxRoleSigner` configuration has exactly `Role` (`deposit`/`retrieve`),
+`NetworkIdHex`, `SeedPath`, `SocketPath` and explicit `AllowedPeerUserId`.
+Seed and socket directories must be owned0700, seed raw32/owned0600, and socket
+owned0600. Linked/missing/wrong-owner/mode custody and untrusted writable ancestry
+reject. Existing regular files/links at the socket path are never unlinked;
+an owned stale socket may be removed only after exclusive owner lease, refused
+connection and unchanged kernel identity. An active owner rejects a second start.
+Graceful SIGTERM/SIGINT clears key memory and removes only the same owned socket.
+
+Kernel file-type/owner/inode binding follows the
+[Linux statx UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/stat.h);
+local peer UID is checked through
+[SO_PEERCRED](https://man7.org/linux/man-pages/man7/unix.7.html).
+There is no abstract/public socket or new TCP listener. Work is serial with
+backlog8 and a4-second whole-request bound. Existing PMES/v1 framing and its
+65,824-byte ceiling are unchanged; replies are exactly64 bytes followed by EOF.
+The signer validates canonical MCG3/MGR1 with the ordinary Protocol codecs and
+requires the assigned role/network/derived public key and exact signing domain.
+It checks no OS-wall-clock currentness and manufactures no issuer authority:
+actual verified context, durable reserved intent and post-signature verification
+remain required in Registry/Protocol. Its process/socket health is not readiness.
+
+Use Dockerfile target `mailbox-signer-tests` for actual Linux custody, UID, socket,
+signature and restart checks. Windows skips that lane explicitly; source parsing
+or fabricated signature bytes cannot replace it. Deployment and full private
+issuance/node/client qualification remain separate S05 gates.
+
 The bounded PMES/v1 request can carry at most **65,824 signing bytes**. That
 matches the largest canonical current MGR1 input: encoded record65,863 minus
 the72-byte signature field plus the33-byte SIGINPUT prefix. Empty and larger
@@ -230,6 +267,10 @@ service ports. The default Registry image and complete test assembly remain
 unchanged. Windows explicitly skips these Linux-only tests; use the Linux
 target for evidence, never count those skips as passing.
 
-This lane proves response framing/cancellation only. It does not prove actual
-external role custody, full private grant issuance, authenticated network
+The Registry Dockerfile lane proves adapter response framing/cancellation only.
+The separate DevOps `docker/deep-dev.Dockerfile` target with the same name also
+runs the actual role process custody/signature tests described above. Neither
+lane proves configured full private grant issuance, authenticated network
 transport, current public readiness or Windows/Android message delivery.
+See the [role-signer checkpoint](testing/s05-protected-role-signer-2026-10-14.md)
+for exact platform receipts and remaining activation scope.
