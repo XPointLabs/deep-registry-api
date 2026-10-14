@@ -140,6 +140,37 @@ public sealed class DirectorySourceCutoverTests
     }
 
     [Fact]
+    public async Task ReadinessRejectsSameDayAuthorityForkAndNeverCompactsOrConsumes()
+    {
+        using var fixture = Did2DirectoryAuthorityFixture.Create();
+        const ulong observed = 1_700_000_100;
+        var epoch = AccountDirectoryDtt1IssuanceEpoch.Derive(fixture.Authority, observed, 1);
+        var renewal = await fixture.RenewAuthorityAsync(observed);
+        var renewed = Deep.Protocol.XPointNetworkV1.XPointNetworkAuthorityVerifier.Verify(
+            new(fixture.Network, fixture.Authority.AuthorityCoreHash.Span),
+            [fixture.ExactXna1, renewal.ExactXna1], [fixture.ExactDts1, renewal.ExactDts1]);
+        var changed = AccountDirectoryDtt1IssuanceEpoch.Derive(renewed, observed, 1);
+        Assert.Equal(epoch.Number, changed.Number); Assert.NotEqual(epoch.Id.ToArray(), changed.Id.ToArray());
+        var root = TemporaryRoot();
+        using var ledger = new ProtectedFileContactResolveOneUseRequestLedger(root, fixture.Network, Bytes(32, 5));
+        try {
+            await ledger.RequireReadyAsync(epoch, default); Assert.False(Directory.Exists(root));
+            await ledger.ConsumeAsync(new(fixture.Network, Bytes(32, 6), Bytes(16, 7), 10),
+                new(Bytes(16, 4), 900, observed, 1), epoch, default);
+            var files = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(p => p, File.ReadAllBytes);
+            await ledger.RequireReadyAsync(epoch, default);
+            var rejected = await Assert.ThrowsAsync<CryptographicException>(() => ledger.RequireReadyAsync(changed, default).AsTask());
+            Assert.Equal("issuance-epoch-rollback-or-fork", DirectoryPublicationDiagnostics.UnavailableReason(rejected));
+            var tomorrow = AccountDirectoryDtt1IssuanceEpoch.Derive(renewed, observed + 86_400, 1);
+            await ledger.RequireReadyAsync(tomorrow, default);
+            Assert.Equal(files.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
+            foreach (var (path, bytes) in files) Assert.Equal(bytes, await File.ReadAllBytesAsync(path));
+            using var cold = new ProtectedFileContactResolveOneUseRequestLedger(root, fixture.Network, Bytes(32, 5));
+            await Assert.ThrowsAsync<CryptographicException>(() => cold.RequireReadyAsync(changed, default).AsTask());
+        } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task LargerProofBudgetCannotHideCorruptRetainedLedgerState()
     {
         var authority = DirectoryNetworkAuthorityFixture.Create();
@@ -178,6 +209,8 @@ public sealed class DirectorySourceCutoverTests
         try
         {
             var correct = new DirectoryProofReplayRequest(authority.NetworkId.Span, Bytes(32, 6), Bytes(16, 7), 10);
+            await Assert.ThrowsAsync<OperationCanceledException>(() => ledger.RequireReadyAsync(epoch,
+                new CancellationToken(true)).AsTask());
             await Assert.ThrowsAsync<OperationCanceledException>(() => ledger.ConsumeAsync(correct, time, epoch,
                 new CancellationToken(true)).AsTask());
             var foreign = new DirectoryProofReplayRequest(Bytes(16, 8), Bytes(32, 6), Bytes(16, 7), 10);

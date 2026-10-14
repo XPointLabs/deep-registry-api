@@ -33,6 +33,7 @@ internal static class DirectoryPublicationDiagnostics
         "The trusted interval crosses an issuance-epoch or DTS1 policy boundary." => "epoch-boundary",
         "DID2 renewal authority does not cover protected time." => "renewal-authority-time",
         "DID2 signed authority cannot cover the renewal interval." => "renewal-lifetime",
+        "The ContactResolve request ledger rejected an issuance-epoch rollback or fork." => "issuance-epoch-rollback-or-fork",
         _ => "unclassified",
     };
 }

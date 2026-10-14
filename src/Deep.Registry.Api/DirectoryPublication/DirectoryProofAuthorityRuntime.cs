@@ -41,6 +41,8 @@ internal interface IContactResolveTrustedTimeContextSource
 /// </summary>
 internal interface IContactResolveOneUseRequestLedger
 {
+    ValueTask RequireReadyAsync(AccountDirectoryDtt1IssuanceEpoch issuanceEpoch,
+        CancellationToken cancellationToken);
     ValueTask ConsumeAsync(
         DirectoryProofReplayRequest request,
         ContactResolveTrustedTimeContext trustedTime,
@@ -107,6 +109,21 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
         this.integrityKey = integrityKey.ToArray();
         this.capacity = capacity;
         this.compactionInterval = compactionInterval;
+    }
+
+    public ValueTask RequireReadyAsync(AccountDirectoryDtt1IssuanceEpoch issuanceEpoch,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(issuanceEpoch);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Directory.Exists(rootPath)) return ValueTask.CompletedTask;
+        RejectReparseDirectory(rootPath);
+        using var lease = DirectoryPublicationProtectedFile.AcquireLease(statePath, cancellationToken);
+        var state = ReadStateOrCompact(issuanceEpoch, readOnly: true, cancellationToken);
+        if (state.Count >= capacity) state = Compact(issuanceEpoch, state.Revision, readOnly: true, cancellationToken);
+        if (state.Count >= capacity) throw new ContactResolveDirectoryAdmissionException(
+            "The ContactResolve request ledger reached its bounded capacity.");
+        return ValueTask.CompletedTask;
     }
 
     public ValueTask ConsumeAsync(
@@ -201,9 +218,10 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
 
     public void Dispose() => CryptographicOperations.ZeroMemory(integrityKey);
 
-    private LedgerState ReadStateOrCompact(AccountDirectoryDtt1IssuanceEpoch issuanceEpoch)
+    private LedgerState ReadStateOrCompact(AccountDirectoryDtt1IssuanceEpoch issuanceEpoch, bool readOnly = false,
+        CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(statePath)) return Compact(issuanceEpoch, 0);
+        if (!File.Exists(statePath)) return Compact(issuanceEpoch, 0, readOnly, cancellationToken);
         var encoded = DirectoryPublicationProtectedFile.ReadBounded(
             statePath, StatePayloadBytes + 32);
         try
@@ -222,7 +240,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
                 throw new CryptographicException(
                     "The ContactResolve request ledger rejected an issuance-epoch rollback or fork.");
             if (storedEpochNumber < issuanceEpoch.Number)
-                return Compact(issuanceEpoch, revision);
+                return Compact(issuanceEpoch, revision, readOnly, cancellationToken);
             var count = BinaryPrimitives.ReadUInt32BigEndian(payload[62..]);
             if (count > capacity || revision < count)
                 throw new InvalidDataException("The ContactResolve request-ledger quota state is invalid.");
@@ -236,7 +254,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
 
     private LedgerState Compact(
         AccountDirectoryDtt1IssuanceEpoch issuanceEpoch,
-        ulong priorRevision)
+        ulong priorRevision, bool readOnly = false, CancellationToken cancellationToken = default)
     {
         var count = 0;
         var inspected = 0;
@@ -249,6 +267,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
         };
         foreach (var marker in Directory.EnumerateFiles(rootPath, "*.request", enumeration))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (++inspected > checked(capacity * 2))
                 throw new InvalidDataException(
                     "The ContactResolve request ledger exceeds its bounded recovery scan.");
@@ -261,7 +280,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
                 {
                     count++;
                 }
-                else
+                else if (!readOnly)
                 {
                     File.Delete(marker);
                 }
@@ -273,7 +292,7 @@ internal sealed class ProtectedFileContactResolveOneUseRequestLedger :
         }
         var nextRevision = Math.Max(checked(priorRevision + 1), checked((ulong)count));
         var compacted = new LedgerState(count, nextRevision);
-        WriteState(compacted, issuanceEpoch);
+        if (!readOnly) WriteState(compacted, issuanceEpoch);
         return compacted;
     }
 

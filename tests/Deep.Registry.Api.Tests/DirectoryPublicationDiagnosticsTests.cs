@@ -42,6 +42,8 @@ public sealed class DirectoryPublicationDiagnosticsTests
     [InlineData("The trusted interval crosses an issuance-epoch or DTS1 policy boundary.", "epoch-boundary")]
     [InlineData("DID2 renewal authority does not cover protected time.", "renewal-authority-time")]
     [InlineData("DID2 signed authority cannot cover the renewal interval.", "renewal-lifetime")]
+    [InlineData("The ContactResolve request ledger rejected an issuance-epoch rollback or fork.", "issuance-epoch-rollback-or-fork")]
+    [InlineData("The ContactResolve request ledger rejected an issuance-epoch rollback or fork. private suffix", "unclassified")]
     [InlineData("private path or request bytes", "unclassified")]
     [InlineData("DID2 proof has no usable nonce-bound lifetime. private suffix", "unclassified")]
     public void ClosedReasonCodesNeverEchoExceptionMessages(string message, string expected)

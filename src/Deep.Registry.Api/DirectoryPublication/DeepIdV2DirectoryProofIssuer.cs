@@ -177,6 +177,7 @@ internal sealed class DeepIdV2DirectoryProofIssuer : IDisposable
         var authority = networkAuthoritySource.Read();
         var epoch = AccountDirectoryDtt1IssuanceEpoch.Derive(authority,
             trusted.ObservedUnixTime, trusted.UncertaintySeconds);
+        await requestLedger.RequireReadyAsync(epoch, cancellationToken).ConfigureAwait(false);
         using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
         using var store = new DeepIdV2DirectoryStateStore(statePath,
             integrityKey, networkId, bootstrapSource, authority,
