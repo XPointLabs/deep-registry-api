@@ -11,6 +11,23 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class AutomaticNtsTrustedTimeSourceTests
 {
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(2, true)]
+    public void AcquisitionAgeAndMissingQuorumHaveDistinctClosedDiagnostics(int count, bool expired)
+    {
+        using var world = new World();
+        using var source = world.Create();
+        var observations = world.Observations(1_700_000_100).Take(count).ToArray();
+        var completed = expired ? 1_001UL + world.Policy.MaximumSourceSampleAgeSeconds : 1_000UL;
+        var error = Assert.Throws<CryptographicException>(() => source.AcceptObservations(
+            world.Authority, world.Policy, observations, 1_000, completed));
+        Assert.Equal(expired ? "NTS acquisition monotonic interval is invalid or stale." :
+            "NTS observation quorum count is invalid.", error.Message);
+        Assert.Equal(world.InitialFloor, File.ReadAllBytes(world.FloorPath));
+    }
+
     [Fact]
     public async Task QueuedObservationUsesTheSameMonotonicInstantAsTheAdvancedLowerFloor()
     {

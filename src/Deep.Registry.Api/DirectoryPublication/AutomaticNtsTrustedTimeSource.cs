@@ -116,7 +116,9 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
             {
                 // Do not log process output, custody paths, pins or source identifiers.
                 var reason = error.Message switch {
-                    "NTS observation quorum or clock scope is invalid." => "scope-or-quorum",
+                    "NTS observation policy scope is invalid." => "policy-scope",
+                    "NTS acquisition monotonic interval is invalid or stale." => "acquisition-age",
+                    "NTS observation quorum count is invalid." => "observation-quorum",
                     "NTS observation interval is invalid or stale." => "source-interval",
                     "Independent NTS source intervals do not close the live signed policy." => "policy-interval",
                     "NTS observation conflicts with the advanced trusted interval." => "interval-conflict",
@@ -141,10 +143,12 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
         var signed = authoritySource.ReadWithTimePolicy();
         if (!Fixed(authority.AuthorityCoreHash.Span, signed.Authority.AuthorityCoreHash.Span) ||
             !Fixed(AccountDirectoryDts1Codec.Encode(policy), AccountDirectoryDts1Codec.Encode(signed.Policy)) ||
-            !Fixed(authority.NetworkId.Span, network) || !Fixed(policy.NetworkId.Span, network) ||
-            completed < started || completed - started > policy.MaximumSourceSampleAgeSeconds ||
-            observations.Count is < 2 or > 8)
-            throw new CryptographicException("NTS observation quorum or clock scope is invalid.");
+            !Fixed(authority.NetworkId.Span, network) || !Fixed(policy.NetworkId.Span, network))
+            throw new CryptographicException("NTS observation policy scope is invalid.");
+        if (completed < started || completed - started > policy.MaximumSourceSampleAgeSeconds)
+            throw new CryptographicException("NTS acquisition monotonic interval is invalid or stale.");
+        if (observations.Count is < 2 or > 8)
+            throw new CryptographicException("NTS observation quorum count is invalid.");
         ulong lower = 0, upper = ulong.MaxValue;
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var families = new HashSet<string>(StringComparer.Ordinal);

@@ -110,6 +110,13 @@ under artifacts/s05-current-publication-20261015/ and are not full PG/runtime or
 physical qualification. A deployed floor-rollback label alone does not identify
 this particular cause; retained runtime recovery must still be observed.
 
+Private NTS diagnostics distinguish the closed `policy-scope`, `acquisition-age`
+and `observation-quorum` failures instead of the former combined label. The same
+initial predicates still reject before floor mutation; no source/process output
+or identifiers enter logs. Focused `nts-acquisition-diagnostics-04` passed40/0/0,
+native0, including the prior37 cases and distinct missing-quorum/stale-acquisition
+refusals with unchanged floor bytes. This is not full or deployed evidence.
+
 Startup reacquisition and transient independent-floor/time unavailability are
 logged as warnings and still return readiness/proof 503. Invalid cryptographic,
 custody or configuration state remains Error severity. The head-renewal worker
