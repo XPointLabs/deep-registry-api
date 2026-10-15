@@ -38,8 +38,12 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     public Task PublicationLeasePrivateHttpReconcilesExactExpiredPhase6WithoutReservingAgain() =>
         ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, publicationLease: true);
 
+    [Fact]
+    public Task PublicationWinnerReadPrivateHttpRecoversExpiredPhase5WithoutIssuingAgain() =>
+        ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, winnerRead: true);
+
     private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle, bool socketControl = false,
-        bool grantExchange = false, bool retainedExchange = false, bool publicationLease = false)
+        bool grantExchange = false, bool retainedExchange = false, bool publicationLease = false, bool winnerRead = false)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -170,6 +174,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             builder.Services.AddSingleton<IContactPublicationThresholdIssuer>(publicationIssuer);
             builder.Services.AddSingleton<IContactPublicationLeaseIssuer>(new ProductionContactPublicationLeaseIssuer(
                 proofs, rootSource, distribution, custody, clock, publicationJournal));
+            builder.Services.AddSingleton<IContactPublicationWinnerReader>(new ProductionContactPublicationWinnerReader(
+                proofs, rootSource, distribution, clock, publicationJournal));
             var admissionTime = new AdmissionClock();
             builder.Services.AddSingleton<TimeProvider>(admissionTime);
             builder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
@@ -278,6 +284,27 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange));
             Assert.NotNull(publicationExchange.Request); Assert.NotNull(publicationExchange.Response);
             var firstPublicationRequest = ContactPublicationAuthorityWireCodec.EncodeRequest(publicationExchange.Request!);
+            if (winnerRead)
+            {
+                var original = Xpu1Codec.Decode(ContactPublicationAuthorityWireCodec.DecodeResponse(
+                    publicationExchange.Request!, publicationExchange.Response!).ExactXpu1.Span);
+                var advance = checked(original.ExpiresAtUnixSeconds + 6 - clock.UnixTime);
+                clock.UnixTime += advance; clock.Sample += advance;
+                admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
+                var replicas = new LeasedPublicationReplica(route, nodes, original.CanonicalBytes);
+                await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactPublicationCommitAsync(Bytes(32, 0xd1), source,
+                    new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange, replicas));
+                admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
+                var adopted = await accounts.EnsureOwnContactPublicationCommitAsync(Bytes(32, 0xd1), source,
+                    new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange, replicas);
+                Assert.Equal(original.RequestHash.ToArray(), adopted.RequestHash.ToArray());
+                Assert.Equal(firstPublicationRequest, ContactPublicationAuthorityWireCodec.EncodeRequest(publicationExchange.Request!));
+                Assert.Equal(1, publicationExchange.WinnerReads); Assert.Equal(1, publicationExchange.Calls);
+                Assert.Equal(2, publicationExchange.LeaseCalls); Assert.Equal(1, countedPublication.Calls);
+                await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id=$1", db);
+                count.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await count.ExecuteScalarAsync());
+                return;
+            }
             // Route + committed publication consume the shared source budget.
             // An immediate retry must remain throttled, preserving the exact
             // durable request. Advance only the test scheduling clock; never
@@ -709,6 +736,23 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     }
     private sealed class PublicationHttpExchange(HttpClient client, TimeProvider admissionTime) : IDid2ContactPublicationSource
     {
+        internal int WinnerReads;
+        public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
+            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive(); WinnerReads++;
+            var exact = request.CanonicalBytes.ToArray();
+            using var body = new ByteArrayContent(exact);
+            body.Headers.ContentType = MediaTypeHeaderValue.Parse(DeepIdV2PublicationWinnerReadWireCodec.RequestMediaType);
+            using var message = new HttpRequestMessage(HttpMethod.Post, DeepIdV2PublicationWinnerReadWireCodec.EndpointPath) { Content = body };
+            PeerAuthenticationFixture.Authenticate(message, request.NetworkId.ToArray(), ContactCoordinationTarget.PublicationWinnerRead,
+                exact, admissionTime.GetUtcNow().ToUnixTimeMilliseconds());
+            using var response = await client.SendAsync(message, ct);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(DeepIdV2PublicationWinnerReadWireCodec.ResponseMediaType, response.Content.Headers.ContentType?.ToString());
+            var returned = await response.Content.ReadAsByteArrayAsync(ct);
+            _ = DeepIdV2PublicationWinnerReadWireCodec.DecodeResponse(request, returned); return returned;
+        }
         internal int LeaseCalls;
         public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)

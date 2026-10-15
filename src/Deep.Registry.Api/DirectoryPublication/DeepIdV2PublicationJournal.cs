@@ -8,6 +8,9 @@ namespace Deep.Registry.Api.DirectoryPublication;
 
 internal interface IDeepIdV2PublicationJournal
 {
+    ValueTask<(ReadOnlyMemory<byte> Request, ReadOnlyMemory<byte> Response)> ReadCompletedCoordinationWinnerAsync(
+        ReadOnlyMemory<byte> originalNonce, ReadOnlyMemory<byte> directoryLookupKey,
+        ReadOnlyMemory<byte> originalCoordinationRequestHash, CancellationToken cancellationToken);
     ValueTask<(ReadOnlyMemory<byte> Request, ReadOnlyMemory<byte> Response)> ReadCompletedWinnerAsync(
         ReadOnlyMemory<byte> originalNonce, ReadOnlyMemory<byte> directoryLookupKey,
         ReadOnlyMemory<byte> originalRequestHash, CancellationToken cancellationToken);
@@ -76,6 +79,29 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         return (retained.Request.ToArray(), retained.Response.ToArray());
+    }
+
+    public async ValueTask<(ReadOnlyMemory<byte> Request, ReadOnlyMemory<byte> Response)> ReadCompletedCoordinationWinnerAsync(
+        ReadOnlyMemory<byte> originalNonce, ReadOnlyMemory<byte> directoryLookupKey,
+        ReadOnlyMemory<byte> originalCoordinationRequestHash, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var nonce = CopyRecoveryScope(originalNonce); var lookup = CopyRecoveryScope(directoryLookupKey);
+        var hash = CopyRecoveryScope(originalCoordinationRequestHash);
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        _ = await LockNetworkAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+        var retained = await ReadAsync(connection, transaction, nonce, cancellationToken).ConfigureAwait(false)
+            ?? throw new ContactPublicationAuthorityRejectedException();
+        if (retained.Parsed.PublicationKind != 1 || !Fixed(retained.Parsed.DirectoryLookupKey.Span, lookup) ||
+            !Fixed(Deep.Protocol.ContactV2.DeepIdV2PublicationWinnerReadWireCodec.HashOriginalRequest(retained.Parsed), hash))
+            throw new ContactPublicationAuthorityRejectedException();
+        if (retained.Response is null) throw new ContactPublicationAuthorityUnavailableException();
+        _ = ContactPublicationAuthorityWireCodec.DecodeResponse(retained.Parsed, retained.Response);
+        await RequireGenerationAsync(connection, transaction, retained.Parsed, retained.Request, cancellationToken).ConfigureAwait(false);
+        _ = await RequirePredecessorAsync(connection, transaction, retained.Parsed, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested(); return (retained.Request.ToArray(), retained.Response.ToArray());
     }
 
     private static byte[] CopyRecoveryScope(ReadOnlyMemory<byte> value)

@@ -10,6 +10,17 @@ witness-coordination boundary, not a steady-state contact resolver or public
 mailbox-grant endpoint. Shipping clients still require XPoint/OHTTP coordination;
 no public direct HTTP fallback is activated by this candidate.
 
+[DR-0124](../../docs/survival-program/decisions/DR-0124-publication-winner-readback.md)
+adds an explicit private completed-winner reader under the existing publication
+activation/configuration. It reads the existing permanent journal under its
+network lock and independently verifies current owner/signature/time before
+release. It has no witness custody dependency, GetOrIssue call, schema change,
+reservation/counter update or repair. Missing/pending/corrupt winners reject.
+The client must verify original intent before adopting the existing phase6
+slot; a read response is not current mutation or replica-commit authority.
+Matched Protocol/client/gateway artifacts are required. The endpoint is not a
+public contact resolver, and an expired ordinary publication remains rejected.
+
 Private calling-node access follows
 [DR-0048](../../docs/survival-program/decisions/DR-0048-private-contact-coordination-peer-authentication.md).
 When enabling either coordination terminal, provision

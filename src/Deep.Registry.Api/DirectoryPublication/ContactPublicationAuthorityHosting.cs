@@ -68,6 +68,7 @@ internal static class ContactPublicationAuthorityHostingExtensions
         services.RemoveAll<IContactPublicationThresholdIssuer>();
         services.AddSingleton(ProductionContactPublicationThresholdIssuer.CreateFailClosed);
         services.TryAddSingleton(ProductionContactPublicationLeaseIssuer.CreateFailClosed);
+        services.TryAddSingleton(ProductionContactPublicationWinnerReader.CreateFailClosed);
         var options = configuration.GetSection("ContactPublicationAuthority")
             .Get<ContactPublicationAuthorityOptions>() ?? new();
         if (!options.Enabled) return default;
@@ -93,6 +94,7 @@ internal static class ContactPublicationAuthorityHostingExtensions
     {
         ArgumentNullException.ThrowIfNull(app);
         app.MapContactPublicationLeaseEndpoint(state);
+        app.MapContactPublicationWinnerReadEndpoint(state);
         app.MapPost(EndpointPath, (
                 HttpContext context,
                 IContactPublicationThresholdIssuer issuer,

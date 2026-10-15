@@ -121,6 +121,10 @@ public sealed class ContactRouteAuthorityHttpTests
     public Task PublicationLeaseTerminalRejectsUnauthenticatedOrSubstitutedNodeBeforeIssuer() =>
         RejectUnauthenticatedBeforeIssuerAsync(ContactCoordinationTarget.PublicationLease);
 
+    [Fact]
+    public Task PublicationWinnerReadRejectsUnauthenticatedOrSubstitutedNodeBeforeReader() =>
+        RejectUnauthenticatedBeforeIssuerAsync(ContactCoordinationTarget.PublicationWinnerRead);
+
     private async Task RejectUnauthenticatedBeforeIssuerAsync(ContactCoordinationTarget target)
     {
         var network = Bytes(16, 0x11);
@@ -129,11 +133,12 @@ public sealed class ContactRouteAuthorityHttpTests
         var access = PeerAuthenticationFixture.Access();
         var publication = target == ContactCoordinationTarget.Publication;
         var lease = target == ContactCoordinationTarget.PublicationLease;
-        var endpoint = lease ? DeepIdV2PublicationLeaseWireCodec.EndpointPath : publication ?
+        var winnerRead = target == ContactCoordinationTarget.PublicationWinnerRead;
+        var endpoint = winnerRead ? DeepIdV2PublicationWinnerReadWireCodec.EndpointPath : lease ? DeepIdV2PublicationLeaseWireCodec.EndpointPath : publication ?
             ContactPublicationAuthorityHostingExtensions.EndpointPath : ContactRouteAuthorityHostingExtensions.EndpointPath;
-        var media = lease ? DeepIdV2PublicationLeaseWireCodec.RequestMediaType : publication ?
+        var media = winnerRead ? DeepIdV2PublicationWinnerReadWireCodec.RequestMediaType : lease ? DeepIdV2PublicationLeaseWireCodec.RequestMediaType : publication ?
             ContactPublicationAuthorityWireCodec.RequestMediaType : ContactRouteAuthorityWireCodec.RequestMediaType;
-        var bytes = lease ? Bytes(DeepIdV2PublicationLeaseWireCodec.RequestBytes, 0x21) : publication ?
+        var bytes = winnerRead ? Bytes(DeepIdV2PublicationWinnerReadWireCodec.RequestBytes, 0x21) : lease ? Bytes(DeepIdV2PublicationLeaseWireCodec.RequestBytes, 0x21) : publication ?
             Bytes(ContactPublicationAuthorityWireCodec.MinimumRequestBytes, 0x21) :
                 ContactRouteAuthorityWireCodec.EncodeRequest(Request(network, artifacts.Xra));
         foreach (var mutation in new[] { "missing", "unknown", "duplicate", "upper", "expired", "future", "network", "target", "body", "nonce", "zero-signature" })
@@ -376,6 +381,7 @@ public sealed class ContactRouteAuthorityHttpTests
         builder.Services.AddSingleton<IContactPublicationThresholdIssuer, MustNotCallPublicationIssuer>();
         var leaseIssuer = new MustNotCallPublicationLeaseIssuer();
         builder.Services.AddSingleton<IContactPublicationLeaseIssuer>(leaseIssuer);
+        builder.Services.AddSingleton<IContactPublicationWinnerReader>(leaseIssuer);
         var app = builder.Build();
         app.MapContactRouteAuthorityEndpoint(state);
         app.MapContactPublicationAuthorityEndpoint(publicationState);
@@ -424,11 +430,13 @@ public sealed class ContactRouteAuthorityHttpTests
             throw new InvalidOperationException("Unauthenticated publication must never reach the issuer.");
     }
 
-    private sealed class MustNotCallPublicationLeaseIssuer : IContactPublicationLeaseIssuer
+    private sealed class MustNotCallPublicationLeaseIssuer : IContactPublicationLeaseIssuer, IContactPublicationWinnerReader
     {
         internal int Calls;
         public ValueTask<ParsedDeepIdV2PublicationLease> IssueAsync(PublicationLeaseWireRequest request, CancellationToken ct)
         { Calls++; throw new InvalidOperationException("Unauthenticated publication lease must never reach issuer."); }
+        public ValueTask<ReadOnlyMemory<byte>> ReadAsync(PublicationWinnerReadWireRequest request, CancellationToken ct)
+        { Calls++; throw new InvalidOperationException("Unauthenticated publication winner read must never reach reader."); }
     }
 
     private sealed class TestHost(WebApplication app, HttpClient client, MustNotCallPublicationLeaseIssuer leaseIssuer) : IAsyncDisposable
