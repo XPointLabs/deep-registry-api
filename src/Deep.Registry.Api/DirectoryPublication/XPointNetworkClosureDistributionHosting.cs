@@ -58,12 +58,16 @@ internal static class XPointNetworkClosureDistributionHosting
             return Results.StatusCode(StatusCodes.Status411LengthRequired);
         if (context.Request.ContentLength != XPointNetworkClosureWireCodec.RequestLength)
             return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
-        // One in-flight bounded file/frame, no queue and no per-caller cache.
-        if (!distribution.TryEnter()) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        // One active file/frame and one public admission waiter, independent
+        // of the single issuer waiter. Waiting consumes this same operation
+        // budget; it neither allocates a second frame nor starts a new lease.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        var ownsAdmission = false;
         try
         {
+            ownsAdmission = await distribution.TryEnterPublicAsync(timeout.Token);
+            if (!ownsAdmission) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
             var bytes = new byte[XPointNetworkClosureWireCodec.RequestLength];
             await context.Request.Body.ReadExactlyAsync(bytes, timeout.Token);
             var trailing = new byte[1];
@@ -88,7 +92,7 @@ internal static class XPointNetworkClosureDistributionHosting
         { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
         catch (IOException) when (!context.Response.HasStarted)
         { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
-        finally { distribution.Exit(); }
+        finally { if (ownsAdmission) distribution.Exit(); }
     }
 #endif
 }
@@ -100,6 +104,7 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
     private readonly string path;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly SemaphoreSlim issuerWaiter = new(1, 1);
+    private readonly SemaphoreSlim publicWaiter = new(1, 1);
 
     internal XPointNetworkClosureDistribution(XPointNetworkClosureDistributionOptions options)
     {
@@ -117,19 +122,27 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
 
     internal bool TryEnter() => gate.Wait(0);
     // Keep one active operation, but allow one private current-publication
-    // issuer to wait behind a public send/renewal. Anonymous distribution and
-    // background refresh remain non-queuing. Cancellation uses the caller's
+    // issuer to wait behind a public send/renewal. Background refresh remains
+    // non-queuing. Public requests have their own single admission waiter;
+    // additional anonymous requests still reject without buffering a frame.
+    // Cancellation uses the caller's
     // existing whole-operation deadline, not a fresh issuance budget.
     internal async ValueTask<bool> TryEnterCurrentIssuerAsync(CancellationToken ct)
+        => await TryEnterQueuedAsync(issuerWaiter, ct).ConfigureAwait(false);
+
+    internal async ValueTask<bool> TryEnterPublicAsync(CancellationToken ct)
+        => await TryEnterQueuedAsync(publicWaiter, ct).ConfigureAwait(false);
+
+    private async ValueTask<bool> TryEnterQueuedAsync(SemaphoreSlim waiter, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (!await issuerWaiter.WaitAsync(0, ct).ConfigureAwait(false)) return false;
+        if (!await waiter.WaitAsync(0, ct).ConfigureAwait(false)) return false;
         try
         {
             await gate.WaitAsync(ct).ConfigureAwait(false);
             return true;
         }
-        finally { issuerWaiter.Release(); }
+        finally { waiter.Release(); }
     }
     internal void Exit() => gate.Release();
     internal bool Matches(ReadOnlySpan<byte> value) =>
@@ -172,6 +185,6 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
         }
     }
 
-    public void Dispose() { gate.Dispose(); issuerWaiter.Dispose(); }
+    public void Dispose() { gate.Dispose(); issuerWaiter.Dispose(); publicWaiter.Dispose(); }
 }
 #endif

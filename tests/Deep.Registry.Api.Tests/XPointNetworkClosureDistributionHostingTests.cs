@@ -122,12 +122,20 @@ public sealed class XPointNetworkClosureDistributionHostingTests
         await using var fixture = await Fixture.CreateAsync();
         var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
         Assert.True(distribution.TryEnter());
+        using var cancelled = new CancellationTokenSource();
+        var waiting = distribution.TryEnterPublicAsync(cancelled.Token).AsTask();
+        Assert.False(waiting.IsCompleted);
         try
         {
             using var busy = await fixture.Client.PostAsync(XPointNetworkClosureDistributionHosting.EndpointPath, Request());
             Assert.Equal(HttpStatusCode.TooManyRequests, busy.StatusCode);
         }
-        finally { distribution.Exit(); }
+        finally
+        {
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+            distribution.Exit();
+        }
         using var available = await fixture.Client.PostAsync(XPointNetworkClosureDistributionHosting.EndpointPath, Request());
         Assert.Equal(HttpStatusCode.OK, available.StatusCode);
     }
@@ -201,6 +209,77 @@ public sealed class XPointNetworkClosureDistributionHostingTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             distribution.TryEnterCurrentIssuerAsync(cancelled.Token).AsTask());
         Assert.True(await distribution.TryEnterCurrentIssuerAsync(default));
+        Assert.False(distribution.TryEnter());
+        distribution.Exit();
+    }
+
+    [Fact]
+    public async Task PublicAdmissionWaitsForTheOriginalOwnerWithoutAllocatingAnotherFrame()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.True(distribution.TryEnter());
+        var ownsAdmission = true;
+        try
+        {
+            var waiting = distribution.TryEnterPublicAsync(deadline.Token).AsTask();
+            Assert.False(waiting.IsCompleted);
+            Assert.False(await distribution.TryEnterPublicAsync(deadline.Token));
+            Assert.False(distribution.TryEnter());
+            distribution.Exit(); ownsAdmission = false;
+            ownsAdmission = await waiting;
+            Assert.True(ownsAdmission);
+            Assert.False(distribution.TryEnter());
+            Assert.Equal(fixture.Frame, await distribution.ReadAsync(deadline.Token));
+        }
+        finally { if (ownsAdmission) distribution.Exit(); }
+        using var response = await fixture.Client.PostAsync(XPointNetworkClosureDistributionHosting.EndpointPath, Request());
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(fixture.Frame, await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task CancelledPublicWaiterCannotReleaseTheOwnerOrAnIndependentIssuerWaiter()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
+        using var cancelled = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.True(distribution.TryEnter());
+        var ownsAdmission = true;
+        try
+        {
+            var publicWaiting = distribution.TryEnterPublicAsync(cancelled.Token).AsTask();
+            var issuerWaiting = distribution.TryEnterCurrentIssuerAsync(deadline.Token).AsTask();
+            Assert.False(publicWaiting.IsCompleted);
+            Assert.False(issuerWaiting.IsCompleted);
+            Assert.False(await distribution.TryEnterPublicAsync(deadline.Token));
+            Assert.False(await distribution.TryEnterCurrentIssuerAsync(deadline.Token));
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => publicWaiting);
+            Assert.False(issuerWaiting.IsCompleted);
+            Assert.False(distribution.TryEnter());
+            distribution.Exit(); ownsAdmission = false;
+            ownsAdmission = await issuerWaiting;
+            Assert.True(ownsAdmission);
+            Assert.False(distribution.TryEnter());
+        }
+        finally { if (ownsAdmission) distribution.Exit(); }
+        Assert.True(await distribution.TryEnterPublicAsync(deadline.Token));
+        distribution.Exit();
+    }
+
+    [Fact]
+    public async Task AlreadyCancelledPublicRequestCannotAcquireOrLeakAnAvailablePermit()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            distribution.TryEnterPublicAsync(cancelled.Token).AsTask());
+        Assert.True(await distribution.TryEnterPublicAsync(default));
         Assert.False(distribution.TryEnter());
         distribution.Exit();
     }
