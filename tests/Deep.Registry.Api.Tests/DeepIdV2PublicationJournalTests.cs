@@ -41,17 +41,8 @@ public sealed class DeepIdV2PublicationJournalTests
             fixture.Sample += 120;
             var winner = await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hash, default);
             Assert.Equal(exactRequest, winner.Request.ToArray()); Assert.Equal(exactResponse, winner.Response.ToArray());
-            var coordinationHash = Deep.Protocol.ContactV2.DeepIdV2PublicationWinnerReadWireCodec.HashOriginalRequest(request);
-            var readback = await reopened.ReadCompletedCoordinationWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, coordinationHash, default);
-            Assert.Equal(exactRequest, readback.Request.ToArray()); Assert.Equal(exactResponse, readback.Response.ToArray());
             Assert.Equal(1, issueCalls);
             var wrong = Enumerable.Repeat((byte)0xab, 32).ToArray();
-            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
-                await reopened.ReadCompletedCoordinationWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, wrong, default));
-            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
-                await reopened.ReadCompletedCoordinationWinnerAsync(request.RequestNonce, wrong, coordinationHash, default));
-            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
-                await reopened.ReadCompletedCoordinationWinnerAsync(wrong, request.DirectoryLookupKey, coordinationHash, default));
             await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
                 await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, wrong, default));
             await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
@@ -62,14 +53,10 @@ public sealed class DeepIdV2PublicationJournalTests
             {
                 await Assert.ThrowsAsync<ArgumentException>(async () =>
                     await reopened.ReadCompletedWinnerAsync(hostile, request.DirectoryLookupKey, hash, default));
-                await Assert.ThrowsAsync<ArgumentException>(async () =>
-                    await reopened.ReadCompletedCoordinationWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hostile, default));
             }
             using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
                 await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hash, cancellation.Token));
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-                await reopened.ReadCompletedCoordinationWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, coordinationHash, cancellation.Token));
             Assert.Equal(1, issueCalls);
 
             using var pending = await DeepIdV2PublicationAuthorityFixture.CreateAsync(authorContactPublication: true,
@@ -80,9 +67,6 @@ public sealed class DeepIdV2PublicationJournalTests
             await Assert.ThrowsAsync<ContactPublicationAuthorityUnavailableException>(async () =>
                 await reopened.ReadCompletedWinnerAsync(pendingRequest.RequestNonce, pendingRequest.DirectoryLookupKey,
                     pending.ContactPublication.RequestHash, default));
-            await Assert.ThrowsAsync<ContactPublicationAuthorityUnavailableException>(async () =>
-                await reopened.ReadCompletedCoordinationWinnerAsync(pendingRequest.RequestNonce, pendingRequest.DirectoryLookupKey,
-                    Deep.Protocol.ContactV2.DeepIdV2PublicationWinnerReadWireCodec.HashOriginalRequest(pendingRequest), default));
             Assert.Equal(2, issueCalls);
             await using (var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network", db))
                 Assert.Equal(2L, await count.ExecuteScalarAsync());
@@ -95,8 +79,6 @@ public sealed class DeepIdV2PublicationJournalTests
             }
             await Assert.ThrowsAsync<InvalidDataException>(async () =>
                 await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hash, default));
-            await Assert.ThrowsAsync<InvalidDataException>(async () =>
-                await reopened.ReadCompletedCoordinationWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, coordinationHash, default));
             await using (var audit = new NpgsqlCommand(
                 "SELECT exact_request,exact_response,directory_lookup_key FROM deep_did2_publication_journal WHERE request_nonce=$1", db))
             {

@@ -67,8 +67,7 @@ internal static class ContactPublicationAuthorityHostingExtensions
         services.TryAddSingleton<ContactResolveIssuanceAdmissionGate>();
         services.RemoveAll<IContactPublicationThresholdIssuer>();
         services.AddSingleton(ProductionContactPublicationThresholdIssuer.CreateFailClosed);
-        services.TryAddSingleton(ProductionContactPublicationLeaseIssuer.CreateFailClosed);
-        services.TryAddSingleton(ProductionContactPublicationWinnerReader.CreateFailClosed);
+        services.TryAddSingleton(ProductionContactPublicationCurrentIssuer.CreateFailClosed);
         var options = configuration.GetSection("ContactPublicationAuthority")
             .Get<ContactPublicationAuthorityOptions>() ?? new();
         if (!options.Enabled) return default;
@@ -93,8 +92,7 @@ internal static class ContactPublicationAuthorityHostingExtensions
         ContactPublicationAuthorityHostingState state)
     {
         ArgumentNullException.ThrowIfNull(app);
-        app.MapContactPublicationLeaseEndpoint(state);
-        app.MapContactPublicationWinnerReadEndpoint(state);
+        app.MapContactPublicationCurrentEndpoint(state);
         app.MapPost(EndpointPath, (
                 HttpContext context,
                 IContactPublicationThresholdIssuer issuer,
@@ -151,6 +149,8 @@ internal static class ContactPublicationAuthorityHostingExtensions
             if (!ContactCoordinationPeerAuthentication.Verify(peer, state.NetworkId.Span, ContactCoordinationTarget.Publication, encoded, time.GetUtcNow()))
                 return Empty(context.Response, StatusCodes.Status401Unauthorized);
             var request = ContactPublicationAuthorityWireCodec.DecodeRequest(encoded);
+            if (request.PublicationKind != 2)
+                return Empty(context.Response, StatusCodes.Status400BadRequest);
             if (state.NetworkId.IsEmpty)
                 return Empty(context.Response, StatusCodes.Status503ServiceUnavailable);
             if (!CryptographicOperations.FixedTimeEquals(

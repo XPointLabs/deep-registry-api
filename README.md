@@ -5,6 +5,18 @@ transport metadata. XPoint stake/reward semantics and active node membership
 remain delegated to the staking contracts/backend; this service stores
 registration extension fields that are not part of the Deep-native protocol contracts.
 
+## Reusable publication current-submission candidate
+
+[DR-0125](../docs/survival-program/decisions/DR-0125-current-publication-submission.md)
+owns the closed private current-submission endpoint. Existing authenticated nodes
+forward the exact request; Registry independently verifies publisher, proof,
+current time and predecessor before using the original permanent journal key.
+Missing/pending requests complete once; completed winners are not approved again.
+Actual-current XPA and fresh XPL signing remain separate guarded operations.
+The retired separate lease/read endpoints are removed; raw publication issuance
+is one-time only. Deploy Protocol, Shared, Registry and XNode together, retaining
+journal/floors/registered keys. This source candidate is not runtime acceptance.
+
 ## Candidate image publication
 
 The private DID2 mailbox grant candidate follows

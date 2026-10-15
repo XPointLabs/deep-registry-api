@@ -22,6 +22,8 @@ internal sealed class ProductionContactPublicationThresholdIssuer(
         ContactPublicationAuthorityWireRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.PublicationKind != 2)
+            throw new ContactPublicationAuthorityRejectedException();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         var ct = timeout.Token;
@@ -57,29 +59,13 @@ internal sealed class ProductionContactPublicationThresholdIssuer(
             var dcr = DeepIdV2ResolverClosureCodec.Decode(request.ExactDcr1.Span);
             var route = await DeepIdV2ContactRouteVerifier.VerifyAsync(recipient, network, authority,
                 dcr.Bundle.Field(14).Slice(40), request.ExactRouteClosure, time, ct).ConfigureAwait(false);
-            VerifiedDeepIdV2PublicationIssuerPredecessor? predecessor = null;
-            if (request.Generation == 0)
-                await DeepIdV2PublicationAuthorityAuthor.VerifyRequestAsync(route, request, ct).ConfigureAwait(false);
-            else
-            {
-                var history = await journal.ReadCompletedPredecessorAsync(request, ct).ConfigureAwait(false);
-                var priorRequest = ContactPublicationAuthorityWireCodec.DecodeRequest(history.Request.Span);
-                var priorResponse = ContactPublicationAuthorityWireCodec.DecodeResponse(priorRequest, history.Response.Span);
-                predecessor = await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(recipient, network, authority,
-                    priorRequest, priorResponse.ExactXpu1, request.ExactPriorXpo1, time, ct).ConfigureAwait(false);
-                await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorRequestAsync(route, request, predecessor, ct).ConfigureAwait(false);
-            }
+            await DeepIdV2PublicationAuthorityAuthor.VerifyRequestAsync(route, request, ct).ConfigureAwait(false);
 
             var encoded = await journal.GetOrIssueAsync(request, async token =>
             {
-                if (predecessor is null)
-                    await DeepIdV2PublicationAuthorityAuthor.VerifyRequestAsync(route, request, token).ConfigureAwait(false);
-                else
-                    await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorRequestAsync(route, request, predecessor, token).ConfigureAwait(false);
+                await DeepIdV2PublicationAuthorityAuthor.VerifyRequestAsync(route, request, token).ConfigureAwait(false);
                 var signers = await custody.GetPublicationSignersAsync(authority, token).ConfigureAwait(false);
-                var candidate = predecessor is null
-                    ? await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdAsync(route, request, signers, token).ConfigureAwait(false)
-                    : await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(route, request, predecessor, signers, token).ConfigureAwait(false);
+                var candidate = await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdAsync(route, request, signers, token).ConfigureAwait(false);
                 await RequireSourcesCurrentAsync(freshness, frame, raw.ExactViewChain[^1], authority, token).ConfigureAwait(false);
                 return ContactPublicationAuthorityWireCodec.EncodeResponse(request,
                     new ContactPublicationAuthorityWireResponse(request.NetworkId.Span,
@@ -87,10 +73,7 @@ internal sealed class ProductionContactPublicationThresholdIssuer(
             }, ct).ConfigureAwait(false);
 
             var winner = ContactPublicationAuthorityWireCodec.DecodeResponse(request, encoded.Span);
-            if (predecessor is null)
-                _ = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request, winner.ExactXpu1, ct).ConfigureAwait(false);
-            else
-                _ = await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorResponseAsync(route, request, predecessor, winner.ExactXpu1, ct).ConfigureAwait(false);
+            _ = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request, winner.ExactXpu1, ct).ConfigureAwait(false);
             await RequireSourcesCurrentAsync(freshness, frame, raw.ExactViewChain[^1], authority, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             return winner;

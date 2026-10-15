@@ -1,17 +1,24 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Security.Cryptography;
 using Deep.Protocol.ContactV2;
+using Deep.Protocol.XPointNetworkV1;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Deep.Registry.Api.DirectoryPublication;
 
-internal static class ContactPublicationWinnerReadHosting
+internal interface IContactPublicationLeaseWitnessCustody
 {
-    internal static void MapContactPublicationWinnerReadEndpoint(this WebApplication app, ContactPublicationAuthorityHostingState state)
+    ValueTask<IReadOnlyList<IDeepIdV2PublicationLeaseWitnessSigner>> GetPublicationLeaseSignersAsync(
+        VerifiedXPointNetworkAuthority authority, CancellationToken ct);
+}
+
+internal static class ContactPublicationCurrentHosting
+{
+    internal static void MapContactPublicationCurrentEndpoint(this WebApplication app, ContactPublicationAuthorityHostingState state)
     {
-        app.MapPost(DeepIdV2PublicationWinnerReadWireCodec.EndpointPath,
+        app.MapPost(DeepIdV2PublicationCurrentWireCodec.EndpointPath,
             (HttpContext context, CancellationToken ct) => HandleAsync(context, state, ct))
-            .WithMetadata(new RequestSizeLimitAttribute(DeepIdV2PublicationWinnerReadWireCodec.RequestBytes));
+            .WithMetadata(new RequestSizeLimitAttribute(DeepIdV2PublicationCurrentWireCodec.MaximumRequestBytes));
     }
 
     private static async Task<IResult> HandleAsync(HttpContext context, ContactPublicationAuthorityHostingState state, CancellationToken cancellation)
@@ -19,10 +26,10 @@ internal static class ContactPublicationWinnerReadHosting
         context.Response.Headers.CacheControl = "no-store, private, max-age=0";
         context.Response.Headers.Pragma = "no-cache"; context.Response.Headers.Expires = "0";
         context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-        if (!context.Request.IsHttps || context.Request.Path != DeepIdV2PublicationWinnerReadWireCodec.EndpointPath || context.Request.QueryString.HasValue)
+        if (!context.Request.IsHttps || context.Request.Path != DeepIdV2PublicationCurrentWireCodec.EndpointPath || context.Request.QueryString.HasValue)
             return Empty(context, StatusCodes.Status400BadRequest);
-        var reader = context.RequestServices.GetService<IContactPublicationWinnerReader>();
-        if (state.NetworkId.IsEmpty || state.Access is null || reader is null) return Empty(context, StatusCodes.Status503ServiceUnavailable);
+        var issuer = context.RequestServices.GetService<IContactPublicationCurrentIssuer>();
+        if (state.NetworkId.IsEmpty || state.Access is null || issuer is null) return Empty(context, StatusCodes.Status503ServiceUnavailable);
         var time = context.RequestServices.GetRequiredService<TimeProvider>();
         var peer = state.Access.ReadAdmittedHeaders(context.Request, time.GetUtcNow());
         if (peer is null) return Empty(context, StatusCodes.Status401Unauthorized);
@@ -32,26 +39,26 @@ internal static class ContactPublicationWinnerReadHosting
             context.Response.Headers.RetryAfter = decision.RetryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return Empty(context, StatusCodes.Status429TooManyRequests);
         }
-        if (!string.Equals(context.Request.ContentType, DeepIdV2PublicationWinnerReadWireCodec.RequestMediaType, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(context.Request.ContentType, DeepIdV2PublicationCurrentWireCodec.RequestMediaType, StringComparison.OrdinalIgnoreCase))
             return Empty(context, StatusCodes.Status415UnsupportedMediaType);
         if (context.Request.ContentLength is null) return Empty(context, StatusCodes.Status411LengthRequired);
-        if (context.Request.ContentLength > DeepIdV2PublicationWinnerReadWireCodec.RequestBytes) return Empty(context, StatusCodes.Status413PayloadTooLarge);
-        if (context.Request.ContentLength != DeepIdV2PublicationWinnerReadWireCodec.RequestBytes) return Empty(context, StatusCodes.Status400BadRequest);
-        var encoded = new byte[DeepIdV2PublicationWinnerReadWireCodec.RequestBytes];
+        if (context.Request.ContentLength > DeepIdV2PublicationCurrentWireCodec.MaximumRequestBytes) return Empty(context, StatusCodes.Status413PayloadTooLarge);
+        if (context.Request.ContentLength < DeepIdV2PublicationCurrentWireCodec.MinimumRequestBytes) return Empty(context, StatusCodes.Status400BadRequest);
+        var encoded = new byte[checked((int)context.Request.ContentLength.Value)];
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation); deadline.CancelAfter(TimeSpan.FromSeconds(30));
         var ct = deadline.Token;
         try
         {
             await context.Request.Body.ReadExactlyAsync(encoded, ct).ConfigureAwait(false);
             if (await context.Request.Body.ReadAsync(new byte[1], ct).ConfigureAwait(false) != 0) return Empty(context, StatusCodes.Status400BadRequest);
-            if (!ContactCoordinationPeerAuthentication.Verify(peer, state.NetworkId.Span, ContactCoordinationTarget.PublicationWinnerRead, encoded, time.GetUtcNow()))
-                return Empty(context, StatusCodes.Status401Unauthorized);
-            var request = DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(encoded);
+            if (!ContactCoordinationPeerAuthentication.Verify(peer, state.NetworkId.Span, ContactCoordinationTarget.PublicationCurrent,
+                encoded, time.GetUtcNow())) return Empty(context, StatusCodes.Status401Unauthorized);
+            var request = DeepIdV2PublicationCurrentWireCodec.DecodeRequest(encoded);
             if (!CryptographicOperations.FixedTimeEquals(request.NetworkId.Span, state.NetworkId.Span)) return Empty(context, StatusCodes.Status404NotFound);
-            var original = await reader.ReadAsync(request, ct).ConfigureAwait(false);
-            var body = DeepIdV2PublicationWinnerReadWireCodec.EncodeResponse(request, original.Span);
+            var lease = await issuer.IssueAsync(request, ct).ConfigureAwait(false);
+            var body = DeepIdV2PublicationCurrentWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
             context.Response.ContentLength = body.Length;
-            return Results.Bytes(body, DeepIdV2PublicationWinnerReadWireCodec.ResponseMediaType, enableRangeProcessing: false);
+            return Results.Bytes(body, DeepIdV2PublicationCurrentWireCodec.ResponseMediaType, enableRangeProcessing: false);
         }
         catch (ContactPublicationAuthorityRejectedException) { return Empty(context, StatusCodes.Status404NotFound); }
         catch (ContactResolveDirectoryAdmissionException)

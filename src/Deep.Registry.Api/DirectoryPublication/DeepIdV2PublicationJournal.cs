@@ -8,9 +8,6 @@ namespace Deep.Registry.Api.DirectoryPublication;
 
 internal interface IDeepIdV2PublicationJournal
 {
-    ValueTask<(ReadOnlyMemory<byte> Request, ReadOnlyMemory<byte> Response)> ReadCompletedCoordinationWinnerAsync(
-        ReadOnlyMemory<byte> originalNonce, ReadOnlyMemory<byte> directoryLookupKey,
-        ReadOnlyMemory<byte> originalCoordinationRequestHash, CancellationToken cancellationToken);
     ValueTask<(ReadOnlyMemory<byte> Request, ReadOnlyMemory<byte> Response)> ReadCompletedWinnerAsync(
         ReadOnlyMemory<byte> originalNonce, ReadOnlyMemory<byte> directoryLookupKey,
         ReadOnlyMemory<byte> originalRequestHash, CancellationToken cancellationToken);
@@ -19,9 +16,6 @@ internal interface IDeepIdV2PublicationJournal
     ValueTask<ReadOnlyMemory<byte>> GetOrIssueAsync(ContactPublicationAuthorityWireRequest request,
         Func<CancellationToken, ValueTask<byte[]>> issue, CancellationToken cancellationToken);
 }
-
-// Diagnostic-only closed values. These are not noncommit/fence-settlement facts.
-internal enum PublicationWinnerLookupFailure { Missing, Kind, Directory, Digest }
 
 /// <summary>Permanent exact winners in the independent restore-authority DB.
 /// No schema creation, empty-root initialization, deletion or expiring rows.</summary>
@@ -82,39 +76,6 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         return (retained.Request.ToArray(), retained.Response.ToArray());
-    }
-
-    public async ValueTask<(ReadOnlyMemory<byte> Request, ReadOnlyMemory<byte> Response)> ReadCompletedCoordinationWinnerAsync(
-        ReadOnlyMemory<byte> originalNonce, ReadOnlyMemory<byte> directoryLookupKey,
-        ReadOnlyMemory<byte> originalCoordinationRequestHash, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var nonce = CopyRecoveryScope(originalNonce); var lookup = CopyRecoveryScope(directoryLookupKey);
-        var hash = CopyRecoveryScope(originalCoordinationRequestHash);
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        _ = await LockNetworkAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
-        var retained = await ReadAsync(connection, transaction, nonce, cancellationToken).ConfigureAwait(false)
-            ?? throw RejectWinnerLookup(PublicationWinnerLookupFailure.Missing);
-        if (retained.Parsed.PublicationKind != 1)
-            throw RejectWinnerLookup(PublicationWinnerLookupFailure.Kind);
-        if (!Fixed(retained.Parsed.DirectoryLookupKey.Span, lookup))
-            throw RejectWinnerLookup(PublicationWinnerLookupFailure.Directory);
-        if (!Fixed(Deep.Protocol.ContactV2.DeepIdV2PublicationWinnerReadWireCodec.HashOriginalRequest(retained.Parsed), hash))
-            throw RejectWinnerLookup(PublicationWinnerLookupFailure.Digest);
-        if (retained.Response is null) throw new ContactPublicationAuthorityUnavailableException();
-        _ = ContactPublicationAuthorityWireCodec.DecodeResponse(retained.Parsed, retained.Response);
-        await RequireGenerationAsync(connection, transaction, retained.Parsed, retained.Request, cancellationToken).ConfigureAwait(false);
-        _ = await RequirePredecessorAsync(connection, transaction, retained.Parsed, cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested(); return (retained.Request.ToArray(), retained.Response.ToArray());
-    }
-
-    private static ContactPublicationAuthorityRejectedException RejectWinnerLookup(PublicationWinnerLookupFailure reason)
-    {
-        var rejected = new ContactPublicationAuthorityRejectedException();
-        rejected.Data[typeof(PublicationWinnerLookupFailure)] = reason;
-        return rejected;
     }
 
     private static byte[] CopyRecoveryScope(ReadOnlyMemory<byte> value)

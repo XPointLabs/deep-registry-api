@@ -39,12 +39,24 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     public Task PublicationLeasePrivateHttpReconcilesExactExpiredPhase6WithoutReservingAgain() =>
         ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, publicationLease: true);
 
-    [Fact]
-    public Task PublicationWinnerReadPrivateHttpRecoversExpiredPhase5WithoutIssuingAgain() =>
-        ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, winnerRead: true);
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public Task PublicationCurrentPrivateHttpRecoversExpiredPhase5WithOnePermanentWinner(int outcome) =>
+        ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, publicationRecovery: true, publicationOutcome: outcome);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public Task PublicationCurrentConcurrentIssuersKeepOneOriginalWinnerAndApproval(int outcome) =>
+        ExerciseRegistryCeremonyAsync(0, mailboxLifecycle: false, publicationRecovery: true,
+            publicationOutcome: outcome, concurrentPublication: true);
 
     private async Task ExerciseRegistryCeremonyAsync(int crashMode, bool mailboxLifecycle, bool socketControl = false,
-        bool grantExchange = false, bool retainedExchange = false, bool publicationLease = false, bool winnerRead = false)
+        bool grantExchange = false, bool retainedExchange = false, bool publicationLease = false,
+        bool publicationRecovery = false, int publicationOutcome = 2, bool concurrentPublication = false)
     {
         // Real signatures/native verifier/SQLCipher/PostgreSQL; TestServer HTTP
         // and manually advanced test time, NOT physical devices or socket TLS.
@@ -173,12 +185,10 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
             builder.Services.AddSingleton<IContactRouteThresholdIssuer>(issuer);
             builder.Services.AddSingleton<IContactPublicationThresholdIssuer>(publicationIssuer);
-            builder.Services.AddSingleton<IContactPublicationLeaseIssuer>(new ProductionContactPublicationLeaseIssuer(
-                proofs, rootSource, distribution, custody, clock, publicationJournal));
-            var winnerReadLog = new WinnerReadLogger();
-            var winnerReader = new ProductionContactPublicationWinnerReader(
-                proofs, rootSource, distribution, clock, publicationJournal, winnerReadLog);
-            builder.Services.AddSingleton<IContactPublicationWinnerReader>(winnerReader);
+            var currentLog = new PublicationCurrentLogger();
+            var currentIssuer = new ProductionContactPublicationCurrentIssuer(
+                proofs, rootSource, distribution, countedPublication, custody, clock, publicationJournal, currentLog);
+            builder.Services.AddSingleton<IContactPublicationCurrentIssuer>(currentIssuer);
             var admissionTime = new AdmissionClock();
             builder.Services.AddSingleton<TimeProvider>(admissionTime);
             builder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
@@ -283,41 +293,65 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             await using (var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_route_journal_network WHERE network_id=$1", db))
             { count.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await count.ExecuteScalarAsync()); }
             var publicationExchange = new PublicationHttpExchange(client, admissionTime) { LoseFirstResponse = true };
+            if (publicationRecovery && publicationOutcome < 2)
+                publicationExchange.BeforeSend = async request =>
+                {
+                    if (publicationOutcome == 1)
+                        await publicationJournal.GetOrIssueAsync(request.OriginalRequest,
+                            _ => throw new IOException("Injected failure after permanent reservation."), default);
+                    throw new IOException("Injected failure before issuer submission.");
+                };
             await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactPublicationAsync(Bytes(32, 0xd1), source,
                 new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange));
-            Assert.NotNull(publicationExchange.Request); Assert.NotNull(publicationExchange.Response);
+            Assert.NotNull(publicationExchange.Request);
             var firstPublicationRequest = ContactPublicationAuthorityWireCodec.EncodeRequest(publicationExchange.Request!);
-            if (winnerRead)
+            if (publicationRecovery)
             {
-                var original = Xpu1Codec.Decode(ContactPublicationAuthorityWireCodec.DecodeResponse(
-                    publicationExchange.Request!, publicationExchange.Response!).ExactXpu1.Span);
-                var advance = checked(original.ExpiresAtUnixSeconds + 6 - clock.UnixTime);
+                var advance = checked(publicationExchange.Request!.ExpiresAtUnixSeconds + 6 - clock.UnixTime);
                 clock.UnixTime += advance; clock.Sample += advance;
                 admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
-                var replicas = new LeasedPublicationReplica(route, nodes, original.CanonicalBytes);
+                publicationExchange.BeforeSend = null; publicationExchange.LoseFirstResponse = false;
+                if (concurrentPublication)
+                    publicationExchange.BeforeSend = async freshRequest =>
+                    {
+                        publicationExchange.BeforeSend = null;
+                        // Independent issuer admission gates and real database
+                        // connections race the same signed retry. Never relax
+                        // a process gate to manufacture parallel availability.
+                        using var firstDistribution = new XPointNetworkClosureDistribution(new()
+                            { NetworkIdHex = Convert.ToHexString(network), BundlePath = bundlePath });
+                        using var secondDistribution = new XPointNetworkClosureDistribution(new()
+                            { NetworkIdHex = Convert.ToHexString(network), BundlePath = bundlePath });
+                        using var secondJournal = new DeepIdV2PostgreSqlPublicationJournal(scoped, network);
+                        var firstIssuer = new ProductionContactPublicationCurrentIssuer(proofs, rootSource, firstDistribution,
+                            countedPublication, custody, clock, publicationJournal);
+                        var secondIssuer = new ProductionContactPublicationCurrentIssuer(proofs, rootSource, secondDistribution,
+                            countedPublication, custody, clock, secondJournal);
+                        var winners = await Task.WhenAll(firstIssuer.IssueAsync(freshRequest, default).AsTask(),
+                            secondIssuer.IssueAsync(freshRequest, default).AsTask());
+                        Assert.Equal(winners[0].OriginalRequest.CanonicalBytes.ToArray(), winners[1].OriginalRequest.CanonicalBytes.ToArray());
+                        Assert.Equal(firstPublicationRequest, ContactPublicationAuthorityWireCodec.EncodeRequest(freshRequest.OriginalRequest));
+                        Assert.Equal(1, countedPublication.Calls);
+                    };
+                var replicas = new LeasedPublicationReplica(route, nodes, ReadOnlyMemory<byte>.Empty);
                 await Assert.ThrowsAsync<IOException>(() => accounts.EnsureOwnContactPublicationCommitAsync(Bytes(32, 0xd1), source,
                     new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange, replicas));
                 admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
                 var adopted = await accounts.EnsureOwnContactPublicationCommitAsync(Bytes(32, 0xd1), source,
                     new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange, replicas);
+                var original = Xpu1Codec.Decode(ContactPublicationAuthorityWireCodec.DecodeResponse(
+                    publicationExchange.Request!, publicationExchange.Response!).ExactXpu1.Span);
                 Assert.Equal(original.RequestHash.ToArray(), adopted.RequestHash.ToArray());
                 Assert.Equal(firstPublicationRequest, ContactPublicationAuthorityWireCodec.EncodeRequest(publicationExchange.Request!));
-                Assert.Equal(1, publicationExchange.WinnerReads); Assert.Equal(1, publicationExchange.Calls);
-                Assert.Equal(2, publicationExchange.LeaseCalls); Assert.Equal(1, countedPublication.Calls);
-                Assert.Empty(winnerReadLog.Entries);
-                // A foreign original nonce cannot become recovery authority.
-                // Repeated failures use one fixed, rate-bounded diagnostic bucket;
-                // neither the request nor exception is passed to the logger.
-                var foreign = publicationExchange.WinnerReadRequest!.CanonicalBytes.ToArray();
-                foreign[56] ^= 1;
-                var foreignRead = DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(foreign);
-                for (var retry = 0; retry < 2; retry++)
-                    await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
-                        await winnerReader.ReadAsync(foreignRead, default));
-                var diagnostic = Assert.Single(winnerReadLog.Entries);
-                Assert.Equal("Publication winner read rejected: phase=Winner, category=winner-missing.", diagnostic.Text);
-                Assert.Null(diagnostic.Error);
-                Assert.Equal(1, countedPublication.Calls);
+                Assert.Equal(3, publicationExchange.Calls); Assert.Equal(1, countedPublication.Calls);
+                Assert.Empty(currentLog.Entries);
+                if (publicationOutcome < 2)
+                    Assert.True(ReadPublicationApprovalIssued(original.ExactXpa1.Span) > original.ExpiresAtUnixSeconds);
+                var beforeReplay = publicationExchange.Calls;
+                var replayed = await accounts.EnsureOwnContactPublicationCommitAsync(Bytes(32, 0xd1), source,
+                    new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange, replicas);
+                Assert.Equal(adopted.RequestHash.ToArray(), replayed.RequestHash.ToArray());
+                Assert.Equal(beforeReplay, publicationExchange.Calls);
                 await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id=$1", db);
                 count.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await count.ExecuteScalarAsync());
                 return;
@@ -334,15 +368,16 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange);
             Assert.Equal(firstPublicationRequest, ContactPublicationAuthorityWireCodec.EncodeRequest(publicationExchange.Request!));
             var publicationWire = ContactPublicationAuthorityWireCodec.DecodeResponse(publicationExchange.Request!, publicationExchange.Response!);
-            Assert.Equal(publicationWire.ExactXpu1.ToArray(), publication.ExactXpu1.ToArray());
+            Assert.Equal(publicationWire.ExactXpu1.ToArray(), publication.ExactOriginalXpu1.ToArray());
             Assert.Equal(3, publicationExchange.Calls);
-            // Protected phase 6 returns exact verified winner without HTTP.
+            // Uncommitted phase6 needs another current submission, not a raw-XPU capability.
+            admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
             var protectedReplay = await accounts.EnsureOwnContactPublicationAsync(Bytes(32, 0xd1), source,
                 new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange);
-            Assert.Equal(publication.ExactXpu1.ToArray(), protectedReplay.ExactXpu1.ToArray()); Assert.Equal(3, publicationExchange.Calls);
+            Assert.Equal(publication.ExactOriginalXpu1.ToArray(), protectedReplay.ExactOriginalXpu1.ToArray()); Assert.Equal(4, publicationExchange.Calls);
             if (publicationLease)
             {
-                var original = Xpu1Codec.Decode(publication.ExactXpu1.Span);
+                var original = Xpu1Codec.Decode(publication.ExactOriginalXpu1.Span);
                 var advance = checked(original.ExpiresAtUnixSeconds + 6 - clock.UnixTime);
                 clock.UnixTime += advance; clock.Sample += advance;
                 admissionTime.Advance(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds));
@@ -353,18 +388,22 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 var adopted = await accounts.EnsureOwnContactPublicationCommitAsync(Bytes(32, 0xd1), source,
                     new(100, 2, Bytes(32, 0xd2)), exchange, "Real route QA", publicationExchange, replicas);
                 Assert.Equal(original.RequestHash.ToArray(), adopted.RequestHash.ToArray());
-                Assert.Equal(2, replicas.Calls); Assert.Equal(2, publicationExchange.LeaseCalls);
-                Assert.Equal(3, publicationExchange.Calls); Assert.Equal(1, countedPublication.Calls);
+                Assert.Equal(2, replicas.Calls);
+                Assert.Equal(6, publicationExchange.Calls); Assert.Equal(1, countedPublication.Calls);
                 await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id=$1", db);
                 count.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await count.ExecuteScalarAsync());
                 return;
             }
-            var publicationRestart = new ProductionContactPublicationThresholdIssuer(proofs, rootSource, distribution, custody, clock, publicationJournal);
-            var publicationReplay = await publicationRestart.IssueAsync(publicationExchange.Request!, default);
-            Assert.Equal(publicationExchange.Response, ContactPublicationAuthorityWireCodec.EncodeResponse(publicationExchange.Request!, publicationReplay));
+            var publicationRestart = new ProductionContactPublicationCurrentIssuer(proofs, rootSource, distribution, custody, custody, clock, publicationJournal);
+            var publicationReplay = await publicationRestart.IssueAsync(publicationExchange.CurrentRequest!, default);
+            Assert.Equal(publication.ExactOriginalXpu1.ToArray(), publicationReplay.OriginalRequest.CanonicalBytes.ToArray());
+            // The old raw reusable target is no longer an issuance path.
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
+                await publicationIssuer.IssueAsync(publicationExchange.Request!, default));
             var substituted = firstPublicationRequest.ToArray(); substituted[24] ^= 1;
+            var substitutedCurrent = publicationExchange.CurrentRequest!.CanonicalBytes.ToArray(); substitutedCurrent[^1] ^= 1;
             await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await publicationRestart.IssueAsync(
-                ContactPublicationAuthorityWireCodec.DecodeRequest(substituted), default));
+                DeepIdV2PublicationCurrentWireCodec.DecodeRequest(substitutedCurrent), default));
             await using (var pending = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id = $1", db))
             { pending.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await pending.ExecuteScalarAsync()); }
             var downgraded = firstPublicationRequest.ToArray(); downgraded[1] = 1;
@@ -533,7 +572,13 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 "Real publication successor QA", resolverCapability);
             var shortPublication = await DeepIdV2PublicationAuthorityAuthor.AuthorGenesisRequestAsync(shortRoute, shortObject,
                 device!, Bytes(32, 0x81), Bytes(32, 0x82), Bytes(32, 0x83));
-            var shortPublicationResponse = await publicationIssuer.IssueAsync(shortPublication.WireRequest, default);
+            var shortCurrent = await DeepIdV2PublicationCurrentAuthor.AuthorOwnedRequestAsync(shortRoute, shortObject,
+                shortPublication.WireRequest, device!);
+            var shortLease = await currentIssuer.IssueAsync(shortCurrent, default);
+            _ = await DeepIdV2PublicationCurrentAuthor.VerifyOwnedResponseAsync(shortRoute, shortObject, shortPublication.WireRequest,
+                shortCurrent, DeepIdV2PublicationCurrentWireCodec.EncodeResponse(shortCurrent, shortLease.CanonicalBytes.Span));
+            var shortPublicationResponse = new ContactPublicationAuthorityWireResponse(network, shortPublication.WireRequest.RequestNonce.Span,
+                shortLease.OriginalRequest.CanonicalBytes.Span);
             var shortXpo = PublicationResult(shortRoute, shortPublicationResponse.ExactXpu1, nodes);
             _ = await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(shortRoute, shortObject,
                 shortPublication.WireRequest, shortPublicationResponse.ExactXpu1, shortXpo);
@@ -657,7 +702,8 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             badReceipt[receiptOffset + 8 + 192] ^= 1;
             var forgedPublication = SignPublicationCopy(successorPublication.WireRequest, device!, recipient,
                 Bytes(32, 0x86), badReceipt);
-            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await publicationIssuer.IssueAsync(forgedPublication, default));
+            var forgedCurrent = await DeepIdV2PublicationCurrentAuthor.AuthorOwnedRequestAsync(successorRoute, successorObject, forgedPublication, device!);
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await currentIssuer.IssueAsync(forgedCurrent, default));
             Assert.Equal(publicationCalls, countedPublication.Calls);
             await using (var missing = new NpgsqlCommand("SELECT count(*) FROM deep_did2_publication_journal WHERE request_nonce=$1", db))
             { missing.Parameters.Add(new() { Value = forgedPublication.RequestNonce.ToArray() }); Assert.Equal(0L, await missing.ExecuteScalarAsync()); }
@@ -665,26 +711,33 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             await Assert.ThrowsAsync<IOException>(async () => await publicationJournal.GetOrIssueAsync(successorPublication.WireRequest,
                 _ => throw new IOException("Lose signing attempt after durable generation reservation."), default));
             var pendingCompetitor = SignPublicationCopy(successorPublication.WireRequest, device!, recipient, Bytes(32, 0x88));
-            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await publicationIssuer.IssueAsync(pendingCompetitor, default));
+            var pendingCurrent = await DeepIdV2PublicationCurrentAuthor.AuthorOwnedRequestAsync(successorRoute, successorObject, pendingCompetitor, device!);
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await currentIssuer.IssueAsync(pendingCurrent, default));
             Assert.Equal(publicationCalls, countedPublication.Calls);
             var publicationSuccessorExchange = new PublicationHttpExchange(client, admissionTime) { LoseFirstResponse = true };
-            await Assert.ThrowsAsync<IOException>(async () => await publicationSuccessorExchange.FetchAsync(successorPublication.WireRequest, null!, default));
-            var publicationWinner = await publicationSuccessorExchange.FetchAsync(successorPublication.WireRequest, null!, default);
+            var successorCurrent = await DeepIdV2PublicationCurrentAuthor.AuthorOwnedRequestAsync(successorRoute, successorObject,
+                successorPublication.WireRequest, device!);
+            await Assert.ThrowsAsync<IOException>(async () => await publicationSuccessorExchange.SendCurrentAsync(successorCurrent, default));
+            var currentWinner = await publicationSuccessorExchange.SendCurrentAsync(successorCurrent, default);
+            var successorLease = DeepIdV2PublicationCurrentWireCodec.DecodeResponse(successorCurrent, currentWinner.Span);
+            _ = await DeepIdV2PublicationCurrentAuthor.VerifyOwnedResponseAsync(successorRoute, successorObject,
+                successorPublication.WireRequest, successorCurrent, currentWinner);
+            var publicationWinner = (ReadOnlyMemory<byte>)publicationSuccessorExchange.Response!;
             Assert.Equal(ContactPublicationAuthorityWireCodec.EncodeRequest(successorPublication.WireRequest),
                 ContactPublicationAuthorityWireCodec.EncodeRequest(publicationSuccessorExchange.Request!));
             var successorPublicationResponse = ContactPublicationAuthorityWireCodec.DecodeResponse(successorPublication.WireRequest, publicationWinner.Span);
-            _ = await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorResponseAsync(successorRoute, successorPublication.WireRequest,
-                priorPublication, successorPublicationResponse.ExactXpu1);
+            Assert.Equal(successorLease.OriginalRequest.CanonicalBytes.ToArray(), successorPublicationResponse.ExactXpu1.ToArray());
             Assert.Equal(publicationCalls + 1, countedPublication.Calls);
             var competingPublication = SignPublicationCopy(successorPublication.WireRequest, device!, recipient, Bytes(32, 0x87));
-            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await publicationIssuer.IssueAsync(competingPublication, default));
+            var competingCurrent = await DeepIdV2PublicationCurrentAuthor.AuthorOwnedRequestAsync(successorRoute, successorObject, competingPublication, device!);
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await currentIssuer.IssueAsync(competingCurrent, default));
             Assert.Equal(publicationCalls + 1, countedPublication.Calls);
             using (var publicationJournalRestart = new DeepIdV2PostgreSqlPublicationJournal(scoped, network))
             {
-                var neverPublication = new ProductionContactPublicationThresholdIssuer(proofs, rootSource, distribution,
-                    new NeverSignPublicationCustody(), clock, publicationJournalRestart);
-                Assert.Equal(publicationWinner.ToArray(), ContactPublicationAuthorityWireCodec.EncodeResponse(successorPublication.WireRequest,
-                    await neverPublication.IssueAsync(successorPublication.WireRequest, default)));
+                var neverPublication = new ProductionContactPublicationCurrentIssuer(proofs, rootSource, distribution,
+                    new NeverSignPublicationCustody(), custody, clock, publicationJournalRestart);
+                var replayLease = await neverPublication.IssueAsync(successorCurrent, default);
+                Assert.Equal(successorPublicationResponse.ExactXpu1.ToArray(), replayLease.OriginalRequest.CanonicalBytes.ToArray());
                 var history = await publicationJournalRestart.ReadCompletedPredecessorAsync(successorPublication.WireRequest, default);
                 Assert.Equal(ContactPublicationAuthorityWireCodec.EncodeRequest(shortPublication.WireRequest), history.Request.ToArray());
                 Assert.Equal(ContactPublicationAuthorityWireCodec.EncodeResponse(shortPublication.WireRequest, shortPublicationResponse), history.Response.ToArray());
@@ -703,7 +756,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
 
             clock.UnixTime = 1_600; clock.Sample = 600;
             await Assert.ThrowsAnyAsync<CryptographicException>(async () => await restarted.IssueAsync(exchange.Request!, default));
-            await Assert.ThrowsAnyAsync<CryptographicException>(async () => await publicationRestart.IssueAsync(publicationExchange.Request!, default));
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () => await publicationRestart.IssueAsync(publicationExchange.CurrentRequest!, default));
 
             static ParsedDeepIdV2RouteThreshold Threshold(ContactRouteAuthorityWireResponse response) =>
                 new(response.ExactPms2.Span, response.ExactXrc1.Span, response.ExactXss1.Span);
@@ -744,6 +797,17 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             return result;
         }
     }
+    private static ulong ReadPublicationApprovalIssued(ReadOnlySpan<byte> approval)
+    {
+        for (var offset = 12; offset < approval.Length;)
+        {
+            var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(approval[(offset + 4)..]));
+            if (BinaryPrimitives.ReadUInt16BigEndian(approval[offset..]) == 15)
+            { Assert.Equal(8, length); return BinaryPrimitives.ReadUInt64BigEndian(approval[(offset + 8)..]); }
+            offset = checked(offset + 8 + length);
+        }
+        throw new InvalidDataException("Actual XPA approval timestamp is missing.");
+    }
     private sealed class RateLimitedTestException : IOException;
     private sealed class AdmissionClock : TimeProvider
     {
@@ -753,40 +817,36 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     }
     private sealed class PublicationHttpExchange(HttpClient client, TimeProvider admissionTime) : IDid2ContactPublicationSource
     {
-        internal int WinnerReads;
-        internal PublicationWinnerReadWireRequest? WinnerReadRequest;
-        public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
+        internal PublicationCurrentWireRequest? CurrentRequest;
+        internal Func<PublicationCurrentWireRequest, Task>? BeforeSend;
+        public async ValueTask<ReadOnlyMemory<byte>> AcquireCurrentAsync(PublicationCurrentWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            operation.RequireActive(); WinnerReads++; WinnerReadRequest = request;
-            var exact = request.CanonicalBytes.ToArray();
-            using var body = new ByteArrayContent(exact);
-            body.Headers.ContentType = MediaTypeHeaderValue.Parse(DeepIdV2PublicationWinnerReadWireCodec.RequestMediaType);
-            using var message = new HttpRequestMessage(HttpMethod.Post, DeepIdV2PublicationWinnerReadWireCodec.EndpointPath) { Content = body };
-            PeerAuthenticationFixture.Authenticate(message, request.NetworkId.ToArray(), ContactCoordinationTarget.PublicationWinnerRead,
-                exact, admissionTime.GetUtcNow().ToUnixTimeMilliseconds());
-            using var response = await client.SendAsync(message, ct);
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.Equal(DeepIdV2PublicationWinnerReadWireCodec.ResponseMediaType, response.Content.Headers.ContentType?.ToString());
-            var returned = await response.Content.ReadAsByteArrayAsync(ct);
-            _ = DeepIdV2PublicationWinnerReadWireCodec.DecodeResponse(request, returned); return returned;
+            operation.RequireActive(); return await SendCurrentAsync(request, ct);
         }
-        internal int LeaseCalls;
-        public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
-            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        internal async ValueTask<ReadOnlyMemory<byte>> SendCurrentAsync(PublicationCurrentWireRequest request, CancellationToken ct)
         {
-            operation.RequireActive(); LeaseCalls++;
+            Calls++; CurrentRequest = request; Request = request.OriginalRequest;
+            if (BeforeSend is not null) await BeforeSend(request);
             var exact = request.CanonicalBytes.ToArray();
             using var body = new ByteArrayContent(exact);
-            body.Headers.ContentType = MediaTypeHeaderValue.Parse(DeepIdV2PublicationLeaseWireCodec.RequestMediaType);
-            using var message = new HttpRequestMessage(HttpMethod.Post, DeepIdV2PublicationLeaseWireCodec.EndpointPath) { Content = body };
-            PeerAuthenticationFixture.Authenticate(message, request.NetworkId.ToArray(), ContactCoordinationTarget.PublicationLease,
+            body.Headers.ContentType = MediaTypeHeaderValue.Parse(DeepIdV2PublicationCurrentWireCodec.RequestMediaType);
+            using var message = new HttpRequestMessage(HttpMethod.Post, DeepIdV2PublicationCurrentWireCodec.EndpointPath) { Content = body };
+            PeerAuthenticationFixture.Authenticate(message, request.NetworkId.ToArray(), ContactCoordinationTarget.PublicationCurrent,
                 exact, admissionTime.GetUtcNow().ToUnixTimeMilliseconds());
             using var response = await client.SendAsync(message, ct);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                Assert.Equal(TimeSpan.FromSeconds(ContactResolveIssuanceAdmissionGate.WindowSeconds), response.Headers.RetryAfter?.Delta);
+                Assert.Empty(await response.Content.ReadAsByteArrayAsync(ct)); throw new RateLimitedTestException();
+            }
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.Equal(DeepIdV2PublicationLeaseWireCodec.ResponseMediaType, response.Content.Headers.ContentType?.ToString());
+            Assert.Equal(DeepIdV2PublicationCurrentWireCodec.ResponseMediaType, response.Content.Headers.ContentType?.ToString());
             var returned = await response.Content.ReadAsByteArrayAsync(ct);
-            _ = DeepIdV2PublicationLeaseWireCodec.DecodeResponse(request, returned);
+            var lease = DeepIdV2PublicationCurrentWireCodec.DecodeResponse(request, returned);
+            Response = ContactPublicationAuthorityWireCodec.EncodeResponse(Request,
+                new(request.NetworkId.Span, Request.RequestNonce.Span, lease.OriginalRequest.CanonicalBytes.Span));
+            if (LoseFirstResponse) { LoseFirstResponse = false; throw new IOException("Deliberate committed response loss."); }
             return returned;
         }
         internal ContactPublicationAuthorityWireRequest? Request; internal byte[]? Response;
@@ -814,7 +874,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         }
     }
 
-    private sealed class WinnerReadLogger : ILogger<ProductionContactPublicationWinnerReader>
+    private sealed class PublicationCurrentLogger : ILogger<ProductionContactPublicationCurrentIssuer>
     {
         internal List<(string Text, Exception? Error)> Entries { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
@@ -829,16 +889,19 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     {
         internal int Calls;
         private byte[]? firstLease;
+        private byte[]? firstOriginal;
         public Task<ReadOnlyMemory<byte>> PublishAsync(ReadOnlyMemory<byte> exact,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested(); operation.RequireActive(); Calls++;
             var lease = DeepIdV2PublicationLeaseCodec.Decode(exact.Span);
-            Assert.Equal(original.ToArray(), lease.OriginalRequest.CanonicalBytes.ToArray());
+            if (!original.IsEmpty) Assert.Equal(original.ToArray(), lease.OriginalRequest.CanonicalBytes.ToArray());
+            firstOriginal ??= lease.OriginalRequest.CanonicalBytes.ToArray();
+            Assert.Equal(firstOriginal, lease.OriginalRequest.CanonicalBytes.ToArray());
             Assert.True(lease.IssuedAtUnixSeconds > lease.OriginalRequest.ExpiresAtUnixSeconds);
             if (firstLease is null) { firstLease = exact.ToArray(); throw new IOException("Lost leased publication response."); }
             Assert.NotEqual(firstLease, exact.ToArray());
-            return Task.FromResult<ReadOnlyMemory<byte>>(PublicationResult(route, original, nodes));
+            return Task.FromResult<ReadOnlyMemory<byte>>(PublicationResult(route, lease.OriginalRequest.CanonicalBytes, nodes));
         }
     }
 
