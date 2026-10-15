@@ -76,7 +76,7 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                 var issued = current.TrustedLowerUnixSeconds;
                 var expires = new[] { checked(issued + 86_400),
                     BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span),
-                    network.MaximumRecordExpiryUnixSeconds,
+                    authority.ExpiresAt,
                     current.Authorization.Record.ExpiresAtUnixSeconds }.Min();
                 var signers = await custody.GetRouteSignersAsync(authority, token).ConfigureAwait(false);
                 var candidate = predecessor is null ? await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(current,
