@@ -66,23 +66,34 @@ public sealed class ContactRouteAuthorityHttpTests
     [InlineData(false)]
     [InlineData(true)]
     public async Task BothTerminalsRejectUnauthenticatedOrSubstitutedNodeBeforeIssuer(bool publication)
+        => await RejectUnauthenticatedBeforeIssuerAsync(publication ? ContactCoordinationTarget.Publication : ContactCoordinationTarget.Route);
+
+    [Fact]
+    public Task PublicationLeaseTerminalRejectsUnauthenticatedOrSubstitutedNodeBeforeIssuer() =>
+        RejectUnauthenticatedBeforeIssuerAsync(ContactCoordinationTarget.PublicationLease);
+
+    private async Task RejectUnauthenticatedBeforeIssuerAsync(ContactCoordinationTarget target)
     {
         var network = Bytes(16, 0x11);
         var artifacts = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x21);
         var issuer = new FixedIssuer(artifacts);
         var access = PeerAuthenticationFixture.Access();
-        var target = publication ? ContactCoordinationTarget.Publication : ContactCoordinationTarget.Route;
-        var bytes = publication ? Bytes(ContactPublicationAuthorityWireCodec.MinimumRequestBytes, 0x21) :
-            ContactRouteAuthorityWireCodec.EncodeRequest(Request(network, artifacts.Xra));
+        var publication = target == ContactCoordinationTarget.Publication;
+        var lease = target == ContactCoordinationTarget.PublicationLease;
+        var endpoint = lease ? DeepIdV2PublicationLeaseWireCodec.EndpointPath : publication ?
+            ContactPublicationAuthorityHostingExtensions.EndpointPath : ContactRouteAuthorityHostingExtensions.EndpointPath;
+        var media = lease ? DeepIdV2PublicationLeaseWireCodec.RequestMediaType : publication ?
+            ContactPublicationAuthorityWireCodec.RequestMediaType : ContactRouteAuthorityWireCodec.RequestMediaType;
+        var bytes = lease ? Bytes(DeepIdV2PublicationLeaseWireCodec.RequestBytes, 0x21) : publication ?
+            Bytes(ContactPublicationAuthorityWireCodec.MinimumRequestBytes, 0x21) :
+                ContactRouteAuthorityWireCodec.EncodeRequest(Request(network, artifacts.Xra));
         foreach (var mutation in new[] { "missing", "unknown", "duplicate", "upper", "expired", "future", "network", "target", "body", "nonce", "zero-signature" })
         {
             // Each hostile input gets an independent real admission budget; otherwise
             // the shared flood limiter legitimately returns 429 before body verification.
             await using var host = await StartAsync(new(network, access), issuer, new(network, access));
-            using var message = new HttpRequestMessage(HttpMethod.Post, publication ? ContactPublicationAuthorityHostingExtensions.EndpointPath :
-                ContactRouteAuthorityHostingExtensions.EndpointPath) { Content = new ByteArrayContent(bytes) };
-            message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(publication ? ContactPublicationAuthorityWireCodec.RequestMediaType :
-                ContactRouteAuthorityWireCodec.RequestMediaType);
+            using var message = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = new ByteArrayContent(bytes) };
+            message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(media);
             PeerAuthenticationFixture.Authenticate(message, mutation == "network" ? Bytes(16, 0x12) : network, target, bytes,
                 mutation == "expired" ? DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds() :
                 mutation == "future" ? DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds() : null,
@@ -103,14 +114,14 @@ public sealed class ContactRouteAuthorityHttpTests
             {
                 var changed = bytes.ToArray(); changed[^1] ^= 1;
                 message.Content = new ByteArrayContent(changed);
-                message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(publication ? ContactPublicationAuthorityWireCodec.RequestMediaType :
-                    ContactRouteAuthorityWireCodec.RequestMediaType);
+                message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(media);
             }
             using var response = await host.Client.SendAsync(message);
             Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
             Assert.Empty(await response.Content.ReadAsByteArrayAsync());
             Assert.True(response.Headers.CacheControl?.NoStore);
             Assert.Equal(0, issuer.CallCount);
+            Assert.Equal(0, host.LeaseIssuer.Calls);
         }
     }
 
@@ -129,11 +140,13 @@ public sealed class ContactRouteAuthorityHttpTests
     [Theory]
     [InlineData(ContactCoordinationTarget.Route)]
     [InlineData(ContactCoordinationTarget.Publication)]
+    [InlineData(ContactCoordinationTarget.PublicationLease)]
     public void ActualNodeSignatureBindsBothTargetsAndExactWindow(ContactCoordinationTarget target)
     {
         var network = Bytes(16, 0x11);
-        var body = Bytes(target == ContactCoordinationTarget.Route ? ContactRouteAuthorityWireCodec.MinimumRequestBytes :
-            ContactPublicationAuthorityWireCodec.MinimumRequestBytes, 0x22);
+        var body = Bytes(target switch { ContactCoordinationTarget.Route => ContactRouteAuthorityWireCodec.MinimumRequestBytes,
+            ContactCoordinationTarget.Publication => ContactPublicationAuthorityWireCodec.MinimumRequestBytes,
+            _ => DeepIdV2PublicationLeaseWireCodec.RequestBytes }, 0x22);
         var now = DateTimeOffset.FromUnixTimeMilliseconds(1_000_000);
         using var message = new HttpRequestMessage();
         PeerAuthenticationFixture.Authenticate(message, network, target, body, now.ToUnixTimeMilliseconds());
@@ -312,13 +325,15 @@ public sealed class ContactRouteAuthorityHttpTests
         builder.Services.TryAddSingleton<ContactResolveIssuanceAdmissionGate>();
         builder.Services.AddSingleton(issuer);
         builder.Services.AddSingleton<IContactPublicationThresholdIssuer, MustNotCallPublicationIssuer>();
+        var leaseIssuer = new MustNotCallPublicationLeaseIssuer();
+        builder.Services.AddSingleton<IContactPublicationLeaseIssuer>(leaseIssuer);
         var app = builder.Build();
         app.MapContactRouteAuthorityEndpoint(state);
         app.MapContactPublicationAuthorityEndpoint(publicationState);
         await app.StartAsync();
         var client = app.GetTestClient();
         client.BaseAddress = new Uri("https://authority.example/");
-        return new TestHost(app, client);
+        return new TestHost(app, client, leaseIssuer);
     }
 
     private static byte[] Bytes(int length, byte start) =>
@@ -360,9 +375,17 @@ public sealed class ContactRouteAuthorityHttpTests
             throw new InvalidOperationException("Unauthenticated publication must never reach the issuer.");
     }
 
-    private sealed class TestHost(WebApplication app, HttpClient client) : IAsyncDisposable
+    private sealed class MustNotCallPublicationLeaseIssuer : IContactPublicationLeaseIssuer
+    {
+        internal int Calls;
+        public ValueTask<ParsedDeepIdV2PublicationLease> IssueAsync(PublicationLeaseWireRequest request, CancellationToken ct)
+        { Calls++; throw new InvalidOperationException("Unauthenticated publication lease must never reach issuer."); }
+    }
+
+    private sealed class TestHost(WebApplication app, HttpClient client, MustNotCallPublicationLeaseIssuer leaseIssuer) : IAsyncDisposable
     {
         internal HttpClient Client { get; } = client;
+        internal MustNotCallPublicationLeaseIssuer LeaseIssuer { get; } = leaseIssuer;
 
         public async ValueTask DisposeAsync()
         {

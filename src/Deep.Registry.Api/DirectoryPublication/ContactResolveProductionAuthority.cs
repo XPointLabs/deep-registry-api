@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.XPointNetworkV1;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Sodium;
@@ -329,6 +330,7 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
     IContactResolveDtt1WitnessCustody,
     IContactRouteAuthorityWitnessCustody,
     IContactPublicationAuthorityWitnessCustody,
+    IContactPublicationLeaseWitnessCustody,
     IDisposable
 {
     private readonly byte[] networkId;
@@ -430,6 +432,14 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
             signers.Cast<IXpa1PublicationAuthorizationWitnessSigner>().ToArray());
     }
 
+    public ValueTask<IReadOnlyList<IDeepIdV2PublicationLeaseWitnessSigner>> GetPublicationLeaseSignersAsync(
+        VerifiedXPointNetworkAuthority authority, CancellationToken cancellationToken)
+    {
+        ValidateAuthority(authority, cancellationToken);
+        return ValueTask.FromResult<IReadOnlyList<IDeepIdV2PublicationLeaseWitnessSigner>>(
+            signers.Cast<IDeepIdV2PublicationLeaseWitnessSigner>().ToArray());
+    }
+
     public ValueTask<IReadOnlyList<IContactRouteAuthorityWitnessSigner>>
         GetRouteSignersAsync(
             VerifiedXPointNetworkAuthority authority,
@@ -492,6 +502,7 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
         IAccountDirectoryDtt1WitnessSigner,
         IAccountDirectoryAdh1WitnessSigner,
         IXpa1PublicationAuthorizationWitnessSigner,
+        IDeepIdV2PublicationLeaseWitnessSigner,
         IContactRouteAuthorityWitnessSigner,
         IDisposable
     {
@@ -533,6 +544,15 @@ internal sealed class FileContactResolveDtt1WitnessCustody :
             ReadOnlyMemory<byte> signingInput,
             CancellationToken cancellationToken) =>
             SignAsync(signingInput, cancellationToken);
+
+        public ValueTask<ReadOnlyMemory<byte>> SignPublicationLeaseAsync(
+            PublicationLeaseSigningRequest request, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            if (!CryptographicOperations.FixedTimeEquals(request.NetworkId.Span, networkId))
+                throw new CryptographicException("Witness custody rejected publication lease network.");
+            return SignAsync(request.SigningInput, cancellationToken);
+        }
 
         public async ValueTask<int> SignAsync(
             ContactRouteAuthoritySigningRequest request,
@@ -664,6 +684,8 @@ internal static class ContactResolveProductionAuthorityServiceCollectionExtensio
         services.TryAddSingleton<IContactRouteAuthorityWitnessCustody>(provider =>
             provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
         services.TryAddSingleton<IContactPublicationAuthorityWitnessCustody>(provider =>
+            provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
+        services.TryAddSingleton<IContactPublicationLeaseWitnessCustody>(provider =>
             provider.GetRequiredService<FileContactResolveDtt1WitnessCustody>());
         return services;
     }

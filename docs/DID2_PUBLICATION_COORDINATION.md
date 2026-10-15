@@ -88,3 +88,22 @@ disjoint scopes and malformed scope rejection. These are not device results.
 It does not attest platform secure storage, socket TLS, ONION, production
 deployment, dual-replica commit, mailbox delivery or physical device E2E.
 Full gates and protocol/API/vector repin remain the final business-batch gate.
+
+## Original-winner lease candidate
+
+[DR-0123](../../docs/survival-program/decisions/DR-0123-retained-publication-intent.md)
+owns the fresh XPL1 mutation lease and private target3 endpoint. Its bounded
+publisher-signed request is read through the existing peer-authenticated HTTPS
+coordination ingress, rate limiter and current proof/time/NET composition.
+The same configured witness custody signs the artifact-specific lease purpose;
+no new secret, public resolver or additional state journal is introduced.
+Read the exact completed reusable winner under the existing network lock and
+permanent generation fence. Verify current owner/device/DCA and the fresh
+publisher signature before witness access; recheck that same winner and current
+authority around every signing callback. Never reserve/increment/repair a row
+or replace its original bytes to renew permission. Missing/pending/corrupt
+winner, expired inner resource, revocation or changed assignment fails closed.
+The original request hash remains the two-store effect/receipt identity.
+The focused real-PostgreSQL/TestServer lane covers expired phase6, fresh leases,
+lost reply and exact protected adoption without another generation reservation;
+its signed replica fixture is not actual node durability or physical E2E.
