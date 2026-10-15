@@ -12,6 +12,64 @@ namespace Deep.Registry.Api.Tests;
 public sealed class AutomaticNtsTrustedTimeSourceTests
 {
     [Fact]
+    public async Task QueuedObservationUsesTheSameMonotonicInstantAsTheAdvancedLowerFloor()
+    {
+        using var world = new World();
+        using var source = world.Create();
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_100), 1_000, 1_000);
+        var acquisitionCompleted = 1_001UL;
+        var wait = Math.Min(7UL, (ulong)world.Policy.MaximumSourceSampleAgeSeconds - 1);
+        world.Sample = acquisitionCompleted + wait;
+        var before = await source.ReadAsync(default); // A concurrent reader advanced the protected lower bound.
+        var retained = File.ReadAllBytes(world.FloorPath);
+
+        source.AcceptObservations(world.Authority, world.Policy,
+            world.Observations(1_700_000_101), acquisitionCompleted, acquisitionCompleted);
+        var after = await source.ReadAsync(default);
+        Assert.Equal(before.ObservedUnixTime, after.ObservedUnixTime);
+        Assert.Equal(retained, File.ReadAllBytes(world.FloorPath));
+        // Queuing must not restart the original source-sample freshness clock.
+        world.Sample = acquisitionCompleted + world.Policy.MaximumSourceSampleAgeSeconds + 1;
+        await Assert.ThrowsAsync<ContactResolveDirectoryPackageUnavailableException>(async () => await source.ReadAsync(default));
+    }
+
+    [Theory]
+    [InlineData("expired")]
+    [InlineData("clock-reset")]
+    [InlineData("rollback")]
+    public async Task QueuedInvalidObservationCannotRewriteAnAdvancedLowerFloor(string defect)
+    {
+        using var world = new World();
+        using var source = world.Create();
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_100), 1_000, 1_000);
+        world.Sample = 1_001UL + Math.Min(7UL, (ulong)world.Policy.MaximumSourceSampleAgeSeconds - 1);
+        _ = await source.ReadAsync(default);
+        var retained = File.ReadAllBytes(world.FloorPath);
+        if (defect == "expired") world.Sample = 1_001UL + world.Policy.MaximumSourceSampleAgeSeconds + 1;
+        if (defect == "clock-reset") world.Sample = 1_000;
+        var observations = world.Observations(defect == "rollback" ? 1_700_000_090 : 1_700_000_101);
+        Assert.Throws<CryptographicException>(() => source.AcceptObservations(world.Authority,
+            world.Policy, observations, 1_001, 1_001));
+        Assert.Equal(retained, File.ReadAllBytes(world.FloorPath));
+    }
+
+    [Fact]
+    public async Task QueueAtOriginalFreshnessBoundaryDoesNotAuthorizeTheNextSecond()
+    {
+        using var world = new World();
+        using var source = world.Create();
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_100), 1_000, 1_000);
+        world.Sample = 1_000UL + world.Policy.MaximumSourceSampleAgeSeconds;
+        _ = await source.ReadAsync(default);
+        world.Sample++;
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_101), 1_001, 1_001);
+        var atBoundary = await source.ReadAsync(default);
+        Assert.Equal(1_700_000_101UL + world.Policy.MaximumSourceSampleAgeSeconds, atBoundary.ObservedUnixTime);
+        world.Sample++;
+        await Assert.ThrowsAsync<ContactResolveDirectoryPackageUnavailableException>(async () => await source.ReadAsync(default));
+    }
+
+    [Fact]
     public async Task RestartRequiresReattestationEvenWhenUptimeIncreasedAndRetainsLowerFloor()
     {
         using var world = new World();

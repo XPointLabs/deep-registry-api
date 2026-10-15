@@ -92,6 +92,24 @@ retained lower state is not a freshness anchor. Acquisition/floor failures
 make proof readiness unavailable without resetting state. Missing/corrupt
 startup custody is a fatal configuration error, not a transient network failure.
 
+An acquired NTS response can wait while readers advance the protected lower
+floor. The acceptance path now projects both source and prior-anchor intervals
+to the actual monotonic acceptance sample before intersecting the current floor.
+Its remaining sample age subtracts that queue delay: the original deadline does
+not restart. Stale/rolled-back samples, clock reset, missing/corrupt floors and
+policy expiry still reject without resetting or rewriting custody. No signed
+policy, source, key, wire, floor format or lifetime is changed.
+The deterministic queued-response regression originally failed with a false
+floor-rollback (`nts-queued-observation-red-01`). Matching focused
+`nts-queued-observation-03` passed37/0/0,
+native0, including the original freshness boundary and three queued invalid
+cases. `nts-queued-observation-02` retained3 fixture-setup failures because the new negative cases
+advanced beyond that fixture's original sample-age bound before testing the
+denial; their setup was corrected, not the production bound. These receipts are
+under artifacts/s05-current-publication-20261015/ and are not full PG/runtime or
+physical qualification. A deployed floor-rollback label alone does not identify
+this particular cause; retained runtime recovery must still be observed.
+
 Startup reacquisition and transient independent-floor/time unavailability are
 logged as warnings and still return readiness/proof 503. Invalid cryptographic,
 custody or configuration state remains Error severity. The head-renewal worker

@@ -167,9 +167,23 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
             throw new CryptographicException("Independent NTS source intervals do not close the live signed policy.");
         lock (gate)
         {
-            if (anchor is { } prior && completed >= prior.Sample && completed - prior.Sample <= prior.MaximumAge)
+            // Readers may have advanced the durable lower floor while this
+            // acquired response waited for this lock. Compare all intervals at
+            // one actual monotonic instant, not response-completion time versus
+            // a later persisted lower bound. Preserve the ORIGINAL freshness
+            // deadline; queuing never gives the observation a new lifetime.
+            ulong retainedLower;
+            using (var lease = DirectoryPublicationProtectedFile.AcquireLease(floorPath, default))
+                retainedLower = ReadFloor().Lower;
+            var accepted = sample();
+            if (accepted < completed || accepted - completed > policy.MaximumSourceSampleAgeSeconds)
+                throw new CryptographicException("NTS observation interval is invalid or stale.");
+            var queued = accepted - completed;
+            lower = checked(lower + queued);
+            upper = checked(upper + queued);
+            if (anchor is { } prior && accepted >= prior.Sample && accepted - prior.Sample <= prior.MaximumAge)
             {
-                var previousNow = checked(prior.Center + completed - prior.Sample);
+                var previousNow = checked(prior.Center + accepted - prior.Sample);
                 lower = Math.Max(lower, previousNow - prior.Radius);
                 upper = Math.Min(upper, checked(previousNow + prior.Radius));
             }
@@ -177,8 +191,7 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
             // Intersect new authenticated evidence with the retained lower
             // bound. An overlapping observation is not a rollback. Round the
             // enclosing integer interval upward, never one second below floor.
-            using (var lease = DirectoryPublicationProtectedFile.AcquireLease(floorPath, default))
-                lower = Math.Max(lower, ReadFloor().Lower);
+            lower = Math.Max(lower, retainedLower);
             if (upper < lower) throw new CryptographicException("Authenticated time would roll back its durable lower floor.");
             var radius = checked((uint)Math.Max(1UL, (upper - lower + 1) / 2));
             var center = checked(lower + radius);
@@ -187,7 +200,7 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
                 2UL * radius > policy.MaximumIntervalWidthSeconds)
                 throw new CryptographicException("NTS interval cannot be represented within witness policy.");
             PersistFloor(center - radius, default);
-            anchor = new(center, radius, completed, policy.MaximumSourceSampleAgeSeconds,
+            anchor = new(center, radius, accepted, checked((ushort)(policy.MaximumSourceSampleAgeSeconds - queued)),
                 Math.Min(policy.ExpiresAt, authority.ExpiresAt), authority.AuthorityCoreHash.ToArray());
         }
     }
