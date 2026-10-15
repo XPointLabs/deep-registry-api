@@ -19,6 +19,7 @@ using Deep.Registry.Api.DirectoryPublication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Sodium;
 
@@ -174,8 +175,10 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             builder.Services.AddSingleton<IContactPublicationThresholdIssuer>(publicationIssuer);
             builder.Services.AddSingleton<IContactPublicationLeaseIssuer>(new ProductionContactPublicationLeaseIssuer(
                 proofs, rootSource, distribution, custody, clock, publicationJournal));
-            builder.Services.AddSingleton<IContactPublicationWinnerReader>(new ProductionContactPublicationWinnerReader(
-                proofs, rootSource, distribution, clock, publicationJournal));
+            var winnerReadLog = new WinnerReadLogger();
+            var winnerReader = new ProductionContactPublicationWinnerReader(
+                proofs, rootSource, distribution, clock, publicationJournal, winnerReadLog);
+            builder.Services.AddSingleton<IContactPublicationWinnerReader>(winnerReader);
             var admissionTime = new AdmissionClock();
             builder.Services.AddSingleton<TimeProvider>(admissionTime);
             builder.Services.AddSingleton<ContactResolveIssuanceAdmissionGate>();
@@ -301,6 +304,20 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 Assert.Equal(firstPublicationRequest, ContactPublicationAuthorityWireCodec.EncodeRequest(publicationExchange.Request!));
                 Assert.Equal(1, publicationExchange.WinnerReads); Assert.Equal(1, publicationExchange.Calls);
                 Assert.Equal(2, publicationExchange.LeaseCalls); Assert.Equal(1, countedPublication.Calls);
+                Assert.Empty(winnerReadLog.Entries);
+                // A foreign original nonce cannot become recovery authority.
+                // Repeated failures use one fixed, rate-bounded diagnostic bucket;
+                // neither the request nor exception is passed to the logger.
+                var foreign = publicationExchange.WinnerReadRequest!.CanonicalBytes.ToArray();
+                foreign[56] ^= 1;
+                var foreignRead = DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(foreign);
+                for (var retry = 0; retry < 2; retry++)
+                    await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
+                        await winnerReader.ReadAsync(foreignRead, default));
+                var diagnostic = Assert.Single(winnerReadLog.Entries);
+                Assert.Equal("Publication winner read rejected: phase=Winner, category=rejected.", diagnostic.Text);
+                Assert.Null(diagnostic.Error);
+                Assert.Equal(1, countedPublication.Calls);
                 await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id=$1", db);
                 count.Parameters.Add(new() { Value = network }); Assert.Equal(1L, await count.ExecuteScalarAsync());
                 return;
@@ -737,10 +754,11 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
     private sealed class PublicationHttpExchange(HttpClient client, TimeProvider admissionTime) : IDid2ContactPublicationSource
     {
         internal int WinnerReads;
+        internal PublicationWinnerReadWireRequest? WinnerReadRequest;
         public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            operation.RequireActive(); WinnerReads++;
+            operation.RequireActive(); WinnerReads++; WinnerReadRequest = request;
             var exact = request.CanonicalBytes.ToArray();
             using var body = new ByteArrayContent(exact);
             body.Headers.ContentType = MediaTypeHeaderValue.Parse(DeepIdV2PublicationWinnerReadWireCodec.RequestMediaType);
@@ -794,6 +812,15 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
             if (LoseFirstResponse) { LoseFirstResponse = false; throw new IOException("Deliberate committed response loss."); }
             return Response;
         }
+    }
+
+    private sealed class WinnerReadLogger : ILogger<ProductionContactPublicationWinnerReader>
+    {
+        internal List<(string Text, Exception? Error)> Entries { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => true;
+        public void Log<TState>(LogLevel level, EventId id, TState state, Exception? error,
+            Func<TState, Exception?, string> formatter) => Entries.Add((formatter(state, error), error));
     }
 
     // Signed synthetic replica results exercise protected adoption, not node durability/device transport.
