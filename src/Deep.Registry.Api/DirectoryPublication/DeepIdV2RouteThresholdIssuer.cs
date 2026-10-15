@@ -16,8 +16,12 @@ internal sealed class ProductionContactRouteThresholdIssuer(
     XPointNetworkClosureDistribution networkSource,
     IContactRouteAuthorityWitnessCustody custody,
     IContactResolveTrustedTimeContextSource timeSource,
-    IDeepIdV2RouteThresholdJournal journal) : IContactRouteThresholdIssuer
+    IDeepIdV2RouteThresholdJournal journal,
+    ILogger<ProductionContactRouteThresholdIssuer>? logger = null) : IContactRouteThresholdIssuer
 {
+    private enum IssuePhase { Admission, Readiness, TrustedTime, Proof, Recipient, Network, Advertisement, Predecessor, Journal, Signers, Threshold, Currentness, Winner, Release }
+    private readonly long[] failureLogTimestamps = new long[(int)IssuePhase.Release + 1];
+
     public async ValueTask<ContactRouteAuthorityWireResponse> IssueAsync(
         ContactRouteAuthorityWireRequest request, CancellationToken cancellationToken)
     {
@@ -25,14 +29,21 @@ internal sealed class ProductionContactRouteThresholdIssuer(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         var ct = timeout.Token;
-        if (!networkSource.TryEnter()) throw new ContactRouteAuthorityUnavailableException();
+        if (!networkSource.TryEnter())
+        {
+            ReportRejection(IssuePhase.Admission, "busy");
+            throw new ContactRouteAuthorityUnavailableException();
+        }
+        var phase = IssuePhase.Readiness;
         try
         {
             await proofIssuer.RequireReadyAsync(ct).ConfigureAwait(false);
+            phase = IssuePhase.TrustedTime;
             var trusted = await timeSource.ReadAsync(ct).ConfigureAwait(false);
             trusted.Validate();
             // Coordination nonce is durable request identity, not a DTT challenge.
             var challenge = RandomNumberGenerator.GetBytes(32);
+            phase = IssuePhase.Proof;
             var proof = await proofIssuer.IssueAsync(new DeepIdV2DirectoryProofRequest(
                 request.NetworkId.Span, challenge, trusted.ServerBootId.Span,
                 trusted.ServerMonotonicSample, request.DirectoryLookupKey.Span,
@@ -41,11 +52,13 @@ internal sealed class ProductionContactRouteThresholdIssuer(
             var checkpoint = freshness.CurrentCheckpoint ?? throw new ContactRouteAuthorityRejectedException();
             var reading = await timeSource.ReadAsync(ct).ConfigureAwait(false);
             reading.Validate();
+            phase = IssuePhase.Recipient;
             var recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(freshness,
                 DeepIdV2ContactAuthorizationCodec.Verify(
                     DeepIdV2ContactAuthorizationCodec.Decode(request.ExactDca1.Span),
                     checkpoint.Binding, checkpoint.Directory),
                 reading.ServerBootId.Span, reading.ServerMonotonicSample);
+            phase = IssuePhase.Network;
             var authority = rootSource.Read();
             var frame = await networkSource.ReadAsync(ct).ConfigureAwait(false);
             var raw = XPointNetworkClosureWireCodec.DecodeResponse(frame);
@@ -54,17 +67,20 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                 raw.ExactNetworkPolicyChain, raw.ExactViewChain, raw.ExactHeadChain,
                 raw.ExactActiveNodeDescriptors, raw.ExactPlacementTopologyChain,
                 null, time, ct).ConfigureAwait(false);
+            phase = IssuePhase.Advertisement;
             await DeepIdV2ContactRouteVerifier.VerifyAdvertisementAsync(recipient,
                 network, authority, request.ExactXra1, time, ct).ConfigureAwait(false);
             VerifiedDeepIdV2ContactRoutePredecessor? predecessor = null;
             if (request.HasPredecessor)
             {
+                phase = IssuePhase.Predecessor;
                 predecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, network, authority,
                     request.ExactPredecessorXir1V2, request.ExactPredecessorRouteClosure, time, ct).ConfigureAwait(false);
                 await DeepIdV2ContactRouteVerifier.VerifyAdvertisementSuccessorAsync(recipient, network, authority,
                     predecessor, request.ExactXra1, time, ct).ConfigureAwait(false);
             }
 
+            phase = IssuePhase.Journal;
             var encoded = await journal.GetOrIssueAsync(request, async token =>
             {
                 var now = await timeSource.ReadAsync(token).ConfigureAwait(false);
@@ -78,12 +94,15 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                     BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span),
                     authority.ExpiresAt,
                     current.Authorization.Record.ExpiresAtUnixSeconds }.Min();
+                phase = IssuePhase.Signers;
                 var signers = await custody.GetRouteSignersAsync(authority, token).ConfigureAwait(false);
+                phase = IssuePhase.Threshold;
                 var candidate = predecessor is null ? await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(current,
                     network, authority, request.ExactXra1, signers, issued, expires,
                     time, token).ConfigureAwait(false) :
                     await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(current, network, authority,
                         predecessor, request.ExactXra1, signers, expires, time, token).ConfigureAwait(false);
+                phase = IssuePhase.Currentness;
                 await RequireSourcesCurrentAsync(freshness, frame, raw.ExactViewChain[^1], authority, token).ConfigureAwait(false);
                 return ContactRouteAuthorityWireCodec.EncodeResponse(request,
                     new ContactRouteAuthorityWireResponse(request.NetworkId.Span,
@@ -92,22 +111,39 @@ internal sealed class ProductionContactRouteThresholdIssuer(
                         freshness.ExactAdh1.Span));
             }, ct).ConfigureAwait(false);
 
+            phase = IssuePhase.Winner;
             var winner = ContactRouteAuthorityWireCodec.DecodeResponse(request, encoded.Span);
             _ = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, network,
                 authority, request, new ParsedDeepIdV2RouteThreshold(
                     winner.ExactPms2.Span, winner.ExactXrc1.Span, winner.ExactXss1.Span),
                 winner.ExactIssuanceAdh1, time, ct).ConfigureAwait(false);
+            phase = IssuePhase.Release;
             await RequireSourcesCurrentAsync(freshness, frame, raw.ExactViewChain[^1], authority, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             return winner;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        { throw new ContactRouteAuthorityUnavailableException(); }
+        { ReportRejection(phase, "deadline"); throw new ContactRouteAuthorityUnavailableException(); }
+        catch (OperationCanceledException)
+        { ReportRejection(phase, "caller-cancelled"); throw; }
         catch (Exception error) when (error is ArgumentException or FormatException or
             CryptographicException or OverflowException or OnionBoundaryException or
             ContactResolveDirectoryTargetNotFoundException)
-        { throw new ContactRouteAuthorityRejectedException(); }
+        { ReportRejection(phase, "authority"); throw new ContactRouteAuthorityRejectedException(); }
+        catch (Exception error) when (error is IOException or InvalidOperationException or Npgsql.NpgsqlException)
+        { ReportRejection(phase, error is ContactResolveDirectoryAdmissionException ? "proof-rate-limited" : "unavailable"); throw; }
         finally { networkSource.Exit(); }
+    }
+
+    private void ReportRejection(IssuePhase phase, string category)
+    {
+        // Fixed buckets only. No request, account, origin, exception or message
+        // is logged, and diagnostics cannot change issuance or retry certainty.
+        ref var timestamp = ref failureLogTimestamps[(int)phase];
+        var previous = Volatile.Read(ref timestamp);
+        if (previous != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(previous) < TimeSpan.FromSeconds(10)) return;
+        if (Interlocked.CompareExchange(ref timestamp, System.Diagnostics.Stopwatch.GetTimestamp(), previous) != previous) return;
+        logger?.LogWarning("Contact route issuer rejected: phase={Phase}, category={Category}.", phase, category);
     }
 
     private async ValueTask RequireSourcesCurrentAsync(VerifiedDeepIdV2DirectoryFreshness proof,
@@ -137,7 +173,8 @@ internal sealed class ProductionContactRouteThresholdIssuer(
         var journal = services.GetService<IDeepIdV2RouteThresholdJournal>();
         return proof is null || root is null || network is null || witnesses is null || time is null || journal is null
             ? new UnavailableContactRouteThresholdIssuer()
-            : new ProductionContactRouteThresholdIssuer(proof, root, network, witnesses, time, journal);
+            : new ProductionContactRouteThresholdIssuer(proof, root, network, witnesses, time, journal,
+                services.GetService<ILogger<ProductionContactRouteThresholdIssuer>>());
     }
 
     private sealed class CurrentClock(IContactResolveTrustedTimeContextSource source) : IOnionMonotonicClock

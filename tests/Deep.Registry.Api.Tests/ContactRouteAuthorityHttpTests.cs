@@ -22,6 +22,55 @@ namespace Deep.Registry.Api.Tests;
 public sealed class ContactRouteAuthorityHttpTests
 {
     [Fact]
+    public async Task BusyRouteIssuerReportsOnlyBoundedClosedAdmissionDiagnostic()
+    {
+        // Admission/diagnostics only; no signature, issuance or device claim.
+        var network = Bytes(16, 0x11);
+        var artifacts = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x21);
+        var request = Request(network, artifacts.Xra);
+        var path = Path.Combine(Path.GetTempPath(), "deep-route-admission-" + Guid.NewGuid().ToString("N") + ".bin");
+        await File.WriteAllBytesAsync(path, [1]);
+        try
+        {
+            using var distribution = new XPointNetworkClosureDistribution(new()
+            {
+                NetworkIdHex = Convert.ToHexStringLower(network), BundlePath = path
+            });
+            var log = new RouteAdmissionLogger();
+            var issuer = new ProductionContactRouteThresholdIssuer(null!, null!, distribution,
+                null!, null!, null!, log);
+            Assert.True(distribution.TryEnter());
+            try
+            {
+                for (var i = 0; i < 3; i++)
+                    await Assert.ThrowsAsync<ContactRouteAuthorityUnavailableException>(
+                        () => issuer.IssueAsync(request, default).AsTask());
+                Assert.False(distribution.TryEnter()); // Rejection did not release another owner's permit.
+                Assert.Equal("Contact route issuer rejected: phase=Admission, category=busy.", Assert.Single(log.Messages));
+                Assert.DoesNotContain(path, log.Messages[0]);
+                Assert.DoesNotContain(Convert.ToHexStringLower(network), log.Messages[0]);
+            }
+            finally { distribution.Exit(); }
+            Assert.True(distribution.TryEnter());
+            distribution.Exit();
+        }
+        finally { File.Delete(path); }
+    }
+
+    private sealed class RouteAdmissionLogger : Microsoft.Extensions.Logging.ILogger<ProductionContactRouteThresholdIssuer>
+    {
+        internal List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel level) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel level, Microsoft.Extensions.Logging.EventId id,
+            TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Assert.Null(exception);
+            Messages.Add(formatter(state, exception));
+        }
+    }
+
+    [Fact]
     public void IssuedHeadResponseIsV3OnlyBoundedAndDefensivelyOwned()
     {
         var network = Bytes(16, 0x11);

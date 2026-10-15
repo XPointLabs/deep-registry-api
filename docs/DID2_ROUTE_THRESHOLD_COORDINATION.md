@@ -26,6 +26,15 @@ issuer reuses that independent restore-authority database for its permanent
 route journal. Missing configuration, schema, network row, current floor,
 authority/time or signed closure fails closed.
 
+The route issuer reports only fixed phase/category diagnostics on rejection.
+Each phase has one ten-second process-local log bucket; no exception object,
+message, request, account, origin or signed bytes enter the log. `Admission/busy`
+means that this attempt did not acquire the existing bounded distribution
+permit, not that an earlier request did not commit. A deadline, authority or
+dependency rejection does not release a permanent generation fence or allow a
+new nonce. The actual issuance checks, HTTP response and journal semantics are
+unchanged by diagnostics.
+
 Before enabling, the operator executes
 [`sql/did2-route-threshold-journal.sql`](sql/did2-route-threshold-journal.sql)
 with a provisioning role and inserts exactly one intended network row with
