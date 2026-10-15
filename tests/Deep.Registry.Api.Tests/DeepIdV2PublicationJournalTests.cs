@@ -1,10 +1,99 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using Npgsql;
+using Deep.Protocol.ContactV1;
+using Deep.Registry.Api.DirectoryPublication;
+using XNode.IntegrationTests.Runtime;
 
 namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2PublicationJournalTests
 {
+    [Fact]
+    public async Task CompletedOriginalWinnerReadPreservesPermanentFenceAndRejectsPendingOrSubstitutedScope()
+    {
+        var database = Environment.GetEnvironmentVariable("DEEP_TEST_DID2_ROUTE_POSTGRES");
+        Assert.False(string.IsNullOrWhiteSpace(database), "Set the isolated route-test database.");
+        var schema = "did2_publication_recovery_" + Guid.NewGuid().ToString("N");
+        await using var admin = new NpgsqlConnection(database); await admin.OpenAsync();
+        await using (var create = new NpgsqlCommand($"CREATE SCHEMA \"{schema}\"", admin)) await create.ExecuteNonQueryAsync();
+        try
+        {
+            var scoped = new NpgsqlConnectionStringBuilder(database) { SearchPath = schema }.ConnectionString;
+            await using var db = new NpgsqlConnection(scoped); await db.OpenAsync();
+            await using (var provision = new NpgsqlCommand(await File.ReadAllTextAsync(
+                Path.Combine(AppContext.BaseDirectory, "Fixtures", "did2-publication-journal.sql")), db))
+                await provision.ExecuteNonQueryAsync();
+            using var fixture = await DeepIdV2PublicationAuthorityFixture.CreateAsync(authorContactPublication: true);
+            var request = fixture.ContactOwnedRequest;
+            var exactRequest = ContactPublicationAuthorityWireCodec.EncodeRequest(request);
+            var exactResponse = ContactPublicationAuthorityWireCodec.EncodeResponse(request,
+                new(request.NetworkId.Span, request.RequestNonce.Span, fixture.ContactPublication.CanonicalBytes.Span));
+            await using (var root = new NpgsqlCommand(
+                "INSERT INTO deep_did2_publication_journal_network(network_id,entry_count,maximum_entries) VALUES ($1,0,8)", db))
+            { root.Parameters.Add(new() { Value = request.NetworkId.ToArray() }); await root.ExecuteNonQueryAsync(); }
+            var issueCalls = 0;
+            using (var journal = new DeepIdV2PostgreSqlPublicationJournal(scoped, request.NetworkId.Span))
+                _ = await journal.GetOrIssueAsync(request, _ => { issueCalls++; return ValueTask.FromResult(exactResponse); }, default);
+            using var reopened = new DeepIdV2PostgreSqlPublicationJournal(scoped, request.NetworkId.Span);
+            var hash = fixture.ContactPublication.RequestHash;
+            // Storage read is deliberately not current request or dispatch
+            // authority: the original short envelope has elapsed in this fixture.
+            fixture.Sample += 120;
+            var winner = await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hash, default);
+            Assert.Equal(exactRequest, winner.Request.ToArray()); Assert.Equal(exactResponse, winner.Response.ToArray());
+            Assert.Equal(1, issueCalls);
+            var wrong = Enumerable.Repeat((byte)0xab, 32).ToArray();
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
+                await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, wrong, default));
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
+                await reopened.ReadCompletedWinnerAsync(request.RequestNonce, wrong, hash, default));
+            await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
+                await reopened.ReadCompletedWinnerAsync(wrong, request.DirectoryLookupKey, hash, default));
+            foreach (var hostile in new[] { new byte[31], new byte[32], new byte[33] })
+                await Assert.ThrowsAsync<ArgumentException>(async () =>
+                    await reopened.ReadCompletedWinnerAsync(hostile, request.DirectoryLookupKey, hash, default));
+            using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hash, cancellation.Token));
+            Assert.Equal(1, issueCalls);
+
+            using var pending = await DeepIdV2PublicationAuthorityFixture.CreateAsync(authorContactPublication: true,
+                contactPublicationMarker: 0x57);
+            var pendingRequest = pending.ContactOwnedRequest;
+            await Assert.ThrowsAsync<IOException>(async () => await reopened.GetOrIssueAsync(pendingRequest,
+                _ => { issueCalls++; throw new IOException("Injected response loss before winner commit."); }, default));
+            await Assert.ThrowsAsync<ContactPublicationAuthorityUnavailableException>(async () =>
+                await reopened.ReadCompletedWinnerAsync(pendingRequest.RequestNonce, pendingRequest.DirectoryLookupKey,
+                    pending.ContactPublication.RequestHash, default));
+            Assert.Equal(2, issueCalls);
+            await using (var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network", db))
+                Assert.Equal(2L, await count.ExecuteScalarAsync());
+            // Corruption remains corruption, never a new reservation or repair.
+            await using (var corrupt = new NpgsqlCommand(
+                "UPDATE deep_did2_publication_journal SET directory_lookup_key=$1 WHERE request_nonce=$2", db))
+            {
+                corrupt.Parameters.Add(new() { Value = wrong }); corrupt.Parameters.Add(new() { Value = request.RequestNonce.ToArray() });
+                Assert.Equal(1, await corrupt.ExecuteNonQueryAsync());
+            }
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await reopened.ReadCompletedWinnerAsync(request.RequestNonce, request.DirectoryLookupKey, hash, default));
+            await using (var audit = new NpgsqlCommand(
+                "SELECT exact_request,exact_response,directory_lookup_key FROM deep_did2_publication_journal WHERE request_nonce=$1", db))
+            {
+                audit.Parameters.Add(new() { Value = request.RequestNonce.ToArray() });
+                await using var read = await audit.ExecuteReaderAsync(); Assert.True(await read.ReadAsync());
+                Assert.Equal(exactRequest, read.GetFieldValue<byte[]>(0)); Assert.Equal(exactResponse, read.GetFieldValue<byte[]>(1));
+                Assert.Equal(wrong, read.GetFieldValue<byte[]>(2)); Assert.False(await read.ReadAsync());
+            }
+            Assert.Equal(2, issueCalls);
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA \"{schema}\" CASCADE", admin);
+            await cleanup.ExecuteNonQueryAsync();
+        }
+    }
+
     [Fact]
     public async Task PublicationSuccessorProvisionPreservesOpaqueAuditAndUnsignedPermanentFence()
     {
