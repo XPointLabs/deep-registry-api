@@ -99,6 +99,7 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
     private readonly byte[] network;
     private readonly string path;
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly SemaphoreSlim issuerWaiter = new(1, 1);
 
     internal XPointNetworkClosureDistribution(XPointNetworkClosureDistributionOptions options)
     {
@@ -115,6 +116,21 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
     }
 
     internal bool TryEnter() => gate.Wait(0);
+    // Keep one active operation, but allow one private current-publication
+    // issuer to wait behind a public send/renewal. Anonymous distribution and
+    // background refresh remain non-queuing. Cancellation uses the caller's
+    // existing whole-operation deadline, not a fresh issuance budget.
+    internal async ValueTask<bool> TryEnterCurrentIssuerAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!await issuerWaiter.WaitAsync(0, ct).ConfigureAwait(false)) return false;
+        try
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            return true;
+        }
+        finally { issuerWaiter.Release(); }
+    }
     internal void Exit() => gate.Release();
     internal bool Matches(ReadOnlySpan<byte> value) =>
         value.Length == network.Length && CryptographicOperations.FixedTimeEquals(value, network);
@@ -156,6 +172,6 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
         }
     }
 
-    public void Dispose() => gate.Dispose();
+    public void Dispose() { gate.Dispose(); issuerWaiter.Dispose(); }
 }
 #endif

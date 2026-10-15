@@ -31,11 +31,14 @@ internal sealed class ProductionContactPublicationCurrentIssuer(
         var original = request.OriginalRequest;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation); deadline.CancelAfter(TimeSpan.FromSeconds(30));
         var ct = deadline.Token;
-        if (!distribution.TryEnter())
-        { Report(IssuePhase.Admission, "busy"); throw new ContactPublicationAuthorityUnavailableException(); }
-        var phase = IssuePhase.Readiness;
+        var phase = IssuePhase.Admission;
+        var ownsAdmission = false;
         try
         {
+            ownsAdmission = await distribution.TryEnterCurrentIssuerAsync(ct).ConfigureAwait(false);
+            if (!ownsAdmission)
+            { Report(IssuePhase.Admission, "busy"); throw new ContactPublicationAuthorityUnavailableException(); }
+            phase = IssuePhase.Readiness;
             await proofs.RequireReadyAsync(ct).ConfigureAwait(false);
             phase = IssuePhase.Proof;
             var trusted = await timeSource.ReadAsync(ct).ConfigureAwait(false); trusted.Validate();
@@ -132,7 +135,7 @@ internal sealed class ProductionContactPublicationCurrentIssuer(
         { Report(phase, "authority"); throw new ContactPublicationAuthorityRejectedException(); }
         catch (Exception error) when (error is IOException or InvalidOperationException or Npgsql.NpgsqlException)
         { Report(phase, error is ContactResolveDirectoryAdmissionException ? "proof-rate-limited" : "unavailable"); throw; }
-        finally { distribution.Exit(); }
+        finally { if (ownsAdmission) distribution.Exit(); }
     }
 
     private void Report(IssuePhase phase, string category)

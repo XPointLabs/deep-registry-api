@@ -388,6 +388,17 @@ publication or physical message delivery; the guarded device retry remains requi
 
 ## Private DID2 contact coordination deployment
 
+Current reusable-publication issuance may wait for the existing shared
+distribution/renewal owner instead of immediately failing on contention. There
+is still at most one active operation and now at most one queued current issuer
+per process. A further issuer rejects without proof or journal/signing work;
+public closure fetches and background renewal remain non-queuing. Waiting uses
+the same original 30-second whole-operation deadline, with cancellation removing
+the waiter without releasing another owner's permit. After admission the full
+current proof, time, original-intent and permanent-winner checks still run;
+waiting never renews a signed resource or changes unknown completion to noncommit.
+This bounded scheduling change is not throughput or physical-delivery evidence.
+
 The current route/publication terminals require the existing production witness
 custody, trusted time, DID2 proof issuer, complete signed network bundle and
 independent floor connection. Provision the exact permanent schemas in that same

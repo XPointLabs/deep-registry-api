@@ -133,6 +133,79 @@ public sealed class XPointNetworkClosureDistributionHostingTests
     }
 
     [Fact]
+    public async Task CurrentIssuerWaitsForExistingOwnerWithOnlyOneQueuedIssuer()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.True(distribution.TryEnter());
+        var ownsExisting = true;
+        var ownsIssuer = false;
+        try
+        {
+            var waiting = distribution.TryEnterCurrentIssuerAsync(deadline.Token).AsTask();
+            Assert.False(waiting.IsCompleted);
+            Assert.False(await distribution.TryEnterCurrentIssuerAsync(deadline.Token));
+            Assert.False(distribution.TryEnter());
+            distribution.Exit(); ownsExisting = false;
+            ownsIssuer = await waiting;
+            Assert.True(ownsIssuer);
+            Assert.False(distribution.TryEnter());
+        }
+        finally
+        {
+            if (ownsExisting || ownsIssuer) distribution.Exit();
+        }
+        Assert.True(distribution.TryEnter());
+        distribution.Exit();
+    }
+
+    [Fact]
+    public async Task CancelledQueuedIssuerDoesNotReleaseAnotherOwnerOrRetainQueueSlot()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
+        using var cancelled = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.True(distribution.TryEnter());
+        var ownsExisting = true;
+        var ownsIssuer = false;
+        try
+        {
+            var waiting = distribution.TryEnterCurrentIssuerAsync(cancelled.Token).AsTask();
+            Assert.False(waiting.IsCompleted);
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+            Assert.False(distribution.TryEnter());
+            var replacement = distribution.TryEnterCurrentIssuerAsync(deadline.Token).AsTask();
+            Assert.False(replacement.IsCompleted);
+            Assert.False(await distribution.TryEnterCurrentIssuerAsync(deadline.Token));
+            distribution.Exit(); ownsExisting = false;
+            ownsIssuer = await replacement;
+            Assert.True(ownsIssuer);
+            Assert.False(distribution.TryEnter());
+        }
+        finally
+        {
+            if (ownsExisting || ownsIssuer) distribution.Exit();
+        }
+    }
+
+    [Fact]
+    public async Task AlreadyCancelledIssuerCannotAcquireAnAvailablePermit()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var distribution = fixture.App.Services.GetRequiredService<XPointNetworkClosureDistribution>();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            distribution.TryEnterCurrentIssuerAsync(cancelled.Token).AsTask());
+        Assert.True(await distribution.TryEnterCurrentIssuerAsync(default));
+        Assert.False(distribution.TryEnter());
+        distribution.Exit();
+    }
+
+    [Fact]
     public void EnabledConfigurationRequiresExplicitNonzeroScopeAndRegularAbsolutePublicFile()
     {
         Assert.Throws<InvalidOperationException>(() => new XPointNetworkClosureDistribution(new()
