@@ -92,8 +92,18 @@ internal sealed class ProductionContactPublicationWinnerReader(
         { ReportRejection(phase, "deadline"); throw new ContactPublicationAuthorityUnavailableException(); }
         catch (OperationCanceledException)
         { ReportRejection(phase, "caller-cancelled"); throw; }
-        catch (ContactPublicationAuthorityRejectedException)
-        { ReportRejection(phase, "rejected"); throw; }
+        catch (ContactPublicationAuthorityRejectedException error)
+        {
+            ReportRejection(phase, error.Data[typeof(PublicationWinnerLookupFailure)] switch
+            {
+                PublicationWinnerLookupFailure.Missing => "winner-missing",
+                PublicationWinnerLookupFailure.Kind => "winner-kind",
+                PublicationWinnerLookupFailure.Directory => "winner-directory",
+                PublicationWinnerLookupFailure.Digest => "winner-digest",
+                _ => "rejected"
+            });
+            throw;
+        }
         catch (Exception error) when (error is ArgumentException or FormatException or CryptographicException or OverflowException or
             OnionBoundaryException or ContactResolveDirectoryTargetNotFoundException)
         { ReportRejection(phase, "authority"); throw new ContactPublicationAuthorityRejectedException(); }

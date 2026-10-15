@@ -111,7 +111,9 @@ its signed replica fixture is not actual node durability or physical E2E.
 Completed-winner READ failures report only a closed phase/category, throttled to
 one entry per phase per ten seconds. No request, account, origin, capability,
 exception text or body is logged. `Winner/rejected` means no exact completed
-winner was accepted for the supplied original scope; it is not proof of
+winner was accepted for the supplied original scope. Closed `winner-missing`,
+`winner-kind`, `winner-directory` and `winner-digest` categories distinguish
+lookup rejection without disclosing that scope. None is proof of
 noncommit and never releases a reservation. Other phases isolate current
 proof, route, original-intent or fresh-request verification without changing
 the private endpoint's response or authority checks.

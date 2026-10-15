@@ -20,6 +20,9 @@ internal interface IDeepIdV2PublicationJournal
         Func<CancellationToken, ValueTask<byte[]>> issue, CancellationToken cancellationToken);
 }
 
+// Diagnostic-only closed values. These are not noncommit/fence-settlement facts.
+internal enum PublicationWinnerLookupFailure { Missing, Kind, Directory, Digest }
+
 /// <summary>Permanent exact winners in the independent restore-authority DB.
 /// No schema creation, empty-root initialization, deletion or expiring rows.</summary>
 internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2PublicationJournal, IDisposable
@@ -92,16 +95,26 @@ internal sealed class DeepIdV2PostgreSqlPublicationJournal : IDeepIdV2Publicatio
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         _ = await LockNetworkAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
         var retained = await ReadAsync(connection, transaction, nonce, cancellationToken).ConfigureAwait(false)
-            ?? throw new ContactPublicationAuthorityRejectedException();
-        if (retained.Parsed.PublicationKind != 1 || !Fixed(retained.Parsed.DirectoryLookupKey.Span, lookup) ||
-            !Fixed(Deep.Protocol.ContactV2.DeepIdV2PublicationWinnerReadWireCodec.HashOriginalRequest(retained.Parsed), hash))
-            throw new ContactPublicationAuthorityRejectedException();
+            ?? throw RejectWinnerLookup(PublicationWinnerLookupFailure.Missing);
+        if (retained.Parsed.PublicationKind != 1)
+            throw RejectWinnerLookup(PublicationWinnerLookupFailure.Kind);
+        if (!Fixed(retained.Parsed.DirectoryLookupKey.Span, lookup))
+            throw RejectWinnerLookup(PublicationWinnerLookupFailure.Directory);
+        if (!Fixed(Deep.Protocol.ContactV2.DeepIdV2PublicationWinnerReadWireCodec.HashOriginalRequest(retained.Parsed), hash))
+            throw RejectWinnerLookup(PublicationWinnerLookupFailure.Digest);
         if (retained.Response is null) throw new ContactPublicationAuthorityUnavailableException();
         _ = ContactPublicationAuthorityWireCodec.DecodeResponse(retained.Parsed, retained.Response);
         await RequireGenerationAsync(connection, transaction, retained.Parsed, retained.Request, cancellationToken).ConfigureAwait(false);
         _ = await RequirePredecessorAsync(connection, transaction, retained.Parsed, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested(); return (retained.Request.ToArray(), retained.Response.ToArray());
+    }
+
+    private static ContactPublicationAuthorityRejectedException RejectWinnerLookup(PublicationWinnerLookupFailure reason)
+    {
+        var rejected = new ContactPublicationAuthorityRejectedException();
+        rejected.Data[typeof(PublicationWinnerLookupFailure)] = reason;
+        return rejected;
     }
 
     private static byte[] CopyRecoveryScope(ReadOnlyMemory<byte> value)

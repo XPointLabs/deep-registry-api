@@ -315,7 +315,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                     await Assert.ThrowsAsync<ContactPublicationAuthorityRejectedException>(async () =>
                         await winnerReader.ReadAsync(foreignRead, default));
                 var diagnostic = Assert.Single(winnerReadLog.Entries);
-                Assert.Equal("Publication winner read rejected: phase=Winner, category=rejected.", diagnostic.Text);
+                Assert.Equal("Publication winner read rejected: phase=Winner, category=winner-missing.", diagnostic.Text);
                 Assert.Null(diagnostic.Error);
                 Assert.Equal(1, countedPublication.Calls);
                 await using var count = new NpgsqlCommand("SELECT entry_count FROM deep_did2_publication_journal_network WHERE network_id=$1", db);
