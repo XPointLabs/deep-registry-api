@@ -12,11 +12,46 @@ using XNode.IntegrationTests.Runtime;
 using Deep.Registry.Api.DirectoryPublication;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2MailboxGrantHttpTests
 {
+    [Theory]
+    [InlineData(0, false)] [InlineData(1, false)] [InlineData(2, false)]
+    [InlineData(3, false)] [InlineData(2, true)]
+    public void PrivateGrantDiagnosticsAreClosedBoundedAndDoNotEscape(int phaseValue, bool sinkThrows)
+    {
+        var phase = (DeepIdV2MailboxGrantAdmission.FailurePhase)phaseValue;
+        var admission = new DeepIdV2MailboxGrantAdmission(); var logger = new GrantDiagnosticLogger { Throw = sinkThrows };
+        var error = new CryptographicException("private-sentinel-do-not-log"); error.Data["private-key"] = "private-sentinel-do-not-log";
+        admission.Report(logger, phase, 400, error); admission.Report(logger, phase, 400, error);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(new[] { "Category", "CodeMethod", "CodeOffset", "Phase", "Status", "{OriginalFormat}" }, entry.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal("cryptographic", entry["Category"]); Assert.Equal(phase, entry["Phase"]); Assert.Equal(400, entry["Status"]);
+        Assert.Equal("Unclassified", entry["CodeMethod"]); Assert.Equal(-1, entry["CodeOffset"]);
+        Assert.All(entry.Values, value => Assert.DoesNotContain("private-sentinel", value?.ToString() ?? string.Empty));
+        Assert.All(logger.ExceptionArguments, value => Assert.Null(value));
+        Assert.True(admission.TryEnter()); admission.Exit(); // Diagnostic state is not admission/custody.
+    }
+
+    private sealed class GrantDiagnosticLogger : ILogger
+    {
+        internal bool Throw;
+        internal List<Dictionary<string, object?>> Entries { get; } = [];
+        internal List<Exception?> ExceptionArguments { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => true;
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add(((IEnumerable<KeyValuePair<string, object?>>)(object)state!).ToDictionary(pair => pair.Key, pair => pair.Value));
+            ExceptionArguments.Add(exception);
+            if (Throw) throw new InvalidOperationException("Injected diagnostic sink failure.");
+        }
+    }
+
     [Theory]
     [InlineData("ProductionMailbox", "false")]
     [InlineData("ProductionMailbox:Enabled", "false")]

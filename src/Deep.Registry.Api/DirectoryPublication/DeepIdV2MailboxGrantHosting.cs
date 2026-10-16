@@ -1,5 +1,6 @@
 #if DEEP_PROTOCOL_DIRECTORY_V1
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Deep.Protocol.ApplicationCore;
@@ -51,8 +52,41 @@ internal sealed class DeepIdV2ExternalMailboxGrantCustody : IDeepIdV2MailboxGran
 internal sealed class DeepIdV2MailboxGrantAdmission
 {
     private readonly SemaphoreSlim gate = new(1, 1);
+    internal enum FailurePhase { Body, Decode, Issue, Write }
+    private readonly long[] failureTimestamps = new long[4];
     internal bool TryEnter() => gate.Wait(0);
     internal void Exit() => gate.Release();
+
+    internal void Report(ILogger logger, FailurePhase phase, int status, Exception error)
+    {
+        try
+        {
+            ref var timestamp = ref failureTimestamps[(int)phase];
+            var previous = Volatile.Read(ref timestamp);
+            if (previous != 0 && Stopwatch.GetElapsedTime(previous) < TimeSpan.FromSeconds(10)) return;
+            if (Interlocked.CompareExchange(ref timestamp, Stopwatch.GetTimestamp(), previous) != previous) return;
+            var category = error switch {
+                CryptographicException => "cryptographic", UnauthorizedAccessException => "authorization",
+                OperationCanceledException => "cancelled", Npgsql.NpgsqlException => "database",
+                IOException => "io", InvalidOperationException => "state", _ => "canonical"
+            };
+            var origin = "Unclassified"; var offset = -1;
+            var trace = new StackTrace(error, false);
+            for (var index = 0; index < Math.Min(trace.FrameCount, 32); index++)
+            {
+                var frame = trace.GetFrame(index); var method = frame?.GetMethod(); var type = method?.DeclaringType;
+                if (type is null || type.Assembly.GetName().Name is not ("Deep.Registry.Api" or "Deep.Protocol" or "Deep.Protocol.MembershipRoutes")) continue;
+                var label = (type.DeclaringType is { } parent ? parent.Name + "+" : "") + type.Name + "." + method!.Name;
+                if (label.Length is < 1 or > 240 || !label.All(ch => char.IsAsciiLetterOrDigit(ch) || "_.+<>`".Contains(ch))) continue;
+                origin = label; offset = frame!.GetILOffset(); break;
+            }
+            // No exception object/message, request bytes, IDs, origin or key
+            // material enters the sink. This cannot authorize or reclassify work.
+            logger.LogWarning("Private mailbox issuance rejected: phase={Phase}, status={Status}, category={Category}, method={CodeMethod}, il={CodeOffset}.",
+                phase, status, category, origin, offset);
+        }
+        catch { /* Diagnostics cannot replace the original endpoint result. */ }
+    }
 }
 
 internal static class DeepIdV2MailboxGrantHosting
@@ -107,7 +141,8 @@ internal static class DeepIdV2MailboxGrantHosting
         app.MapPost(EndpointPath, HandleAsync).WithMetadata(new RequestSizeLimitAttribute(MaximumBodyBytes));
     }
 
-    private static async Task<IResult> HandleAsync(HttpContext context, DeepIdV2MailboxGrantIssuer issuer, DeepIdV2MailboxGrantAdmission admission)
+    private static async Task<IResult> HandleAsync(HttpContext context, DeepIdV2MailboxGrantIssuer issuer, DeepIdV2MailboxGrantAdmission admission,
+        ILogger<DeepIdV2MailboxGrantIssuer> logger)
     {
         if (!context.Request.IsHttps) return Results.StatusCode(403);
         if (context.Request.Path.Value != EndpointPath || context.Request.QueryString.HasValue) return Results.BadRequest();
@@ -118,23 +153,28 @@ internal static class DeepIdV2MailboxGrantHosting
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         var body = new byte[checked((int)context.Request.ContentLength.Value)];
+        var phase = DeepIdV2MailboxGrantAdmission.FailurePhase.Body;
         try
         {
             await context.Request.Body.ReadExactlyAsync(body, timeout.Token).ConfigureAwait(false);
             var trailing = new byte[1];
             if (await context.Request.Body.ReadAsync(trailing, timeout.Token).ConfigureAwait(false) != 0) return Results.BadRequest();
+            phase = DeepIdV2MailboxGrantAdmission.FailurePhase.Decode;
             var input = DecodeRequest(body);
+            phase = DeepIdV2MailboxGrantAdmission.FailurePhase.Issue;
             var exact = await issuer.IssueAsync(input, timeout.Token).ConfigureAwait(false);
+            phase = DeepIdV2MailboxGrantAdmission.FailurePhase.Write;
             context.Response.Headers.CacheControl = "no-store"; context.Response.Headers.XContentTypeOptions = "nosniff";
             context.Response.StatusCode = 200; context.Response.ContentType = ResponseMediaType; context.Response.ContentLength = exact.Length;
             await context.Response.Body.WriteAsync(exact, timeout.Token).ConfigureAwait(false); return Results.Empty;
         }
-        catch (UnauthorizedAccessException) when (!context.Response.HasStarted) { return Results.Unauthorized(); }
+        catch (UnauthorizedAccessException error) when (!context.Response.HasStarted)
+        { admission.Report(logger, phase, 401, error); return Results.Unauthorized(); }
         catch (Exception error) when (!context.Response.HasStarted && error is JsonException or ArgumentException or FormatException or OverflowException or CryptographicException or EndOfStreamException)
-        { return Results.BadRequest(); }
+        { admission.Report(logger, phase, 400, error); return Results.BadRequest(); }
         catch (Exception error) when (!context.Response.HasStarted && error is IOException or InvalidOperationException or OperationCanceledException or
             Npgsql.NpgsqlException or Deep.Protocol.DeepExtension.PrivacyRouting.OnionBoundaryException)
-        { return Results.StatusCode(503); }
+        { admission.Report(logger, phase, 503, error); return Results.StatusCode(503); }
         finally { CryptographicOperations.ZeroMemory(body); admission.Exit(); }
     }
 
