@@ -226,6 +226,35 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         { await reopened.RequireReadyAsync(default); await RequireHttpReadinessAsync(true); }
         Assert.Equal(nonceCount, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
         Assert.Equal(3, custody.Deposit.Inputs.Count); Assert.Single(custody.Retrieve.Inputs);
+
+        // Hold a real read-only readiness boundary, not a writer/DB transaction.
+        // Signed byte distribution has its own bounded owner; it must not be
+        // starved by an unrelated health probe. No proof/signing is started.
+        var readinessEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReadiness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var readinessPaused = 0;
+        clock.OnMonotonicRead = () =>
+        {
+            if (Interlocked.CompareExchange(ref readinessPaused, 1, 0) != 0) return;
+            readinessEntered.TrySetResult();
+            Assert.True(releaseReadiness.Task.Wait(TimeSpan.FromSeconds(5)));
+        };
+        var heldReadiness = Task.Run(async () => await reopened.RequireReadyAsync(default));
+        try
+        {
+            await readinessEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            using var response = await http.GetAsync(controlPath + "latest");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(deposit.ToArray(), await response.Content.ReadAsByteArrayAsync());
+            Assert.False(heldReadiness.IsCompleted);
+        }
+        finally
+        {
+            releaseReadiness.TrySetResult(); clock.OnMonotonicRead = null;
+            await heldReadiness.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.Equal(nonceCount, Directory.EnumerateFiles(requestsRoot, "*.request", SearchOption.AllDirectories).Count());
+        Assert.Equal(3, custody.Deposit.Inputs.Count); Assert.Single(custody.Retrieve.Inputs);
         var unchangedRefresh = reopened.RefreshAsync(default).AsTask();
         await Task.WhenAll(Enumerable.Range(0,3).Select(_=>reopened.RequireReadyAsync(default).AsTask()).Append(unchangedRefresh));
         Assert.Equal(nonceCount+1,Directory.EnumerateFiles(requestsRoot,"*.request",SearchOption.AllDirectories).Count());

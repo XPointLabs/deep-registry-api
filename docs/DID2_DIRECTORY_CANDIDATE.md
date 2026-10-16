@@ -138,6 +138,20 @@ Neither earlier run is reclassified, nor does the focused44 qualify the full
 source/runtime/release. Runtime performance and retained physical clients remain
 to be observed on this narrower source.
 
+Signed MGR byte distribution now has its own single non-queuing reader, separate
+from readiness/renewal exclusion. A slow read-only health probe cannot deny that
+unrelated control read merely by holding the readiness owner. Actual journal
+transactions still serialize exact signed winner/history selection against
+independent issuers; unsigned pending inputs are never responses. Scope,
+signature/host/source verification, before/after callbacks and the original
+five-second read budget remain. HTTP control admission still allows one request.
+`control-readiness-red-08` reproduced503 at the new concurrent-health assertion;
+matching `control-readiness-09` passed44/0/0/native0, including retained writers,
+pending/changed sources, stop/cancellation and TLS consumers. Its provider TRX is
+under `artifacts/s00/owned-monotonic-clock-07-8d1a76cecbb64142a8c065083027f390/`
+(the outer09 envelope names the exact native path; the provider lane label was
+not changed). This is focused provider evidence, not full or physical acceptance.
+
 Startup reacquisition and transient independent-floor/time unavailability are
 logged as warnings and still return readiness/proof 503. Invalid cryptographic,
 custody or configuration state remains Error severity. The head-renewal worker

@@ -19,6 +19,7 @@ internal sealed class MailboxRevocationAuthority(
     private readonly Npgsql.NpgsqlDataSource journalSource = Npgsql.NpgsqlDataSource.Create(connectionString);
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly SemaphoreSlim refreshFlight = new(1, 1);
+    private readonly SemaphoreSlim controlReads = new(1, 1);
     private DeepIdV2MailboxAuthorityContext? observedContext;
     private int stopped;
 
@@ -123,7 +124,12 @@ internal sealed class MailboxRevocationAuthority(
         RequireRunning(); ct.ThrowIfCancellationRequested();
         if (role is not (MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve) || generation is 0 or > 1_048_576)
             throw new ArgumentOutOfRangeException(nameof(generation));
-        if (!await gate.WaitAsync(0, ct).ConfigureAwait(false)) throw new IOException("Mailbox retained distribution is busy.");
+        // Raw signed-byte distribution has its own single bounded reader. A
+        // read-only health probe must not monopolize this lane. The journal's
+        // actual transaction still serializes winner/history selection with
+        // independent issuers; pending unsigned bytes can never be returned.
+        // Full source/host checks before and after that read remain mandatory.
+        if (!await controlReads.WaitAsync(0, ct).ConfigureAwait(false)) throw new IOException("Mailbox retained distribution is busy.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
         try
@@ -142,7 +148,7 @@ internal sealed class MailboxRevocationAuthority(
             await context.RequireCurrentAsync(deadline.Token).ConfigureAwait(false);
             RequireRunning(); deadline.Token.ThrowIfCancellationRequested(); return exact;
         }
-        finally { gate.Release(); }
+        finally { controlReads.Release(); }
     }
 
     private async ValueTask<ReadOnlyMemory<byte>[]> ReadCurrentPairAsync(DeepIdV2MailboxAuthorityContext context, CancellationToken ct)
