@@ -32,7 +32,7 @@ internal sealed class MailboxRevocationAuthority(
         if (!await refreshFlight.WaitAsync(0, ct).ConfigureAwait(false)) throw new IOException("Mailbox renewal is busy.");
         try
         {
-            await contexts.WithCurrentAsync(async (context, token) =>
+            await contexts.WithCurrentAsync(MailboxContextAdmission.Background, async (context, token) =>
             {
                 // Proof acquisition and unchanged journal reads are not writes.
                 // Publish only a freshly verified context under the owner;

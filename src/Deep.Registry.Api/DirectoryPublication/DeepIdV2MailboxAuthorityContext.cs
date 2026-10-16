@@ -12,18 +12,29 @@ namespace Deep.Registry.Api.DirectoryPublication;
 
 // One actual service-observer proof/network/time path shared by grant issuance
 // and revocation renewal. Neither a caller projection nor an unsigned manifest.
+internal enum MailboxContextAdmission { Background, PrivateIssuer }
+
 internal sealed class DeepIdV2MailboxAuthorityContextSource(
     DeepIdV2DirectoryProofIssuer proofs, DeepIdV2XPointAuthoritySource roots,
     XPointNetworkClosureDistribution distribution, IContactResolveTrustedTimeContextSource timeSource,
     ParsedDid2 observer)
 {
-    internal async ValueTask<T> WithCurrentAsync<T>(Func<DeepIdV2MailboxAuthorityContext, CancellationToken, ValueTask<T>> action,
+    internal async ValueTask<T> WithCurrentAsync<T>(MailboxContextAdmission admission,
+        Func<DeepIdV2MailboxAuthorityContext, CancellationToken, ValueTask<T>> action,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(action); cancellationToken.ThrowIfCancellationRequested();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(30)); var ct = deadline.Token;
-        if (!distribution.TryEnter()) throw new IOException("Mailbox authority is busy.");
+        // Scheduling only: share the existing single private-issuer waiter.
+        // Waiting spends this operation's original deadline and grants no trust.
+        // Background revocation refresh remains non-queuing.
+        var acquired = admission switch {
+            MailboxContextAdmission.Background => distribution.TryEnter(),
+            MailboxContextAdmission.PrivateIssuer => await distribution.TryEnterCurrentIssuerAsync(ct).ConfigureAwait(false),
+            _ => throw new ArgumentOutOfRangeException(nameof(admission))
+        };
+        if (!acquired) throw new IOException("Mailbox authority is busy.");
         try
         {
             await proofs.RequireReadyAsync(ct).ConfigureAwait(false);

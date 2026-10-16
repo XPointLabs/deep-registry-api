@@ -18,6 +18,75 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class DeepIdV2MailboxGrantHttpTests
 {
+    [Fact]
+    public async Task PrivateGrantContextWaitsWithinCallerBudgetWithoutReleasingAnotherOwner()
+    {
+        // Admission only: null dependencies must never be reached by a cancelled
+        // waiter. This is not proof, grant, signer, database or device evidence.
+        var path = Path.Combine(Path.GetTempPath(), "deep-grant-admission-" + Guid.NewGuid().ToString("N") + ".bin");
+        await File.WriteAllBytesAsync(path, [1]);
+        try
+        {
+            using var distribution = new XPointNetworkClosureDistribution(new() {
+                NetworkIdHex = new string('1', 32), BundlePath = path });
+            var source = new DeepIdV2MailboxAuthorityContextSource(null!, null!, distribution, null!, null!);
+            using var cancellation = new CancellationTokenSource(); var callbacks = 0;
+            Assert.True(distribution.TryEnter());
+            var waiting = source.WithCurrentAsync<int>(MailboxContextAdmission.PrivateIssuer,
+                (_, _) => { callbacks++; return ValueTask.FromResult(1); }, cancellation.Token).AsTask();
+            Exception? stopped = null;
+            try { Assert.False(waiting.IsCompleted); Assert.False(distribution.TryEnter()); }
+            finally { cancellation.Cancel(); stopped = await Record.ExceptionAsync(() => waiting); }
+            Assert.IsAssignableFrom<OperationCanceledException>(stopped);
+            Assert.Equal(0, callbacks); Assert.False(distribution.TryEnter());
+            distribution.Exit();
+            Assert.True(await distribution.TryEnterCurrentIssuerAsync(default)); distribution.Exit();
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Theory]
+    [InlineData("background")]
+    [InlineData("occupied-private-queue")]
+    [InlineData("unknown-mode")]
+    public async Task PrivateGrantAdmissionKeepsOneSharedWaiterAndBackgroundNonQueuing(string mode)
+    {
+        // Admission only; no proof/signature/database or delivery claim.
+        var path = Path.Combine(Path.GetTempPath(), "deep-grant-admission-" + Guid.NewGuid().ToString("N") + ".bin");
+        await File.WriteAllBytesAsync(path, [1]);
+        try
+        {
+            using var distribution = new XPointNetworkClosureDistribution(new() {
+                NetworkIdHex = new string('1', 32), BundlePath = path });
+            var source = new DeepIdV2MailboxAuthorityContextSource(null!, null!, distribution, null!, null!);
+            using var cancellation = new CancellationTokenSource(); var callbacks = 0;
+            Assert.True(distribution.TryEnter()); Task<bool>? queued = null;
+            try
+            {
+                if (mode == "occupied-private-queue") queued = distribution.TryEnterCurrentIssuerAsync(cancellation.Token).AsTask();
+                var selected = mode == "background" ? MailboxContextAdmission.Background :
+                    mode == "unknown-mode" ? (MailboxContextAdmission)99 : MailboxContextAdmission.PrivateIssuer;
+                Task<int> Attempt() => source.WithCurrentAsync<int>(selected,
+                    (_, _) => { callbacks++; return ValueTask.FromResult(1); }, default).AsTask();
+                if (mode == "unknown-mode") await Assert.ThrowsAsync<ArgumentOutOfRangeException>(Attempt);
+                else await Assert.ThrowsAsync<IOException>(Attempt);
+                Assert.Equal(0, callbacks); Assert.False(distribution.TryEnter());
+                queued ??= distribution.TryEnterCurrentIssuerAsync(cancellation.Token).AsTask();
+                Assert.False(queued.IsCompleted); // Rejection neither occupied nor released the other queue slot.
+                cancellation.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+                Assert.False(distribution.TryEnter());
+            }
+            finally
+            {
+                cancellation.Cancel();
+                if (queued is not null) _ = await Record.ExceptionAsync(() => queued);
+                distribution.Exit();
+            }
+            Assert.True(await distribution.TryEnterCurrentIssuerAsync(default)); distribution.Exit();
+        }
+        finally { File.Delete(path); }
+    }
+
     [Theory]
     [InlineData(0, false)] [InlineData(1, false)] [InlineData(2, false)]
     [InlineData(3, false)] [InlineData(2, true)]

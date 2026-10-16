@@ -70,7 +70,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         await Assert.ThrowsAsync<xnode::XNode.ContactServiceUnavailableException>(async () =>
             await client.AuthorizeAsync(Retained(currentRead, readUntil), default));
         Assert.Single(custody.Retrieve.Inputs); Assert.Equal(2L, await count.ExecuteScalarAsync());
-        var authored = await contexts.WithCurrentAsync(async (context, ct) =>
+        var authored = await contexts.WithCurrentAsync(MailboxContextAdmission.PrivateIssuer, async (context, ct) =>
             await context.Host.AuthorRetainedReadRequestAsync(original.ExactBytes, currentRead.Record.Field(3),
                 currentRead.Record.Field(4), holder, ct), default);
         var request = Retained(authored, readUntil);
@@ -100,7 +100,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var exact = await client.AuthorizeAsync(request, default);
         Assert.Equal(loss.CommittedReply, exact.ToArray()); Assert.Equal(2, custody.Retrieve.Inputs.Count);
         Assert.Equal(3L, await count.ExecuteScalarAsync());
-        await contexts.WithCurrentAsync(async (context, ct) => {
+        await contexts.WithCurrentAsync(MailboxContextAdmission.PrivateIssuer, async (context, ct) => {
             var verified = await context.Host.VerifyRetainedReadSuccessAsync(original.ExactBytes, authored.ExactXmg2, exact, ct);
             await verified.EnsureCurrentAsync(ct); Assert.Equal(MailboxCapabilityDomain.Retrieve, verified.Domain); return true;
         }, default);

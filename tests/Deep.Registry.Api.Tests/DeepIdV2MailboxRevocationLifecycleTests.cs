@@ -142,7 +142,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         Assert.Equal(intent, MailboxGrantRevocationV1Codec.Decode(historical.Span).SignatureInput.ToArray());
         var deposit = await reopened.ReadRetainedAsync(MailboxCapabilityDomain.Deposit, 2, default);
         var retrieve = await reopened.ReadRetainedAsync(MailboxCapabilityDomain.Retrieve, 1, default);
-        await contexts.WithCurrentAsync(async (context, ct) =>
+        await contexts.WithCurrentAsync(MailboxContextAdmission.Background, async (context, ct) =>
         {
             await Assert.ThrowsAsync<CryptographicException>(() => MailboxGrantRevocationV1Verifier.PlanInitialEnrollmentAsync(context.Host, historical, ct).AsTask());
             _ = await MailboxGrantRevocationV1Verifier.PlanAdvanceAsync(context.Host, historical, deposit, ct);
@@ -266,7 +266,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         var frame = await File.ReadAllBytesAsync(bundlePath);
         custody.Deposit.BeforeSign = async (_, ct) =>
         { var changed = frame.ToArray(); changed[^1] ^= 1; await File.WriteAllBytesAsync(bundlePath, changed, ct); };
-        await contexts.WithCurrentAsync(async (context, ct) =>
+        await contexts.WithCurrentAsync(MailboxContextAdmission.Background, async (context, ct) =>
         {
             var current = await context.ReadIntervalAsync(ct);
             using var journal = new MailboxRevocationJournal(scoped, network, reference, MailboxCapabilityDomain.Deposit,

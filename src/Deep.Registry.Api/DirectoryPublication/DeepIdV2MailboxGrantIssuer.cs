@@ -75,7 +75,7 @@ internal sealed class DeepIdV2MailboxGrantIssuer(
     DeepIdV2MailboxGrantReplayGuard replay)
 {
     internal ValueTask<ReadOnlyMemory<byte>> IssueAsync(DeepIdV2MailboxGrantInput input, CancellationToken cancellationToken) =>
-        contexts.WithCurrentAsync<ReadOnlyMemory<byte>>(async (context, ct) =>
+        contexts.WithCurrentAsync<ReadOnlyMemory<byte>>(MailboxContextAdmission.PrivateIssuer, async (context, ct) =>
         {
             var root = context.Root; var network = context.Network; var time = context.Time;
             if (!Fixed(root.NetworkId.Span, input.Request.Field(1).Span)) throw new CryptographicException("Private grant network differs.");
