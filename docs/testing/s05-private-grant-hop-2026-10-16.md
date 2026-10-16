@@ -57,9 +57,19 @@ Further native receipts under the same artifact prefix:
   exact winner retry after lost reply and background revocation recovery pass.
   Replica attestations are fixture-owned; this is not ONION/device acceptance.
 
-Matching activation and retained-account physical read remain required before
-calling this defect resolved on the device. Preserve every old unknown request;
-expired acquisition continuation is solely the owned transition, not manual remint.
+Matching supported local `build-10`/`up-11`/`smoke-12` exited0 with no compiler
+diagnostics. All9 desired images run. Raw mount comparison failed for7 bind
+representations; its original report remains unchanged, and the separate finite
+representation proof matches all54 originals with their read/write flags.
+Readiness recovered in68s; no account, key or volume reset occurred.
+
+Retained APK37 Refresh106 -> independent Inspect110 now reports completed
+incoming synchronization with no messaging error. Matching Windows build20
+also retained account/recovery, verified registration and completed its one
+incoming refresh without error. These are empty-mailbox read observations,
+not message/contact delivery or sustained acceptance. Every old unknown request
+remains owned; request expiry is not manual remint authority. Captured-page/ACK
+continuation and physical business/full/package gates remain open.
 
 The original device/server observations and node HTTP-hop mapping are in the
 [Node checkpoint](../../../xnode/docs/testing/s05-private-grant-hop-2026-10-16.md).
