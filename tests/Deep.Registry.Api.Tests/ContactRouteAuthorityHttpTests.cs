@@ -40,6 +40,9 @@ public sealed class ContactRouteAuthorityHttpTests
             var issuer = new ProductionContactRouteThresholdIssuer(null!, null!, distribution,
                 null!, null!, null!, log);
             Assert.True(distribution.TryEnter());
+            using var queuedCancellation = new CancellationTokenSource();
+            var queued = distribution.TryEnterCurrentIssuerAsync(queuedCancellation.Token).AsTask();
+            Assert.False(queued.IsCompleted);
             try
             {
                 for (var i = 0; i < 3; i++)
@@ -50,9 +53,59 @@ public sealed class ContactRouteAuthorityHttpTests
                 Assert.DoesNotContain(path, log.Messages[0]);
                 Assert.DoesNotContain(Convert.ToHexStringLower(network), log.Messages[0]);
             }
-            finally { distribution.Exit(); }
+            finally
+            {
+                queuedCancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+                distribution.Exit();
+            }
             Assert.True(distribution.TryEnter());
             distribution.Exit();
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task RouteIssuerWaitsWithinOriginalCancellationWithoutReleasingAnotherOwner()
+    {
+        // Admission only: no proof/signature/database or delivery claim.
+        var network = Bytes(16, 0x11);
+        var artifacts = ContactRouteClosureTransportTests.CanonicalTransportArtifacts.Create(network, 0x21);
+        var request = Request(network, artifacts.Xra);
+        var path = Path.Combine(Path.GetTempPath(), "deep-route-wait-" + Guid.NewGuid().ToString("N") + ".bin");
+        await File.WriteAllBytesAsync(path, [1]);
+        try
+        {
+            using var distribution = new XPointNetworkClosureDistribution(new()
+            {
+                NetworkIdHex = Convert.ToHexStringLower(network), BundlePath = path
+            });
+            var log = new RouteAdmissionLogger();
+            var issuer = new ProductionContactRouteThresholdIssuer(null!, null!, distribution,
+                null!, null!, null!, log);
+            using var cancellation = new CancellationTokenSource();
+            Assert.True(distribution.TryEnter());
+            var waiting = issuer.IssueAsync(request, cancellation.Token).AsTask();
+            try
+            {
+                Assert.False(waiting.IsCompleted);
+                Assert.False(distribution.TryEnter());
+            }
+            finally
+            {
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+                Assert.False(distribution.TryEnter());
+                distribution.Exit();
+            }
+            Assert.True(await distribution.TryEnterCurrentIssuerAsync(default));
+            distribution.Exit();
+            Assert.Equal("Contact route issuer rejected: phase=Admission, category=caller-cancelled.", Assert.Single(log.Messages));
+            Assert.All(log.Messages, message =>
+            {
+                Assert.DoesNotContain(path, message);
+                Assert.DoesNotContain(Convert.ToHexStringLower(network), message);
+            });
         }
         finally { File.Delete(path); }
     }

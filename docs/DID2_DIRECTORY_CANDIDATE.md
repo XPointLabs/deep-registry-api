@@ -448,9 +448,9 @@ publication or physical message delivery; the guarded device retry remains requi
 
 ## Private DID2 contact coordination deployment
 
-Current reusable-publication issuance may wait for the existing shared
+Private route and current reusable-publication issuance may wait for the existing shared
 distribution/renewal owner instead of immediately failing on contention. There
-is still at most one active operation and at most one queued current issuer
+is still at most one active operation and at most one queued private issuer
 per process. A further issuer rejects without proof or journal/signing work.
 Public closure fetches now have one separate admission waiter: a busy private
 owner need not cause all eight bounded client read attempts to fail with429.
@@ -462,6 +462,16 @@ the waiter without releasing another owner's permit. After admission the full
 current proof, time, original-intent and permanent-winner checks still run;
 waiting never renews a signed resource or changes unknown completion to noncommit.
 This bounded scheduling change is not throughput or physical-delivery evidence.
+The retained Android29 attempt reached the route backend and received503;
+the matching Registry log identifies `Admission/busy`. Route issuance now uses
+the same single private waiter as current publication, not an additional queue.
+No command is resubmitted and no proof, permanent winner or resource is renewed
+by waiting. The focused cancellation regression first failed on the old
+immediate-rejection path (`s05-route-admission-20261016/red-01`, native1/1FAIL).
+The corrected route HTTP/admission/distribution scope passed43/0/0/native0
+under Windows PowerShell5.1 / SDK10.0.301 (`green-02`). This is admission and
+TestServer evidence, not PostgreSQL issuance, deployed recovery or device E2E;
+the mandatory full source qualification and retained physical retest remain.
 The original deadline starts before public admission and covers both waiting
 and the existing complete response write. Cancelling a public waiter cannot
 release the active owner or the independent issuer waiter. Focused

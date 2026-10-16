@@ -29,14 +29,20 @@ internal sealed class ProductionContactRouteThresholdIssuer(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         var ct = timeout.Token;
-        if (!networkSource.TryEnter())
-        {
-            ReportRejection(IssuePhase.Admission, "busy");
-            throw new ContactRouteAuthorityUnavailableException();
-        }
-        var phase = IssuePhase.Readiness;
+        var phase = IssuePhase.Admission;
+        var ownsAdmission = false;
         try
         {
+            // Share the existing single private-issuer waiter. A transient
+            // public read/renewal must not force a new contact command. Waiting
+            // consumes the original deadline and grants no current authority.
+            ownsAdmission = await networkSource.TryEnterCurrentIssuerAsync(ct).ConfigureAwait(false);
+            if (!ownsAdmission)
+            {
+                ReportRejection(phase, "busy");
+                throw new ContactRouteAuthorityUnavailableException();
+            }
+            phase = IssuePhase.Readiness;
             await proofIssuer.RequireReadyAsync(ct).ConfigureAwait(false);
             phase = IssuePhase.TrustedTime;
             var trusted = await timeSource.ReadAsync(ct).ConfigureAwait(false);
@@ -132,7 +138,7 @@ internal sealed class ProductionContactRouteThresholdIssuer(
         { ReportRejection(phase, "authority"); throw new ContactRouteAuthorityRejectedException(); }
         catch (Exception error) when (error is IOException or InvalidOperationException or Npgsql.NpgsqlException)
         { ReportRejection(phase, error is ContactResolveDirectoryAdmissionException ? "proof-rate-limited" : "unavailable"); throw; }
-        finally { networkSource.Exit(); }
+        finally { if (ownsAdmission) networkSource.Exit(); }
     }
 
     private void ReportRejection(IssuePhase phase, string category)

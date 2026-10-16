@@ -121,8 +121,8 @@ internal sealed class XPointNetworkClosureDistribution : IDisposable
     }
 
     internal bool TryEnter() => gate.Wait(0);
-    // Keep one active operation, but allow one private current-publication
-    // issuer to wait behind a public send/renewal. Background refresh remains
+    // Keep one active operation, but allow one private route/current-publication
+    // issuer in total to wait behind a public send/renewal. Background refresh remains
     // non-queuing. Public requests have their own single admission waiter;
     // additional anonymous requests still reject without buffering a frame.
     // Cancellation uses the caller's
