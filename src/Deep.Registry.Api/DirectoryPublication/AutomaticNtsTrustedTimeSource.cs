@@ -294,7 +294,8 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
         {
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardInput = true, RedirectStandardOutput = true,
-            // No stderr is returned/logged; the observer emits no diagnostics.
+            // Stdout is the only observation channel. The owned helper's
+            // inherited stderr emits fixed categories only, never provider text.
         }) ?? throw new IOException("NTS observation process did not start.");
         observerPolicy = request;
     }
