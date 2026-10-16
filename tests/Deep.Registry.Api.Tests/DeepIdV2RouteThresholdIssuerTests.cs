@@ -14,6 +14,7 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Registry.Api.DirectoryPublication;
 using Microsoft.AspNetCore.Builder;
@@ -544,12 +545,35 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
                 await shortAccounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority, genesis.ExactAdh1, genesis.CoreHash));
             var shortSource = new DeepIdV2ContactPathAuthoritySource(bootstrap.GenesisPin, shortAccounts, shortProofClient, closure,
                 await shortAccounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin), clock);
-            var staged = await shortAccounts.EnsureOwnInitialPreKeyInventoryAsync(shortSource);
             var initial = await shortSource.VerifyForOwnPreKeyAuthoringAsync(shortAccounts, default);
             var currentCheckpoint = initial.Proof.CurrentCheckpoint!;
+            using (var author = await shortAccounts.OpenLocalPreKeyAuthoringAuthorityAsync())
+            {
+                // This route-issuer fixture needs real signed local support, not
+                // remote inventory dispatch. Use the explicit author/stage phases.
+                var issued = initial.Proof.TrustedLowerUnixSeconds;
+                var expires = Math.Min(checked(issued + 100),
+                    currentCheckpoint.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds);
+                var context = new Dpk2AuthoringContext(
+                    ApplicationCoreVerifier.StartDmd1Lineage(currentCheckpoint.Directory).Next,
+                    1, 1, 1, issued, issued, expires);
+                var service = author.AuthorPreKeyServiceV2(context, currentCheckpoint.Binding, 32, 1);
+                var placement = ContactServicePlacementFactory.Create(initial.Network,
+                    ContactServiceRequestKind.PublishPreKeyInventory, service.ServiceCapability);
+                var drs = new byte[38]; "DRS1"u8.CopyTo(drs);
+                BinaryPrimitives.WriteUInt16BigEndian(drs.AsSpan(4), 1);
+                currentCheckpoint.Binding.Identity.Revocations.Snapshot.CanonicalHash.Span.CopyTo(drs.AsSpan(6));
+                using var inventory = author.AuthorInventoryV2(context, currentCheckpoint.Binding, service, drs,
+                    new byte[32], Bytes(32, 0x87), placement.PlacementHash.Span, 32, 1);
+                await shortAccounts.StageOwnInitialPreKeyInventoryAsync(service, inventory);
+            }
+            var staged = (await shortAccounts.ReadOwnStagedPreKeyPublicationAsync())!;
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
                 currentCheckpoint.Binding, currentCheckpoint.Directory);
             var recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(initial.Proof, dca, clock.Boot, clock.Sample);
+            DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(currentCheckpoint.Binding.DeepId,
+                staged.ExactXps1.Span, recipient, DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span),
+                clock.Boot, clock.Sample);
             using var device = await new ProtectedDeepIdV2GenesisDeviceSecretsStore(shortStorage, network,
                 currentCheckpoint.Directory.Record.DeepAccountId.Span).ReadVerifiedAsync(
                     currentCheckpoint.Binding.Identity.ActiveDevices.Single(), default);
