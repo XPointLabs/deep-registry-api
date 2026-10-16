@@ -11,6 +11,42 @@ namespace Deep.Registry.Api.Tests;
 
 public sealed class AutomaticNtsTrustedTimeSourceTests
 {
+    [Fact]
+    public async Task MonotonicSamplingIsNotAnAuthenticatedTimeIntervalOrFloorWrite()
+    {
+        using var world = new World();
+        using var source = world.Create();
+        var first = await source.ReadMonotonicAsync(default);
+        Assert.Equal(world.Sample, first.SampleSeconds);
+        Assert.Equal(world.InitialFloor, File.ReadAllBytes(world.FloorPath));
+        await Assert.ThrowsAsync<ContactResolveDirectoryPackageUnavailableException>(async () => await source.ReadAsync(default));
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_100), 1_000, 1_000);
+        var trusted = await source.ReadAsync(default);
+        var floor = File.ReadAllBytes(world.FloorPath);
+        world.Sample = 1_001UL + world.Policy.MaximumSourceSampleAgeSeconds;
+        var expired = await source.ReadMonotonicAsync(default);
+        Assert.Equal(trusted.ServerBootId.ToArray(), expired.BootId.ToArray());
+        Assert.Equal(world.Sample, expired.SampleSeconds);
+        Assert.Equal(floor, File.ReadAllBytes(world.FloorPath));
+        await Assert.ThrowsAsync<ContactResolveDirectoryPackageUnavailableException>(async () => await source.ReadAsync(default));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await source.ReadMonotonicAsync(cancelled.Token));
+    }
+
+    [Fact]
+    public async Task MonotonicSamplingCannotRepairOrHideMissingAuthenticatedFloor()
+    {
+        using var world = new World();
+        using var source = world.Create();
+        source.AcceptObservations(world.Authority, world.Policy, world.Observations(1_700_000_100), 1_000, 1_000);
+        File.Delete(world.FloorPath);
+        _ = await source.ReadMonotonicAsync(default);
+        Assert.False(File.Exists(world.FloorPath));
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await source.ReadAsync(default));
+        Assert.False(File.Exists(world.FloorPath));
+    }
+
     [Theory]
     [InlineData(0, false)]
     [InlineData(1, false)]

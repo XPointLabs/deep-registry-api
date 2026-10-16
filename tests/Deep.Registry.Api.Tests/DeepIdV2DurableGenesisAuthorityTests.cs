@@ -488,6 +488,13 @@ public sealed partial class DeepIdV2DurableGenesisAuthorityTests
         public ulong UnixTime { get; set; } = unixTime;
         public bool WaitForCancellation { get; set; }
 
+        public async ValueTask<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading> ReadMonotonicAsync(
+            CancellationToken cancellationToken)
+        {
+            var current = await ReadAsync(cancellationToken);
+            return new(current.ServerBootId.Span, current.ServerMonotonicSample);
+        }
+
         public async ValueTask<ContactResolveTrustedTimeContext> ReadAsync(
             CancellationToken cancellationToken)
         {

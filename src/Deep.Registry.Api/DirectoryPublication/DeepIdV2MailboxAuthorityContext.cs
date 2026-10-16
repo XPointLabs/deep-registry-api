@@ -61,8 +61,7 @@ internal sealed class DeepIdV2MailboxAuthorityContextSource(
 
     private sealed class CurrentClock(IContactResolveTrustedTimeContextSource source) : IOnionMonotonicClock
     {
-        public async ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken ct)
-        { var now = await source.ReadAsync(ct).ConfigureAwait(false); now.Validate(); return new(now.ServerBootId.Span, now.ServerMonotonicSample); }
+        public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken ct) => source.ReadMonotonicAsync(ct);
     }
     private static bool Fixed(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
 }

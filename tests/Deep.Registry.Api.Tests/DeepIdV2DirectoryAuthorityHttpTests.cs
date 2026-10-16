@@ -1088,6 +1088,12 @@ public sealed partial class DeepIdV2DirectoryAuthorityHttpTests
     {
         private long unixTime = 1_700_000_400;
 
+        public ValueTask<OnionMonotonicReading> ReadMonotonicAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(new OnionMonotonicReading(Bytes(16, 0xc1), 4_000));
+        }
+
         internal void SetUnixTime(long value) =>
             Interlocked.Exchange(ref unixTime, value);
 

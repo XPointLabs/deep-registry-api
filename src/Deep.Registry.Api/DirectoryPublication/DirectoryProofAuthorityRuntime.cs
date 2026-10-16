@@ -32,6 +32,10 @@ internal readonly record struct ContactResolveTrustedTimeContext(
 internal interface IContactResolveTrustedTimeContextSource
 {
     ValueTask<ContactResolveTrustedTimeContext> ReadAsync(CancellationToken cancellationToken);
+    // Only the same owner's boot/sample. This supplies NO UTC interval,
+    // source freshness, durable floor or signing/admission authority.
+    ValueTask<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading> ReadMonotonicAsync(
+        CancellationToken cancellationToken);
 }
 
 

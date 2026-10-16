@@ -117,6 +117,27 @@ or identifiers enter logs. Focused `nts-acquisition-diagnostics-04` passed40/0/0
 native0, including the prior37 cases and distinct missing-quorum/stale-acquisition
 refusals with unchanged floor bytes. This is not full or deployed evidence.
 
+The internal time-source owner separately exposes its actual boot/monotonic
+sample, without UTC, source freshness or floor authority. Mailbox context's
+`IOnionMonotonicClock` now uses that reading to advance an already verified
+nonce-bound freshness proof, instead of reacquiring an NTS interval for every
+pure Protocol clock check. Initial proof acquisition, actual UTC interval reads,
+current source/floor checks, signer guards, journal callbacks and final release
+checks are unchanged. Manual protected-anchor custody retains its authenticated
+boot reader; there is no wall-clock, cached-current flag or alternate authority.
+Other contact issuers retain their former clock adapters in this bounded slice.
+
+Focused `owned-monotonic-clock-07` passed44/0/0/native0 through the supported
+disposable PostgreSQL provider:42 NTS cases and the actual mailbox renewal and
+TLS-proof/node-consumer cases. The new negatives prove monotonic sampling alone
+cannot supply trusted time, renew freshness, write/repair a missing floor or
+ignore cancellation. The broader unactivated candidate06 retained51PASS/5FAIL
+(mailbox readiness, PostgreSQL timeouts and native grant-cycle); candidate05
+retained42PASS/14 prerequisite FAIL because it lacked the required disposable DB.
+Neither earlier run is reclassified, nor does the focused44 qualify the full
+source/runtime/release. Runtime performance and retained physical clients remain
+to be observed on this narrower source.
+
 Startup reacquisition and transient independent-floor/time unavailability are
 logged as warnings and still return readiness/proof 503. Invalid cryptographic,
 custody or configuration state remains Error severity. The head-renewal worker

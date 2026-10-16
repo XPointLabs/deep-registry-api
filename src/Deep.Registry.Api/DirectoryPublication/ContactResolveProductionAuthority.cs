@@ -65,6 +65,15 @@ internal sealed class ProtectedMonotonicContactResolveTrustedTimeSource :
         RejectReparseIfPresent(this.statePath);
     }
 
+    public async ValueTask<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading> ReadMonotonicAsync(
+        CancellationToken cancellationToken)
+    {
+        // Manual custody may rotate its persisted boot ID. Read and verify that
+        // same protected owner rather than inventing another clock namespace.
+        var current = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        return new(current.ServerBootId.Span, current.ServerMonotonicSample);
+    }
+
     public async ValueTask<ContactResolveTrustedTimeContext> ReadAsync(
         CancellationToken cancellationToken)
     {

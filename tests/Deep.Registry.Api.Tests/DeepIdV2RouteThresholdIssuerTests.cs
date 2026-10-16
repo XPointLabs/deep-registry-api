@@ -993,6 +993,7 @@ public sealed partial class DeepIdV2RouteThresholdIssuerTests
         internal ulong UnixTime { get; set; } = 1_100;
         internal ulong Sample { get; set; } = 100;
         internal Action? OnMonotonicRead;
+        public ValueTask<OnionMonotonicReading> ReadMonotonicAsync(CancellationToken ct) => ReadAsync(ct);
         ValueTask<ContactResolveTrustedTimeContext> IContactResolveTrustedTimeContextSource.ReadAsync(CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); return ValueTask.FromResult(new ContactResolveTrustedTimeContext(Boot, Sample, UnixTime, 5)); }
         public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken ct)

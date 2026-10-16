@@ -58,6 +58,13 @@ internal sealed class AutomaticNtsTrustedTimeSource : BackgroundService,
         _ = ReadFloor();
     }
 
+    public ValueTask<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading> ReadMonotonicAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(new Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading(bootId, sample()));
+    }
+
     public ValueTask<ContactResolveTrustedTimeContext> ReadAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
