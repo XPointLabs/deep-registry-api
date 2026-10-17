@@ -135,21 +135,28 @@ internal sealed class ProductionContactRouteThresholdIssuer(
         catch (Exception error) when (error is ArgumentException or FormatException or
             CryptographicException or OverflowException or OnionBoundaryException or
             ContactResolveDirectoryTargetNotFoundException)
-        { ReportRejection(phase, "authority"); throw new ContactRouteAuthorityRejectedException(); }
+        { ReportRejection(phase, "authority", error); throw new ContactRouteAuthorityRejectedException(); }
         catch (Exception error) when (error is IOException or InvalidOperationException or Npgsql.NpgsqlException)
         { ReportRejection(phase, error is ContactResolveDirectoryAdmissionException ? "proof-rate-limited" : "unavailable"); throw; }
         finally { if (ownsAdmission) networkSource.Exit(); }
     }
 
-    private void ReportRejection(IssuePhase phase, string category)
+    private void ReportRejection(IssuePhase phase, string category, Exception? error = null)
     {
-        // Fixed buckets only. No request, account, origin, exception or message
-        // is logged, and diagnostics cannot change issuance or retry certainty.
-        ref var timestamp = ref failureLogTimestamps[(int)phase];
-        var previous = Volatile.Read(ref timestamp);
-        if (previous != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(previous) < TimeSpan.FromSeconds(10)) return;
-        if (Interlocked.CompareExchange(ref timestamp, System.Diagnostics.Stopwatch.GetTimestamp(), previous) != previous) return;
-        logger?.LogWarning("Contact route issuer rejected: phase={Phase}, category={Category}.", phase, category);
+        try
+        {
+            // Closed labels and bounded owned-code location only; no request,
+            // account, exception object/message or authority is released.
+            ref var timestamp = ref failureLogTimestamps[(int)phase];
+            var previous = Volatile.Read(ref timestamp);
+            if (previous != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(previous) < TimeSpan.FromSeconds(10)) return;
+            if (Interlocked.CompareExchange(ref timestamp, System.Diagnostics.Stopwatch.GetTimestamp(), previous) != previous) return;
+            var location = RouteAuthorityFailure.Locate(error);
+            var caller = RouteAuthorityFailure.Locate(error, 2);
+            logger?.LogWarning("Contact route issuer rejected: phase={Phase}, category={Category}, guard={Guard}, method={CodeMethod}, il={CodeOffset}, caller={CodeCaller}, callerIl={CallerOffset}.",
+                phase, category, RouteAuthorityFailure.Classify(error), location.Method, location.Offset, caller.Method, caller.Offset);
+        }
+        catch { /* Observations cannot replace the original issuance outcome. */ }
     }
 
     private async ValueTask RequireSourcesCurrentAsync(VerifiedDeepIdV2DirectoryFreshness proof,
